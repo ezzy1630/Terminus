@@ -5,12 +5,19 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { MissionBoardView } from "../src/components/MissionBoardView";
 import { buildDefaultCommands } from "../src/lib/command-catalog";
 import {
+  attentionReason,
+  attentionTone,
   boardColumnForStatus,
+  boardColumnForTaskPlacement,
   boardTransitionForDrop,
   directTaskActions,
+  taskEvidence,
   taskNeedsAttention,
   taskStatusLabel,
 } from "../src/lib/mission-board";
+import { compactDuration } from "../src/lib/time";
+import { useTerminusStore } from "../src/hooks/use-terminus";
+import type { Task } from "../src/types";
 import * as apiV2Module from "../src/lib/api-v2";
 import { arpV2 } from "../src/lib/api-v2";
 import type { ArpV2EventStream } from "../src/lib/api-v2";
@@ -21,6 +28,13 @@ import type {
   TaskV2Status,
 } from "../src/types/v2";
 
+/**
+ * Fixture timestamps are recent on purpose: Done folds work finished more than
+ * a day ago, so a fixed 2026 date would put every completed task behind the
+ * "earlier" disclosure and make unrelated assertions depend on the clock.
+ */
+const RECENT_ISO = new Date(Date.now() - 5 * 60_000).toISOString();
+
 function task(id: string, status: TaskV2Status, mission: string, version = 1): TaskV2Snapshot {
   return {
     id,
@@ -28,7 +42,7 @@ function task(id: string, status: TaskV2Status, mission: string, version = 1): T
     organizationId: "org-1",
     departmentId: "department-1",
     createdBy: "operator-1",
-    conversationContext: { sessionId: "session-1", threadId: "thread-1", attachedAt: "2026-08-23T12:00:00.000Z" },
+    conversationContext: { sessionId: "session-1", threadId: "thread-1", attachedAt: RECENT_ISO },
     contract: {
       version: 1,
       mission,
@@ -40,9 +54,9 @@ function task(id: string, status: TaskV2Status, mission: string, version = 1): T
     },
     status,
     version,
-    createdAt: "2026-08-23T12:00:00.000Z",
-    updatedAt: "2026-08-23T12:05:00.000Z",
-    completedAt: status === "COMPLETED" ? "2026-08-23T12:05:00.000Z" : null,
+    createdAt: RECENT_ISO,
+    updatedAt: RECENT_ISO,
+    completedAt: status === "COMPLETED" ? RECENT_ISO : null,
   };
 }
 
@@ -65,6 +79,31 @@ function question(taskId: string): MaterialQuestionSnapshot {
   };
 }
 
+function domainTask(id: string, patch: Partial<Task> = {}): Task {
+  return {
+    id,
+    session_id: "session-1",
+    thread_id: "thread-1",
+    status: "ACTIVE",
+    phase: "EXECUTE",
+    active_contract_version: 1,
+    risk_class: "normal",
+    created_at: RECENT_ISO,
+    updated_at: RECENT_ISO,
+    completed_at: null,
+    terminal_reason: null,
+    contract: null,
+    ...patch,
+  };
+}
+
+function seedDomainTasks(tasks: readonly Task[]): void {
+  useTerminusStore.setState({
+    taskById: Object.fromEntries(tasks.map((task) => [task.id, task])),
+    runActivityByTask: {},
+  });
+}
+
 function inertStream(): ArpV2EventStream {
   return {
     readyState: 1,
@@ -77,6 +116,7 @@ function inertStream(): ArpV2EventStream {
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
+  useTerminusStore.setState({ taskById: {}, runActivityByTask: {} });
   vi.restoreAllMocks();
 });
 
@@ -157,6 +197,93 @@ describe("mission board domain mapping", () => {
     expect(runningActions).toContainEqual({ label: "Pause", targetStatus: "PAUSED" });
     expect(runningActions).toContainEqual({ label: "Cancel", targetStatus: "CANCELLED", destructive: true });
     expect(directTaskActions(task("task-failed", "FAILED", "Failed task"))).toEqual([]);
+  });
+
+  test("says what the human owes rather than that something is owed", () => {
+    // The whole point: ten cards under "Needs you" used to be ten identical
+    // dots. Each of these is a different instruction to a person.
+    const asking = task("task-asking", "RUNNING", "Running task");
+    expect(attentionReason(asking, "working", undefined, [question(asking.id)]))
+      .toMatchObject({ kind: "question", label: "Answer this", detail: "Choose the compatibility behavior" });
+    expect(attentionReason(task("task-auth", "WAITING_AUTH", "Approval task"), "needs_you", undefined, []))
+      .toMatchObject({ kind: "approval", label: "Approve or deny" });
+    expect(attentionReason(task("task-paused", "PAUSED", "Paused task"), "needs_you", undefined, []))
+      .toMatchObject({ kind: "paused", label: "Paused" });
+  });
+
+  test("prefers the domain status, which v2 has already flattened into FAILED", () => {
+    // v1TaskStatusToV2 collapses BUDGET_EXHAUSTED and POLICY_DENIED into one
+    // v2 FAILED. Reading only the v2 status would tell a person "Failed" when
+    // the actual instruction is "raise the budget" or "make a call".
+    const denied = task("task-denied", "FAILED", "Denied task");
+    expect(attentionReason(denied, "failed", domainTask(denied.id, {
+      status: "POLICY_DENIED",
+      terminal_reason: { reason: "policy", message: "Writing outside the allowed scope." },
+    }), [])).toMatchObject({ kind: "policy", label: "Policy denied", detail: "Writing outside the allowed scope." });
+
+    const broke = task("task-budget", "FAILED", "Budget task");
+    expect(attentionReason(broke, "failed", domainTask(broke.id, { status: "BUDGET_EXHAUSTED" }), []))
+      .toMatchObject({ kind: "budget", label: "Out of budget" });
+  });
+
+  test("does not restate a column inside its own cards", () => {
+    // Review's header already says the changes are ready to read.
+    expect(attentionReason(task("task-partial", "PARTIAL", "Partial task"), "review", undefined, [])).toBeNull();
+    expect(attentionReason(task("task-running", "RUNNING", "Running task"), "working", undefined, [])).toBeNull();
+    expect(attentionReason(task("task-done", "COMPLETED", "Done task"), "done", undefined, [])).toBeNull();
+  });
+
+  test("separates broken work from work that is merely waiting on someone", () => {
+    expect(attentionTone("failure")).toBe("error");
+    expect(attentionTone("policy")).toBe("error");
+    expect(attentionTone("budget")).toBe("error");
+    expect(attentionTone("question")).toBe("warning");
+    expect(attentionTone("approval")).toBe("warning");
+    expect(attentionTone("paused")).toBe("warning");
+  });
+
+  test("orders the attention column by what is cheapest to discharge", () => {
+    const rank = (status: TaskV2Status, lifecycle: Parameters<typeof attentionReason>[1]): number =>
+      attentionReason(task(`task-${status}`, status, status), lifecycle, undefined, [])?.rank ?? Number.MAX_SAFE_INTEGER;
+    expect(rank("WAITING_USER", "needs_you")).toBeLessThan(rank("WAITING_AUTH", "needs_you"));
+    expect(rank("WAITING_AUTH", "needs_you")).toBeLessThan(rank("FAILED", "failed"));
+    expect(rank("FAILED", "failed")).toBeLessThan(rank("PAUSED", "needs_you"));
+  });
+
+  test("pulls a running task with a pending question into the attention column", () => {
+    // Otherwise the one column that exists to be the complete list of what
+    // needs a human is not the complete list of what needs a human.
+    expect(boardColumnForTaskPlacement("working", true)).toBe("needs_you");
+    expect(boardColumnForTaskPlacement("working", false)).toBe("working");
+    // A stale question must not drag finished work back out of Done.
+    expect(boardColumnForTaskPlacement("done", true)).toBe("done");
+    expect(boardColumnForTaskPlacement("cancelled", true)).toBe("done");
+    expect(boardColumnForTaskPlacement("failed", true)).toBe("needs_you");
+  });
+
+  test("states elapsed time and spend only where the client was actually told them", () => {
+    const now = Date.parse("2026-08-28T12:00:00.000Z");
+    const running = domainTask("task-elapsed", {
+      active_turn: { id: "turn-1", state: "RUNNING", started_at: "2026-08-28T11:48:00.000Z" },
+    });
+    expect(taskEvidence(running, "working", now).elapsed).toBe("12m");
+    // Not running: elapsed would be the age of a turn that already ended.
+    expect(taskEvidence(running, "idle", now).elapsed).toBeNull();
+    // The list route omits the ledger. An unloaded task says nothing rather
+    // than claiming this one was free.
+    expect(taskEvidence(domainTask("task-bare"), "working", now).budget).toBeNull();
+    expect(taskEvidence(undefined, "working", now)).toEqual({ elapsed: null, budget: null });
+  });
+
+  test("formats elapsed time at card width", () => {
+    const now = Date.parse("2026-08-28T12:00:00.000Z");
+    expect(compactDuration("2026-08-28T11:59:12.000Z", now)).toBe("48s");
+    expect(compactDuration("2026-08-28T11:56:00.000Z", now)).toBe("4m");
+    expect(compactDuration("2026-08-28T10:48:00.000Z", now)).toBe("1h 12m");
+    expect(compactDuration("2026-08-26T12:00:00.000Z", now)).toBe("2d");
+    // Clock skew against the control plane is not negative elapsed time.
+    expect(compactDuration("2026-08-28T12:00:30.000Z", now)).toBe("0s");
+    expect(compactDuration("not a date", now)).toBeNull();
   });
 
   test("treats material questions and actionable task states as attention", () => {
@@ -267,6 +394,145 @@ describe("MissionBoardView", () => {
       7,
     ));
     expect(await screen.findByText("Moved Repair OAuth callback to Working.")).toBeInTheDocument();
+  });
+
+  test("names the obligation on each card instead of a column of identical dots", async () => {
+    const asking = task("task-question", "RUNNING", "Repair OAuth callback");
+    const denied = task("task-denied", "FAILED", "Rewrite the migration");
+    seedDomainTasks([domainTask("task-denied", {
+      status: "POLICY_DENIED",
+      terminal_reason: { reason: "policy_denied", message: "Writing outside the allowed scope." },
+    })]);
+    vi.spyOn(arpV2, "listTasks").mockResolvedValue([asking, denied]);
+    vi.spyOn(arpV2, "listMaterialQuestions").mockResolvedValue([question(asking.id)]);
+    vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
+
+    render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
+
+    const attention = await screen.findByTestId("mission-board-column-needs_you");
+    // Each card says which of the four different things it wants.
+    expect(attention).toHaveTextContent("Answer this");
+    expect(attention).toHaveTextContent("Choose the compatibility behavior");
+    expect(attention).toHaveTextContent("Policy denied");
+    expect(attention).toHaveTextContent("Writing outside the allowed scope.");
+    // The agent is still RUNNING, but what it needs is already on the table,
+    // so the card is where a human looks for work rather than in Working.
+    expect(attention).toHaveTextContent("Repair OAuth callback");
+    expect(screen.getByTestId("mission-board-column-working")).not.toHaveTextContent("Repair OAuth callback");
+    // And the header count agrees with the column instead of running its own
+    // parallel attention arithmetic.
+    expect(screen.getByRole("button", { name: /Show only the 2 tasks that need you/ })).toBeInTheDocument();
+  });
+
+  test("folds finished work older than a day rather than letting Done grow forever", async () => {
+    const stale = {
+      ...task("task-stale", "COMPLETED", "Audit authentication"),
+      completedAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1_000).toISOString(),
+    };
+    vi.spyOn(arpV2, "listTasks").mockResolvedValue([stale, task("task-fresh", "COMPLETED", "Ship token refresh")]);
+    vi.spyOn(arpV2, "listMaterialQuestions").mockResolvedValue([]);
+    vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
+    const user = userEvent.setup();
+
+    render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
+
+    const done = await screen.findByTestId("mission-board-column-done");
+    expect(done).toHaveTextContent("Ship token refresh");
+    expect(done).not.toHaveTextContent("Audit authentication");
+    // Folded, not hidden: the count is the affordance and one click undoes it.
+    await user.click(screen.getByRole("button", { name: "1 earlier" }));
+    expect(done).toHaveTextContent("Audit authentication");
+  });
+
+  test("crosses the board with the arrow keys and opens with Enter", async () => {
+    const onOpenTask = vi.fn();
+    vi.spyOn(arpV2, "listTasks").mockResolvedValue([
+      task("task-a", "READY", "Add token refresh"),
+      task("task-b", "READY", "Rotate the signing key"),
+      task("task-c", "COMPLETED", "Audit authentication"),
+    ]);
+    vi.spyOn(arpV2, "listMaterialQuestions").mockResolvedValue([]);
+    vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
+
+    render(<MissionBoardView onOpenTask={onOpenTask} onInspectTask={() => {}} />);
+
+    const first = await screen.findByTestId("mission-board-card-task-a");
+    // One tab stop for the whole board, then arrows.
+    expect(first).toHaveAttribute("tabindex", "0");
+    expect(screen.getByTestId("mission-board-card-task-b")).toHaveAttribute("tabindex", "-1");
+
+    first.focus();
+    fireEvent.keyDown(first, { key: "ArrowDown" });
+    expect(screen.getByTestId("mission-board-card-task-b")).toHaveFocus();
+
+    // Working, Needs you and Review are all empty. An empty column must not
+    // swallow the keypress and strand the user in Queued.
+    fireEvent.keyDown(screen.getByTestId("mission-board-card-task-b"), { key: "ArrowRight" });
+    const done = screen.getByTestId("mission-board-card-task-c");
+    expect(done).toHaveFocus();
+
+    fireEvent.keyDown(done, { key: "Enter" });
+    expect(onOpenTask).toHaveBeenCalledWith(expect.objectContaining({ id: "task-c" }));
+
+    fireEvent.keyDown(done, { key: " " });
+    expect(screen.getByRole("complementary", { name: "Task quick view" })).toBeInTheDocument();
+  });
+
+  test("gives the mouse every route the keyboard has", async () => {
+    const onOpenTask = vi.fn();
+    vi.spyOn(arpV2, "listTasks").mockResolvedValue([task("task-mouse", "READY", "Add token refresh")]);
+    vi.spyOn(arpV2, "listMaterialQuestions").mockResolvedValue([]);
+    vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
+    const user = userEvent.setup();
+
+    render(<MissionBoardView onOpenTask={onOpenTask} onInspectTask={() => {}} />);
+    const card = await screen.findByTestId("mission-board-card-task-mouse");
+
+    // Clicking the body previews, the same as Space. The card body used to be
+    // dead space: only the title and the overflow trigger did anything.
+    await user.click(card);
+    expect(screen.getByRole("complementary", { name: "Task quick view" })).toBeInTheDocument();
+    expect(onOpenTask).not.toHaveBeenCalled();
+    // And it takes keyboard focus, so the arrows work from wherever the mouse
+    // left off rather than from wherever Tab last was.
+    expect(card).toHaveFocus();
+
+    // Double click opens, the same as Enter.
+    await user.dblClick(card);
+    expect(onOpenTask).toHaveBeenCalledWith(expect.objectContaining({ id: "task-mouse" }));
+  });
+
+  test("does not treat a click on the card's own controls as a click on the card", async () => {
+    const onOpenTask = vi.fn();
+    vi.spyOn(arpV2, "listTasks").mockResolvedValue([task("task-controls", "READY", "Add token refresh")]);
+    vi.spyOn(arpV2, "listMaterialQuestions").mockResolvedValue([]);
+    vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
+    const user = userEvent.setup();
+
+    render(<MissionBoardView onOpenTask={onOpenTask} onInspectTask={() => {}} />);
+    await screen.findByTestId("mission-board-card-task-controls");
+
+    // The title opens rather than previewing, even though the card underneath
+    // it previews on click.
+    await user.click(screen.getByRole("button", { name: "Open Add token refresh" }));
+    expect(onOpenTask).toHaveBeenCalledWith(expect.objectContaining({ id: "task-controls" }));
+    expect(screen.queryByRole("complementary", { name: "Task quick view" })).not.toBeInTheDocument();
+  });
+
+  test("offers the card actions on right click as well as from the overflow trigger", async () => {
+    vi.spyOn(arpV2, "listTasks").mockResolvedValue([task("task-menu", "READY", "Add token refresh")]);
+    vi.spyOn(arpV2, "listMaterialQuestions").mockResolvedValue([]);
+    vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
+
+    render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
+    const card = await screen.findByTestId("mission-board-card-task-menu");
+
+    fireEvent.contextMenu(card);
+
+    const menu = await screen.findByRole("menu");
+    expect(menu).toHaveTextContent("Open conversation");
+    expect(menu).toHaveTextContent("Start");
+    expect(menu).toHaveTextContent("Cancel");
   });
 
   test("refreshes from canonical state after a relevant live event", async () => {

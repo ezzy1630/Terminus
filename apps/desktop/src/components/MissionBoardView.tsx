@@ -3,26 +3,25 @@ import {
   Archive,
   Check,
   ChevronDown,
-  ChevronRight,
-  CircleDashed,
   CircleDot,
   Columns3,
   List,
   MoreHorizontal,
   Pause,
-  Play,
-  Plus,
   RefreshCw,
   Search,
   X,
 } from "lucide-react";
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type DragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-logical-mutation";
 import { useTerminusStore } from "../hooks/use-terminus";
@@ -31,21 +30,26 @@ import { arpV2, subscribeEventsV2 } from "../lib/api-v2";
 import { cn } from "../lib/cn";
 import {
   MISSION_BOARD_COLUMNS,
+  attentionReason,
+  attentionTone,
   boardColumnForStatus,
-  boardColumnForTaskLifecycle,
+  boardColumnForTaskPlacement,
   boardLifecycle,
   boardTransitionForDrop,
   directTaskActions,
-  taskNeedsAttention,
+  taskEvidence,
   taskStatusLabel,
+  type AttentionReason,
   type MissionBoardColumnId,
 } from "../lib/mission-board";
+import type { BudgetTone } from "../lib/task-budget";
 import { lifecycleIsActive, lifecycleLabel, lifecycleTone, type TaskLifecycle } from "../lib/task-lifecycle";
 import { relativeTimestamp } from "../lib/time";
 import { Button } from "../ui/Button";
 import { DialogSurface } from "../ui/Dialog";
 import { IconButton } from "../ui/IconButton";
-import { Menu, type MenuItem } from "../ui/Menu";
+import { ContextMenu, Menu, type MenuItem } from "../ui/Menu";
+import { StatusIndicator } from "./StatusIndicator";
 import type {
   MaterialQuestionSnapshot,
   TaskV2Snapshot,
@@ -74,6 +78,18 @@ const BOARD_CURSOR_KEY = "terminus-desktop.v2-board-cursor.v1";
 const STREAM_REFRESH_DELAY_MS = 120;
 const STREAM_RECONNECT_BASE_MS = 500;
 const STREAM_RECONNECT_MAX_MS = 8_000;
+/**
+ * How often the elapsed-time readout on running cards is recomputed. Only
+ * armed while something is actually running, so a quiet board holds no timer.
+ */
+const ELAPSED_TICK_MS = 30_000;
+/**
+ * Done is the one column that only ever grows. Work finished within the last
+ * day is what a person is still deciding about; everything older is history,
+ * and history left on the board is the "board overload" that makes the whole
+ * surface stop being scannable. It folds rather than disappears.
+ */
+const DONE_RECENT_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
 function readBoardCursor(): string | null {
   try {
@@ -102,6 +118,37 @@ function transitionOutcomeLabel(status: TaskV2Status): string {
   return MISSION_BOARD_COLUMNS.find((column) => column.id === placement)?.label ?? taskStatusLabel(status);
 }
 
+/**
+ * Hold task snapshot identity steady across refreshes.
+ *
+ * `arpV2.listTasks()` decodes fresh objects on every poll, so without this
+ * every card's `task` prop is a new reference and `memo` never bails out —
+ * one SSE frame repaints the whole board. Two snapshots that agree on id,
+ * version, status and updatedAt describe the same card, so the earlier object
+ * is reused and only genuinely changed cards re-render. Same technique as
+ * `useStableList` in hooks/use-terminus.ts, keyed on the fields a card reads.
+ */
+function useStableTasks(next: readonly TaskV2Snapshot[]): TaskV2Snapshot[] {
+  const held = useRef<TaskV2Snapshot[]>([]);
+  const heldById = useRef<Map<string, TaskV2Snapshot>>(new Map());
+  const merged = next.map((task) => {
+    const previous = heldById.current.get(task.id);
+    return previous
+      && previous.version === task.version
+      && previous.status === task.status
+      && previous.updatedAt === task.updatedAt
+      ? previous
+      : task;
+  });
+  const unchanged = merged.length === held.current.length
+    && merged.every((task, index) => held.current[index] === task);
+  if (!unchanged) {
+    held.current = merged;
+    heldById.current = new Map(merged.map((task) => [task.id, task]));
+  }
+  return held.current;
+}
+
 function questionForTask(
   taskId: string,
   questions: readonly MaterialQuestionSnapshot[],
@@ -109,7 +156,49 @@ function questionForTask(
   return questions.find((question) => question.taskId === taskId && question.status === "PENDING") ?? null;
 }
 
-function CardStatus({ lifecycle, needsAttention }: { lifecycle: TaskLifecycle; needsAttention: boolean }): JSX.Element {
+/**
+ * The actions a task offers, in the one order they appear everywhere.
+ *
+ * Shared by the card's overflow trigger, the card's context menu and the list
+ * row's context menu, so right-clicking a task cannot offer a different set of
+ * things to do than clicking its ⋯ — which is exactly the sort of drift a
+ * second hand-written copy produces.
+ */
+function taskMenuItems({
+  task,
+  pending,
+  onOpen,
+  onSelect,
+  onInspect,
+  onTransition,
+}: {
+  task: TaskV2Snapshot;
+  pending: boolean;
+  onOpen: (task: TaskV2Snapshot) => void;
+  onSelect: (taskId: string) => void;
+  onInspect: (taskId: string) => void;
+  onTransition: (task: TaskV2Snapshot, targetStatus: TaskV2Status, destructive: boolean) => void;
+}): MenuItem[] {
+  return [
+    { id: "open", label: "Open conversation", onSelect: () => onOpen(task) },
+    { id: "preview", label: "Quick preview", onSelect: () => onSelect(task.id) },
+    { id: "details", label: "View details", onSelect: () => onInspect(task.id) },
+    ...directTaskActions(task).map((action) => ({
+      id: `transition-${action.targetStatus.toLowerCase()}`,
+      label: action.label,
+      danger: action.destructive === true,
+      disabled: pending,
+      onSelect: () => onTransition(task, action.targetStatus, action.destructive === true),
+    })),
+  ];
+}
+
+/**
+ * `label` overrides the lifecycle name where something more specific is known
+ * — "Policy denied" rather than a second row reading "Needs you" like the
+ * eleven above it.
+ */
+function CardStatus({ lifecycle, needsAttention, label }: { lifecycle: TaskLifecycle; needsAttention: boolean; label?: string }): JSX.Element {
   const tone = lifecycleTone(lifecycle);
   return (
     <span
@@ -118,41 +207,59 @@ function CardStatus({ lifecycle, needsAttention }: { lifecycle: TaskLifecycle; n
         tone === "success" && "text-success",
         tone === "error" && "text-error",
         tone === "warning" && "text-warning",
-        tone === "info" && "text-info",
+        // "info" blue is the interaction accent; a task merely being in
+        // flight has not earned it. It reads as ordinary secondary text.
+        tone === "info" && "text-secondary",
         tone === "neutral" && "text-secondary",
       )}
     >
       {needsAttention ? <CircleDot size={10} aria-hidden /> : lifecycle === "done" ? <Check size={10} aria-hidden /> : null}
-      {lifecycleLabel(lifecycle)}
+      {label ?? lifecycleLabel(lifecycle)}
     </span>
   );
 }
 
-function columnIcon(id: MissionBoardColumnId): JSX.Element {
-  switch (id) {
-    case "queued":
-      return <CircleDashed size={13} className="text-tertiary" aria-hidden />;
-    case "working":
-      return <Play size={12} className="fill-info text-info" aria-hidden />;
-    case "needs_you":
-      return <AlertTriangle size={13} className="text-warning" aria-hidden />;
-    case "review":
-      return <CircleDot size={13} className="text-success" aria-hidden />;
-    case "done":
-      return <Check size={13} className="text-success" aria-hidden />;
-  }
-}
-
-function MissionBoardCard({
+/**
+ * One board card.
+ *
+ * Memoised, and given only primitives plus stable callbacks, so a change to
+ * one task does not repaint the board. The task snapshots keep their identity
+ * across refreshes (see `useStableTasks`), which is what makes the memo bite:
+ * an SSE frame that touches one task now re-renders one card instead of all
+ * of them.
+ *
+ * Codex density: hairline border, flat card surface, the mission clamped to
+ * three lines, and a single meta line underneath. No badges, no gradients,
+ * and no per-card status sentence — the glyph says it in 10px.
+ *
+ * Both input methods reach everything, and they agree with each other:
+ *
+ *   click / Space         preview in the side panel
+ *   double click / Enter  open the task
+ *   right click / ⋯       the same actions menu
+ *   drag                  the transitions the state machine admits
+ *
+ * A click also moves keyboard focus onto the card, so the two never diverge
+ * into separate notions of "the current card".
+ */
+const MissionBoardCard = memo(function MissionBoardCard({
   task,
   lifecycle,
   spaceName,
-  questions,
+  attentionLabel,
+  attentionDetail,
+  attentionSeverity,
+  elapsed,
+  budgetValue,
+  budgetTone,
   selected,
+  focused,
   pending,
   onSelect,
   onOpen,
   onInspect,
+  onFocusCard,
+  registerRef,
   onDragStart,
   onDragEnd,
   onTransition,
@@ -160,144 +267,203 @@ function MissionBoardCard({
   task: TaskV2Snapshot;
   lifecycle: TaskLifecycle;
   spaceName: string;
-  questions: readonly MaterialQuestionSnapshot[];
+  /**
+   * The attention reason, flattened to primitives by the parent. Passing the
+   * `AttentionReason` object itself would hand every card a fresh prop on each
+   * refresh — the reasons are rebuilt from a newly decoded questions array —
+   * and defeat the memo the same way an unstable `task` used to.
+   */
+  attentionLabel: string | null;
+  attentionDetail: string | null;
+  attentionSeverity: "error" | "warning" | null;
+  /** How long the in-flight run has been going, when a run is in flight. */
+  elapsed: string | null;
+  budgetValue: string | null;
+  budgetTone: BudgetTone | null;
   selected: boolean;
+  /** The board is one composite widget; exactly one card is tabbable at a time. */
+  focused: boolean;
   pending: boolean;
-  onSelect: () => void;
-  onOpen: () => void;
-  onInspect: () => void;
-  onDragStart: (event: DragEvent<HTMLElement>) => void;
+  onSelect: (taskId: string) => void;
+  onOpen: (task: TaskV2Snapshot) => void;
+  onInspect: (taskId: string) => void;
+  onFocusCard: (taskId: string) => void;
+  registerRef: (taskId: string, element: HTMLElement | null) => void;
+  onDragStart: (task: TaskV2Snapshot, event: DragEvent<HTMLElement>) => void;
   onDragEnd: () => void;
-  onTransition: (targetStatus: TaskV2Status, destructive: boolean) => void;
+  onTransition: (task: TaskV2Snapshot, targetStatus: TaskV2Status, destructive: boolean) => void;
 }): JSX.Element {
-  const attention = taskNeedsAttention(task, questions);
-  const pendingQuestion = questionForTask(task.id, questions);
   const actions = directTaskActions(task);
+  // Built here rather than inline on the element: React 19 passes `ref` as an
+  // ordinary prop, so an inline arrow would be a fresh prop on every parent
+  // render and would defeat the memo this whole component is arranged around.
+  const setCardRef = useCallback(
+    (element: HTMLElement | null) => registerRef(task.id, element),
+    [registerRef, task.id],
+  );
   // "Running" means a turn is in flight, not that the task exists. The v2
   // status says RUNNING for the whole life of a task.
   const isRunning = lifecycleIsActive(lifecycle);
-  const isWaitingReview = lifecycle === "review" || lifecycle === "needs_you";
-  const hasActiveDot = isRunning || isWaitingReview || attention;
+  const needsAttention = attentionLabel !== null;
 
-  const menuItems: MenuItem[] = [
-    { id: "open", label: "Open conversation", onSelect: onOpen },
-    { id: "preview", label: "Quick preview", onSelect },
-    { id: "details", label: "View details", onSelect: onInspect },
-    ...actions.map((action) => ({
-      id: `transition-${action.targetStatus.toLowerCase()}`,
-      label: action.label,
-      danger: action.destructive === true,
-      disabled: pending,
-      onSelect: () => onTransition(action.targetStatus, action.destructive === true),
-    })),
-  ];
+  /**
+   * A click that landed on one of the card's own controls is that control's,
+   * not the card's. Checked by hit-testing the target rather than stopping
+   * propagation on each button, because the overflow trigger is a Radix
+   * component and swallowing its events breaks the menu it opens.
+   */
+  const clickedOwnControl = (event: ReactMouseEvent<HTMLElement>): boolean =>
+    (event.target as HTMLElement | null)?.closest("button") !== null;
+
+  const handleCardClick = (event: ReactMouseEvent<HTMLElement>): void => {
+    if (clickedOwnControl(event)) return;
+    // Clicking a card is also how the keyboard arrives at it: without this the
+    // arrow keys would be dead until the user had tabbed in separately.
+    event.currentTarget.focus();
+    onSelect(task.id);
+  };
+
+  const handleCardDoubleClick = (event: ReactMouseEvent<HTMLElement>): void => {
+    if (clickedOwnControl(event)) return;
+    onOpen(task);
+  };
+  // One glyph, and only when the card is moving or asking for something. A
+  // dot on every card is decoration, and a column of them reads as an alarm
+  // panel rather than a board.
+  const showGlyph = isRunning || needsAttention;
+
+  const menuItems = taskMenuItems({ task, pending, onOpen, onSelect, onInspect, onTransition });
 
   return (
-    <article
-      draggable={actions.length > 0}
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      data-testid={`mission-board-card-${task.id}`}
-      className={cn(
-        // `border-default/75` never resolved — border-default is a custom
-        // utility, not a theme colour, so the card border fell back to
-        // currentColor and drew brighter than any hairline in the app.
-        "group relative flex min-h-[104px] w-full flex-col gap-2 rounded-xl border border-default bg-card/75 p-3 shadow-xs transition-all hover:border-strong hover:bg-card hover:shadow-md",
-        selected && "border-default ring-1 ring-default bg-selected/40",
-        pending && "opacity-60",
-      )}
-    >
-      {/* Top row: Space badge + Blue active indicator dot + Menu */}
-      <div className="flex h-5 items-center justify-between gap-1.5">
-        {/* A project name is prose, not code — mono here was a web tell. */}
-        <span className="ui-meta max-w-[70%] truncate">
-          {spaceName}
-        </span>
-        <div className="flex items-center gap-1.5 shrink-0">
-          {hasActiveDot && (
-            <span
-              className="relative flex h-2 w-2"
-              data-tooltip={attention ? "Needs attention" : isRunning ? "Running" : "Waiting for review"}
-              aria-label={attention ? "Needs attention" : isRunning ? "Running" : "Waiting for review"}
-            >
-              {/* A still dot. Ten pinging halos made the board read as an
-                  alarm panel rather than a status overview. */}
-              <span className={cn(
-                "relative inline-flex rounded-full h-2 w-2",
-                attention ? "bg-warning" : "bg-info",
-              )} />
-            </span>
-          )}
-          <Menu
-            label={`Actions for ${task.contract.mission}`}
-            align="end"
-            items={menuItems}
-            trigger={(
-              <IconButton
-                label={`Actions for ${task.contract.mission}`}
-                icon={<MoreHorizontal size={13} aria-hidden />}
-                size="sm"
-                disabled={pending}
-                className="h-5 w-5 rounded text-tertiary opacity-0 hover:bg-hover hover:text-primary focus:opacity-100 group-hover:opacity-100"
-              />
-            )}
-          />
-        </div>
-      </div>
-
-      {/* Middle row: Task title with fixed height container */}
-      <Button
-        variant="bare"
-        onClick={onOpen}
-        aria-label={`Open ${task.contract.mission}`}
-        className="flex min-w-0 items-start"
+    <ContextMenu items={menuItems}>
+      <article
+        ref={setCardRef}
+        onClick={handleCardClick}
+        onDoubleClick={handleCardDoubleClick}
+        // Roving tabindex: Tab reaches the board once, arrows move within it.
+        // Without this the only keyboard route across a five-column board was to
+        // Tab through every title and every overflow trigger in order.
+        tabIndex={focused ? 0 : -1}
+        onFocus={() => onFocusCard(task.id)}
+        draggable={actions.length > 0}
+        onDragStart={(event) => onDragStart(task, event)}
+        onDragEnd={onDragEnd}
+        data-testid={`mission-board-card-${task.id}`}
+        data-board-card={task.id}
+        className={cn(
+          "group relative flex w-full select-none flex-col gap-2 rounded-lg border border-subtle bg-card p-3 transition-colors hover:border-default focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--border-strong)]",
+          // Selection is a neutral fill, never a blue wash.
+          selected && "border-default bg-selected",
+          pending && "opacity-60",
+          // The one place the board spends colour on an edge. A card that owes
+          // the human something is findable without reading it.
+          attentionSeverity === "error" && "border-l-2 border-l-error",
+          attentionSeverity === "warning" && "border-l-2 border-l-warning",
+        )}
       >
-        <span className="block line-clamp-2 text-base font-medium leading-snug text-primary transition-colors group-hover:text-accent">
-          {task.contract.mission}
-        </span>
-      </Button>
-
-      {/* Bottom row: Status phrase, timing, and git/PR indicators */}
-      <div className="mt-auto flex h-5 items-center justify-between gap-1.5 border-t border-subtle pt-1.5 text-xs">
-        <div className="flex min-w-0 items-center gap-1.5 text-secondary truncate">
-          {isRunning ? (
-            <span className="flex items-center gap-1 text-info font-medium text-xs">
-              <Play size={10} className="fill-info" aria-hidden />
-              <span>Working...</span>
-            </span>
-          ) : pendingQuestion ? (
-            <span className="flex items-center gap-1 text-warning font-medium text-xs">
-              <CircleDot size={10} aria-hidden />
-              <span>Needs input</span>
-            </span>
-          ) : (
-            <span className="text-tertiary text-xs">
-              {relativeTimestamp(task.updatedAt)}
-            </span>
-          )}
+        <div className="flex items-start justify-between gap-2">
+          <Button
+            variant="bare"
+            onClick={() => onOpen(task)}
+            aria-label={`Open ${task.contract.mission}`}
+            // Reachable by mouse and by name, but not a second tab stop inside a
+            // card that is already focusable and already opens on Enter.
+            tabIndex={-1}
+            className="min-w-0 flex-1"
+          >
+            <span className="ui-body line-clamp-3 text-primary">{task.contract.mission}</span>
+          </Button>
+          <div className="flex shrink-0 items-center gap-1">
+            {showGlyph ? (
+              <StatusIndicator
+                status={lifecycle}
+                size={10}
+                className="mt-0.5"
+              />
+            ) : null}
+            <Menu
+              label={`Actions for ${task.contract.mission}`}
+              align="end"
+              items={menuItems}
+              trigger={(
+                <IconButton
+                  label={`Actions for ${task.contract.mission}`}
+                  icon={<MoreHorizontal size={13} aria-hidden />}
+                  size="sm"
+                  disabled={pending}
+                  tabIndex={focused ? 0 : -1}
+                  className="h-5 w-5 rounded text-tertiary opacity-0 hover:bg-hover hover:text-primary focus:opacity-100 group-hover:opacity-100"
+                />
+              )}
+            />
+          </div>
         </div>
-        {/* No branch or pull-request chips. Terminus opens neither, and the
-            previous ones were drawn from the task status alone: every card
-            claimed a branch, and "PR ready" meant "verifying". */}
-      </div>
-    </article>
+
+        {/* What the card wants from a human, in its own words. A column of
+            identical dots cannot be triaged without opening every card; a
+            question, a denied policy and an exhausted budget are three
+            different instructions and now read as three different things. */}
+        {attentionLabel !== null ? (
+          <p className="min-w-0 text-xs leading-snug">
+            <span className={cn("font-medium", attentionSeverity === "error" ? "text-error" : "text-warning")}>
+              {attentionLabel}
+            </span>
+            {attentionDetail !== null ? (
+              <span className="text-secondary"> — {attentionDetail}</span>
+            ) : null}
+          </p>
+        ) : null}
+
+        {/* Project, then either how long the run has been going or when the task
+            last moved — "5 hours ago" on something that is running right now
+            answers a question nobody asked. No branch or pull-request chips:
+            Terminus opens neither, and the previous ones were drawn from the
+            task status alone, so every card claimed a branch. */}
+        <div className="ui-meta flex min-w-0 items-center gap-1.5">
+          <span className="min-w-0 truncate">{spaceName}</span>
+          <span aria-hidden>&middot;</span>
+          <span className="shrink-0">
+            {elapsed !== null ? `Running ${elapsed}` : relativeTimestamp(task.updatedAt)}
+          </span>
+          {budgetValue !== null ? (
+            <>
+              <span aria-hidden>&middot;</span>
+              <span
+                className={cn(
+                  "shrink-0 tabular-nums",
+                  budgetTone === "critical" && "text-error",
+                  budgetTone === "warning" && "text-warning",
+                )}
+              >
+                {budgetValue}
+              </span>
+            </>
+          ) : null}
+        </div>
+      </article>
+    </ContextMenu>
   );
-}
+});
 
 function BoardColumn({
   id,
   label,
   description,
   tasks,
-  questions,
+  reasons,
+  evidence,
   selectedTaskId,
+  focusedTaskId,
   pendingTaskId,
   draggingTask,
+  footer,
   projectNameForTask,
   lifecycleFor,
   onSelectTask,
   onOpenTask,
   onInspectTask,
+  onFocusCard,
+  registerCardRef,
   onTransition,
   onDragStart,
   onDragEnd,
@@ -307,21 +473,31 @@ function BoardColumn({
   label: string;
   description: string;
   tasks: TaskV2Snapshot[];
-  questions: readonly MaterialQuestionSnapshot[];
+  /** What each task owes a human, resolved once by the parent. */
+  reasons: ReadonlyMap<string, AttentionReason>;
+  evidence: ReadonlyMap<string, { elapsed: string | null; budgetValue: string | null; budgetTone: BudgetTone | null }>;
   selectedTaskId: string | null;
+  focusedTaskId: string | null;
   pendingTaskId: string | null;
   draggingTask: TaskV2Snapshot | null;
+  /** Rendered under the cards. Done uses it to unfold finished work. */
+  footer?: JSX.Element | null;
   projectNameForTask: (task: TaskV2Snapshot) => string;
   lifecycleFor: (task: TaskV2Snapshot) => TaskLifecycle;
   onSelectTask: (taskId: string) => void;
   onOpenTask: (task: TaskV2Snapshot) => void;
   onInspectTask: (taskId: string) => void;
+  onFocusCard: (taskId: string) => void;
+  registerCardRef: (taskId: string, element: HTMLElement | null) => void;
   onTransition: (task: TaskV2Snapshot, targetStatus: TaskV2Status, destructive: boolean) => void;
   onDragStart: (task: TaskV2Snapshot, event: DragEvent<HTMLElement>) => void;
   onDragEnd: () => void;
   onDropTask: (task: TaskV2Snapshot, destination: MissionBoardColumnId) => void;
 }): JSX.Element {
   const acceptsDrop = draggingTask !== null && boardTransitionForDrop(draggingTask.status, id) !== null;
+  // Human attention is the one resource the board cannot manufacture more of,
+  // so the column that spends it is the only one whose count is coloured.
+  const isAttentionColumn = id === "needs_you" && tasks.length > 0;
 
   return (
     <section
@@ -338,52 +514,69 @@ function BoardColumn({
       }}
       className={cn(
         "flex min-h-0 flex-col transition-colors",
-        acceptsDrop && "rounded-lg bg-info/5",
+        acceptsDrop && "rounded-lg bg-hover",
       )}
     >
-      <header className="mb-2 flex h-8 items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          {columnIcon(id)}
-          <h2 id={`mission-board-column-title-${id}`} className="ui-label font-medium text-primary">
-            {label}
-          </h2>
-          <p className="sr-only">{description}</p>
-          <span className="ui-meta ml-1 font-mono text-tertiary tabular-nums">
-            {tasks.length}
-          </span>
-        </div>
+      {/* Name and count, nothing else. The icons and coloured dots that used
+          to sit here restated the column label in a second alphabet. */}
+      <header className="mb-2 flex h-7 items-center gap-2">
+        <h2
+          id={`mission-board-column-title-${id}`}
+          className={cn("ui-body font-semibold", isAttentionColumn ? "text-warning" : "text-primary")}
+        >
+          {label}
+        </h2>
+        <span className={cn("ui-meta tabular-nums", isAttentionColumn && "font-medium text-warning")}>
+          {tasks.length}
+        </span>
+        <p className="sr-only">{description}</p>
       </header>
 
       <div className="flex min-h-10 flex-col gap-2.5">
         {tasks.length === 0 ? (
-          // An empty column is empty. It used to render a 96px dashed box with
-          // nothing in it, so a board with three quiet columns showed three
-          // large placeholders competing with the work. The drop target only
-          // appears while a card that this column can accept is being dragged.
+          // An empty column is empty. It used to print its own description as
+          // if that were content, so a board with three quiet columns showed
+          // three sentences about columns competing with the actual work. The
+          // description survives in the header for screen readers. The drop
+          // target only appears while a card this column can accept is in
+          // flight.
           acceptsDrop ? (
-            <div className="flex min-h-24 items-center justify-center rounded-lg border border-dashed border-info bg-info/5 px-3 text-center text-xs text-info">
+            <div className="ui-meta flex min-h-20 items-center justify-center rounded-lg border border-dashed border-strong px-3 text-center">
               Move to {label}
             </div>
-          ) : (
-            <p className="px-0.5 py-1 text-xs text-tertiary">{description}</p>
-          )
-        ) : tasks.map((task) => (
-          <MissionBoardCard
-            key={task.id}
-            task={task}
-            lifecycle={lifecycleFor(task)}
-            spaceName={projectNameForTask(task)}
-            questions={questions}
-            selected={selectedTaskId === task.id}
-            pending={pendingTaskId === task.id}
-            onSelect={() => onSelectTask(task.id)}
-            onOpen={() => onOpenTask(task)}
-            onInspect={() => onInspectTask(task.id)}
-            onDragStart={(event) => onDragStart(task, event)}
-            onDragEnd={onDragEnd}
-            onTransition={(targetStatus, destructive) => onTransition(task, targetStatus, destructive)}
-          />
-        ))}
+          ) : null
+        ) : tasks.map((task) => {
+          const reason = reasons.get(task.id) ?? null;
+          const facts = evidence.get(task.id);
+          return (
+            <MissionBoardCard
+              key={task.id}
+              task={task}
+              lifecycle={lifecycleFor(task)}
+              spaceName={projectNameForTask(task)}
+              attentionLabel={reason?.label ?? null}
+              attentionDetail={reason?.detail ?? null}
+              attentionSeverity={reason === null ? null : attentionTone(reason.kind)}
+              elapsed={facts?.elapsed ?? null}
+              budgetValue={facts?.budgetValue ?? null}
+              budgetTone={facts?.budgetTone ?? null}
+              selected={selectedTaskId === task.id}
+              focused={focusedTaskId === task.id}
+              pending={pendingTaskId === task.id}
+              // Passed through unbound: an inline arrow here would give every
+              // card a fresh prop each render and defeat the memo above.
+              onSelect={onSelectTask}
+              onOpen={onOpenTask}
+              onInspect={onInspectTask}
+              onFocusCard={onFocusCard}
+              registerRef={registerCardRef}
+              onDragStart={onDragStart}
+              onDragEnd={onDragEnd}
+              onTransition={onTransition}
+            />
+          );
+        })}
+        {footer}
       </div>
     </section>
   );
@@ -392,6 +585,7 @@ function BoardColumn({
 function TaskQuickView({
   task,
   lifecycle,
+  reason,
   questions,
   pending,
   onClose,
@@ -401,6 +595,7 @@ function TaskQuickView({
 }: {
   task: TaskV2Snapshot;
   lifecycle: TaskLifecycle;
+  reason: AttentionReason | null;
   questions: readonly MaterialQuestionSnapshot[];
   pending: boolean;
   onClose: () => void;
@@ -415,7 +610,7 @@ function TaskQuickView({
     <aside aria-label="Task quick view" className="panel-enter flex h-full w-[300px] flex-shrink-0 flex-col border-l border-subtle bg-inspector">
       <header className="flex items-start gap-3 px-3 py-3">
         <div className="min-w-0 flex-1">
-          <CardStatus lifecycle={lifecycle} needsAttention={taskNeedsAttention(task, questions)} />
+          <CardStatus lifecycle={lifecycle} needsAttention={reason !== null} />
           <h2 className="ui-page-title mt-1.5 text-primary">{task.contract.mission}</h2>
         </div>
         <IconButton
@@ -427,14 +622,33 @@ function TaskQuickView({
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-        {pendingQuestions.length > 0 ? (
-          <section className="border-l-2 border-warning/55 py-1 pl-2.5" aria-labelledby="quick-view-attention-title">
-            <h3 id="quick-view-attention-title" className="ui-section-title flex items-center gap-1.5 text-warning">
-              <CircleDot size={12} aria-hidden /> Needs you
+        {/* The obligation leads, in its own words. This used to appear only
+            when a material question existed, so a task that had exhausted its
+            budget or been denied by policy opened to an unexplained blank. */}
+        {reason !== null ? (
+          <section
+            className={cn(
+              "py-1 pl-2.5",
+              attentionTone(reason.kind) === "error" ? "border-l-2 border-error/55" : "border-l-2 border-warning/55",
+            )}
+            aria-labelledby="quick-view-attention-title"
+          >
+            <h3
+              id="quick-view-attention-title"
+              className={cn(
+                "ui-section-title flex items-center gap-1.5",
+                attentionTone(reason.kind) === "error" ? "text-error" : "text-warning",
+              )}
+            >
+              <CircleDot size={12} aria-hidden /> {reason.label}
             </h3>
-            {pendingQuestions.map((question) => (
-              <p key={question.id} className="ui-body mt-1 text-primary">{question.questionText}</p>
-            ))}
+            {pendingQuestions.length > 0
+              ? pendingQuestions.map((question) => (
+                  <p key={question.id} className="ui-body mt-1 text-primary">{question.questionText}</p>
+                ))
+              : reason.detail !== null
+                ? <p className="ui-body mt-1 text-primary">{reason.detail}</p>
+                : null}
           </section>
         ) : null}
 
@@ -542,11 +756,19 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
   const [statusFilter, setStatusFilter] = useState("all");
   const [attentionOnly, setAttentionOnly] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
+  const [doneExpanded, setDoneExpanded] = useState(false);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
   const [taskPendingCancel, setTaskPendingCancel] = useState<TaskV2Snapshot | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [streamState, setStreamState] = useState<StreamState>("connecting");
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const registerCardRef = useCallback((taskId: string, element: HTMLElement | null): void => {
+    if (element === null) cardRefs.current.delete(taskId);
+    else cardRefs.current.set(taskId, element);
+  }, []);
 
   useEffect(() => {
     const generation = generationRef.current + 1;
@@ -602,7 +824,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
     };
   }, [resource.retry]);
 
-  const tasks = resource.data?.tasks ?? [];
+  const tasks = useStableTasks(resource.data?.tasks ?? []);
   const questions = resource.data?.questions ?? [];
   const projectNameForTask = useCallback((task: TaskV2Snapshot): string => {
     const sessionId = task.conversationContext?.sessionId;
@@ -627,25 +849,191 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
       .map(([value, label]) => ({ value, label }));
   }, [projectNameForTask, tasks]);
 
+  /**
+   * Why each task wants a human, resolved once per data change.
+   *
+   * This is also the board's own definition of "needs you": a task has a
+   * reason exactly when its card belongs in the Needs you column, so the
+   * header count, the filter and the column can no longer disagree the way a
+   * separate attention predicate let them.
+   */
+  const reasons = useMemo(() => {
+    const resolved = new Map<string, AttentionReason>();
+    for (const task of tasks) {
+      const reason = attentionReason(task, lifecycleFor(task), taskById[task.id], questions);
+      if (reason !== null) resolved.set(task.id, reason);
+    }
+    return resolved;
+  }, [lifecycleFor, questions, taskById, tasks]);
+  const attentionCount = reasons.size;
+
+  const placementFor = useCallback(
+    (task: TaskV2Snapshot): MissionBoardColumnId =>
+      boardColumnForTaskPlacement(lifecycleFor(task), reasons.get(task.id)?.kind === "question"),
+    [lifecycleFor, reasons],
+  );
+
   const normalizedQuery = query.trim().toLowerCase();
   const visibleTasks = useMemo(() => tasks
     .filter((task) => spaceFilter === "all"
       || (task.conversationContext?.sessionId ?? "general") === spaceFilter)
-    .filter((task) => {
-      if (statusFilter === "all") return true;
-      return boardColumnForTaskLifecycle(lifecycleFor(task)) === statusFilter;
-    })
-    .filter((task) => !attentionOnly || taskNeedsAttention(task, questions))
+    .filter((task) => statusFilter === "all" || placementFor(task) === statusFilter)
+    .filter((task) => !attentionOnly || reasons.has(task.id))
     .filter((task) => normalizedQuery.length === 0
       || task.contract.mission.toLowerCase().includes(normalizedQuery)
       || task.id.toLowerCase().includes(normalizedQuery))
     .sort((left, right) => {
-      const attentionDifference = Number(taskNeedsAttention(right, questions)) - Number(taskNeedsAttention(left, questions));
-      if (attentionDifference !== 0) return attentionDifference;
+      // Inside Needs you, cheapest-to-discharge first: a question is one
+      // click, a failure is a read. Recency is the wrong order for a column
+      // whose whole purpose is to be worked from the top down.
+      const leftReason = reasons.get(left.id);
+      const rightReason = reasons.get(right.id);
+      if (leftReason && rightReason && leftReason.rank !== rightReason.rank) {
+        return leftReason.rank - rightReason.rank;
+      }
+      if (Boolean(leftReason) !== Boolean(rightReason)) return leftReason ? -1 : 1;
       return right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id);
-    }), [attentionOnly, lifecycleFor, normalizedQuery, questions, spaceFilter, statusFilter, tasks]);
+    }), [attentionOnly, normalizedQuery, placementFor, reasons, spaceFilter, statusFilter, tasks]);
 
-  const attentionCount = tasks.filter((task) => taskNeedsAttention(task, questions)).length;
+  /**
+   * Elapsed time and spend, flattened to primitives for the memoised cards.
+   *
+   * Rebuilt on every tick, but the values it holds are strings — a card whose
+   * elapsed reading has not changed still gets identical props and still bails
+   * out of rendering.
+   */
+  const evidence = useMemo(() => {
+    const resolved = new Map<string, { elapsed: string | null; budgetValue: string | null; budgetTone: BudgetTone | null }>();
+    for (const task of tasks) {
+      const facts = taskEvidence(taskById[task.id], lifecycleFor(task), nowMs);
+      resolved.set(task.id, {
+        elapsed: facts.elapsed,
+        budgetValue: facts.budget?.value ?? null,
+        budgetTone: facts.budget?.tone ?? null,
+      });
+    }
+    return resolved;
+  }, [lifecycleFor, nowMs, taskById, tasks]);
+
+  // Armed only while a run is actually in flight, so a board full of finished
+  // work holds no timer and repaints nothing.
+  const hasTimedRun = useMemo(
+    () => tasks.some((task) => lifecycleIsActive(lifecycleFor(task))
+      && (taskById[task.id]?.active_turn?.started_at ?? null) !== null),
+    [lifecycleFor, taskById, tasks],
+  );
+  useEffect(() => {
+    if (!hasTimedRun) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), ELAPSED_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, [hasTimedRun]);
+
+  const columnTasks = useMemo(() => {
+    const grouped = new Map<MissionBoardColumnId, TaskV2Snapshot[]>(
+      MISSION_BOARD_COLUMNS.map((column) => [column.id, [] as TaskV2Snapshot[]]),
+    );
+    for (const task of visibleTasks) grouped.get(placementFor(task))?.push(task);
+    return grouped;
+  }, [placementFor, visibleTasks]);
+
+  const doneTasks = columnTasks.get("done") ?? [];
+  const doneRecent = useMemo(() => doneTasks.filter((task) => {
+    const finishedAt = Date.parse(task.completedAt ?? task.updatedAt);
+    // An unparseable timestamp is not evidence that the work is old.
+    return !Number.isFinite(finishedAt) || nowMs - finishedAt < DONE_RECENT_WINDOW_MS;
+  }), [doneTasks, nowMs]);
+  const foldedDoneCount = doneTasks.length - doneRecent.length;
+
+  /** Exactly what is on screen, which is also what the arrow keys traverse. */
+  const renderedTasks = useMemo(() => {
+    const rendered = new Map(columnTasks);
+    rendered.set("done", doneExpanded ? doneTasks : doneRecent);
+    return rendered;
+  }, [columnTasks, doneExpanded, doneRecent, doneTasks]);
+
+  // One tab stop for the whole board. Falls back to the first card so Tab can
+  // reach a board the user has not clicked into yet.
+  const tabbableTaskId = useMemo(() => {
+    const columnIds = MISSION_BOARD_COLUMNS.map((column) => column.id);
+    if (focusedTaskId !== null
+      && columnIds.some((id) => (renderedTasks.get(id) ?? []).some((task) => task.id === focusedTaskId))) {
+      return focusedTaskId;
+    }
+    for (const id of columnIds) {
+      const first = (renderedTasks.get(id) ?? [])[0];
+      if (first) return first.id;
+    }
+    return null;
+  }, [focusedTaskId, renderedTasks]);
+
+  const focusCard = useCallback((taskId: string): void => {
+    setFocusedTaskId(taskId);
+    cardRefs.current.get(taskId)?.focus();
+  }, []);
+
+  /**
+   * The board as one composite widget: arrows move between cards, Enter opens
+   * the task, Space previews it. Only keys landing on a card are handled, so
+   * the overflow menu keeps its own Enter and Space.
+   */
+  const handleBoardKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    const target = event.target as HTMLElement | null;
+    if (target === null || !target.hasAttribute("data-board-card")) return;
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+    if (event.key === "Escape") {
+      setSelectedTaskId(null);
+      return;
+    }
+
+    const columnIds = MISSION_BOARD_COLUMNS.map((column) => column.id);
+    const focusedId = target.getAttribute("data-board-card");
+    let columnIndex = -1;
+    let rowIndex = -1;
+    for (let index = 0; index < columnIds.length && columnIndex === -1; index += 1) {
+      const row = (renderedTasks.get(columnIds[index]!) ?? []).findIndex((task) => task.id === focusedId);
+      if (row !== -1) {
+        columnIndex = index;
+        rowIndex = row;
+      }
+    }
+    if (columnIndex === -1) return;
+    const column = renderedTasks.get(columnIds[columnIndex]!) ?? [];
+    const task = column[rowIndex];
+    if (task === undefined) return;
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      onOpenTask(task);
+      return;
+    }
+    if (event.key === " ") {
+      event.preventDefault();
+      setSelectedTaskId((current) => current === task.id ? null : task.id);
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const next = column[Math.min(column.length - 1, Math.max(0, rowIndex + (event.key === "ArrowDown" ? 1 : -1)))];
+      if (next) focusCard(next.id);
+      return;
+    }
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const step = event.key === "ArrowRight" ? 1 : -1;
+    // Empty columns are skipped rather than swallowing the keypress: a board
+    // with nothing in Working must not make Queued and Needs you unreachable
+    // from one another.
+    for (let index = columnIndex + step; index >= 0 && index < columnIds.length; index += step) {
+      const candidates = renderedTasks.get(columnIds[index]!) ?? [];
+      const next = candidates[Math.min(rowIndex, candidates.length - 1)];
+      if (next) {
+        focusCard(next.id);
+        return;
+      }
+    }
+  }, [focusCard, onOpenTask, renderedTasks]);
+
   const selectedTask = visibleTasks.find((task) => task.id === selectedTaskId) ?? null;
   const draggingTask = tasks.find((task) => task.id === draggingTaskId) ?? null;
 
@@ -720,6 +1108,9 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
     void requestTransition(task, targetStatus);
   }, [requestTransition]);
 
+  // Stable so the memoised cards keep their props between renders.
+  const endDrag = useCallback((): void => setDraggingTaskId(null), []);
+
   const beginDrag = useCallback((task: TaskV2Snapshot, event: DragEvent<HTMLElement>): void => {
     setDraggingTaskId(task.id);
     if (event.dataTransfer) {
@@ -741,16 +1132,18 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
       <header className="ui-view-header justify-between">
         {/* Left: History Navigation, Title & Filter Pills */}
         <div className="flex items-center gap-2.5 min-w-0 flex-1 overflow-x-auto py-1">
+          {/* A green dot that is green whenever nothing is wrong is
+              decoration: it spent a permanent pixel telling the user the
+              normal case. The stream only speaks up when it has degraded. */}
           <div className="flex items-center gap-2 shrink-0 pr-2 border-r border-subtle">
             <h1 id="mission-board-title" aria-label="Kanban" className="ui-page-title text-primary">
               Kanban
             </h1>
-            <span
-              className={cn("h-2 w-2 flex-shrink-0 rounded-full", streamState === "live" ? "bg-success" : "bg-warning")}
-              role="status"
-              aria-label={streamState === "live" ? "Board updates live" : streamState === "connecting" ? "Board connecting" : "Board reconnecting"}
-              data-tooltip={streamState === "live" ? "Live" : streamState === "connecting" ? "Connecting" : "Reconnecting"}
-            />
+            {streamState !== "live" ? (
+              <span className="ui-meta text-warning" role="status">
+                {streamState === "connecting" ? "Connecting" : "Reconnecting"}
+              </span>
+            ) : null}
           </div>
 
           {/* Filter Pills */}
@@ -775,7 +1168,9 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                   variant="bare"
                   className={cn(
                     "flex h-6 items-center gap-1 rounded-md border px-2 text-xs font-normal transition-colors",
-                    statusFilter !== "all" ? "border-info/40 bg-info/10 text-info" : "border-default bg-card text-secondary hover:bg-hover hover:text-primary",
+                    statusFilter !== "all"
+                      ? "border-default bg-selected text-primary"
+                      : "border-subtle text-secondary hover:bg-hover hover:text-primary",
                   )}
                 >
                   <span>
@@ -793,10 +1188,11 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
             <Menu
               label="Space filter"
               items={[
-                { id: "all", label: "All spaces", onSelect: () => setSpaceFilter("all") },
+                { id: "all", label: "All spaces", selected: spaceFilter === "all", onSelect: () => setSpaceFilter("all") },
                 ...spaceOptions.map((opt) => ({
                   id: opt.value,
                   label: opt.label,
+                  selected: spaceFilter === opt.value,
                   onSelect: () => setSpaceFilter(opt.value),
                 })),
               ]}
@@ -805,10 +1201,19 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                   variant="bare"
                   className={cn(
                     "flex h-6 items-center gap-1 rounded-md border px-2 text-xs font-normal transition-colors",
-                    spaceFilter !== "all" ? "border-info/40 bg-info/10 text-info" : "border-default bg-card text-secondary hover:bg-hover hover:text-primary",
+                    spaceFilter !== "all"
+                      ? "border-default bg-selected text-primary"
+                      : "border-subtle text-secondary hover:bg-hover hover:text-primary",
                   )}
                 >
-                  <span>Space</span>
+                  {/* The chip names the active space, so a filtered board
+                      never leaves the user guessing which one is on. */}
+                  <span>
+                    Space
+                    {spaceFilter !== "all"
+                      ? `: ${spaceOptions.find((option) => option.value === spaceFilter)?.label ?? spaceFilter}`
+                      : ""}
+                  </span>
                   <ChevronDown size={10} aria-hidden />
                 </Button>
               )}
@@ -837,29 +1242,29 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search sessions..."
-              className="ui-input h-7 w-full rounded-md border border-default bg-card pl-8 pr-6 text-xs text-primary placeholder:text-tertiary focus:border-default transition-colors"
+              placeholder="Search tasks"
+              className="ui-input h-7 w-full rounded-md border border-subtle bg-card pl-8 pr-6 text-xs text-primary placeholder:text-tertiary transition-colors"
             />
             {query.length > 0 && (
               <Button
                 variant="bare"
                 onClick={() => setQuery("")}
                 aria-label="Clear search query"
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-tertiary hover:text-primary text-xs"
+                className="absolute right-2 top-1/2 flex -translate-y-1/2 text-tertiary hover:text-primary"
               >
-                ✕
+                <X size={12} aria-hidden />
               </Button>
             )}
           </label>
 
           {/* Segmented View Switcher [Board | List] */}
-          <div className="flex rounded-md bg-subtle p-0.5 border border-default" role="group" aria-label="Mission board view">
+          <div className="flex rounded-md border border-subtle bg-elevated p-0.5" role="group" aria-label="Mission board view">
             <Button
               type="button"
               onClick={() => setViewMode("board")}
               aria-label="Board view"
               aria-pressed={viewMode === "board"}
-              className={cn("flex h-6 items-center gap-1.5 rounded px-2 text-xs font-medium transition-colors", viewMode === "board" ? "bg-card text-primary shadow-xs" : "text-secondary hover:text-primary")}
+              className={cn("flex h-6 items-center gap-1.5 rounded px-2 text-xs font-medium transition-colors", viewMode === "board" ? "bg-selected text-primary" : "text-secondary hover:text-primary")}
             >
               <Columns3 size={12} aria-hidden />
               <span>Board</span>
@@ -869,27 +1274,31 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
               onClick={() => setViewMode("list")}
               aria-label="List view"
               aria-pressed={viewMode === "list"}
-              className={cn("flex h-6 items-center gap-1.5 rounded px-2 text-xs font-medium transition-colors", viewMode === "list" ? "bg-card text-primary shadow-xs" : "text-secondary hover:text-primary")}
+              className={cn("flex h-6 items-center gap-1.5 rounded px-2 text-xs font-medium transition-colors", viewMode === "list" ? "bg-selected text-primary" : "text-secondary hover:text-primary")}
             >
               <List size={12} aria-hidden />
               <span>List</span>
             </Button>
           </div>
 
+          {/* A bare number next to Refresh reads as a diagnostic counter. The
+              scarcest thing on this screen is the operator, so the control
+              that isolates what is waiting on them says what it is. */}
           {attentionCount > 0 ? (
             <Button
               type="button"
               onClick={() => setAttentionOnly((value) => !value)}
-              aria-label={`${attentionCount} tasks need attention`}
+              aria-label={attentionOnly ? "Show all tasks" : `Show only the ${attentionCount} tasks that need you`}
               aria-pressed={attentionOnly}
-              className={cn("flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium tabular-nums", attentionOnly ? "bg-warning/15 text-warning border border-warning/30" : "border border-default bg-card text-secondary hover:bg-hover hover:text-primary")}
+              className={cn("flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs font-medium transition-colors", attentionOnly ? "border-warning/30 bg-warning/15 text-warning" : "border-warning/25 text-warning hover:bg-warning/10")}
             >
               <CircleDot size={11} aria-hidden />
-              <span>{attentionCount}</span>
+              <span>Needs you</span>
+              <span className="tabular-nums">{attentionCount}</span>
             </Button>
           ) : null}
 
-          <IconButton label="Refresh mission board" icon={<RefreshCw size={12} aria-hidden />} onClick={resource.retry} disabled={resource.refreshing} size="md" className="h-7 w-7 rounded-md border border-default bg-card text-tertiary hover:bg-hover hover:text-primary disabled:opacity-50" />
+          <IconButton label="Refresh mission board" icon={<RefreshCw size={12} aria-hidden />} onClick={resource.retry} disabled={resource.refreshing} size="md" className="h-7 w-7 rounded-md border border-subtle text-tertiary hover:bg-hover hover:text-primary disabled:opacity-50" />
         </div>
       </header>
 
@@ -929,42 +1338,65 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                 // container scroll horizontally when they no longer fit.
                 className="mission-board-grid grid gap-4 w-full max-w-[1600px]"
                 style={{ gridTemplateColumns: `repeat(${MISSION_BOARD_COLUMNS.length}, minmax(200px, 1fr))` }}
+                onKeyDown={handleBoardKeyDown}
+                aria-label="Task board. Arrow keys move between cards, Enter opens a task, Space previews it."
               >
                 {MISSION_BOARD_COLUMNS.map((column) => (
                   <BoardColumn
                     key={column.id}
                     {...column}
-                    tasks={visibleTasks.filter((task) => boardColumnForTaskLifecycle(lifecycleFor(task)) === column.id)}
-                    questions={questions}
+                    tasks={renderedTasks.get(column.id) ?? []}
+                    reasons={reasons}
+                    evidence={evidence}
                     lifecycleFor={lifecycleFor}
                     selectedTaskId={selectedTaskId}
+                    focusedTaskId={tabbableTaskId}
                     pendingTaskId={pendingTaskId}
                     draggingTask={draggingTask}
+                    footer={column.id === "done" && foldedDoneCount > 0 ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setDoneExpanded((expanded) => !expanded)}
+                        className="justify-start px-1 text-xs text-tertiary hover:text-primary"
+                      >
+                        {doneExpanded ? "Hide earlier work" : `${foldedDoneCount} earlier`}
+                      </Button>
+                    ) : null}
                     projectNameForTask={projectNameForTask}
                     onSelectTask={setSelectedTaskId}
                     onOpenTask={onOpenTask}
                     onInspectTask={onInspectTask}
+                    onFocusCard={setFocusedTaskId}
+                    registerCardRef={registerCardRef}
                     onTransition={chooseTransition}
                     onDragStart={beginDrag}
-                    onDragEnd={() => setDraggingTaskId(null)}
+                    onDragEnd={endDrag}
                     onDropTask={dropIntoColumn}
                   />
                 ))}
               </div>
 
               {draggingTask?.status === "RUNNING" ? (
-                <div className="sticky bottom-2 z-10 mx-auto mt-4 flex w-fit items-center gap-1 rounded-lg border border-default bg-elevated p-1 shadow-lg" aria-label="Active task actions">
+                // These are drop targets, not buttons: they only appear
+                // while a running card is in flight, and they answer to
+                // `onDrop` alone. They used to be styled as solid buttons,
+                // which promised a click that never did anything — the dashed
+                // edge says "drop here" instead. The keyboard route to the
+                // same two transitions is the card's actions menu.
+                <div className="sticky bottom-2 z-10 mx-auto mt-4 flex w-fit items-center gap-1 rounded-lg border border-default bg-elevated p-1 shadow-lg" aria-label="Drop targets for the task being dragged">
                   <div
                     onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "move"; }}
                     onDrop={(event) => { event.preventDefault(); setDraggingTaskId(null); void requestTransition(draggingTask, "PAUSED"); }}
-                    className="flex h-7 min-w-20 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-medium text-warning"
+                    className="flex h-7 min-w-20 items-center justify-center gap-1.5 rounded-md border border-dashed border-warning/40 px-2 text-xs font-medium text-warning"
                   >
                     <Pause size={13} aria-hidden /> Pause
                   </div>
                   <div
                     onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "move"; }}
                     onDrop={(event) => { event.preventDefault(); setDraggingTaskId(null); setTaskPendingCancel(draggingTask); }}
-                    className="flex h-7 min-w-20 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-medium text-error"
+                    className="flex h-7 min-w-20 items-center justify-center gap-1.5 rounded-md border border-dashed border-error/40 px-2 text-xs font-medium text-error"
                   >
                     <Archive size={13} aria-hidden /> Cancel
                   </div>
@@ -973,18 +1405,47 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
 
             </>
           ) : (
-            <div role="table" aria-label="Mission board tasks" className="overflow-hidden rounded-lg border border-default bg-card">
-              <div role="row" className="mission-board-list-row grid gap-3 bg-hover/40 px-4 py-2 text-xs font-medium text-tertiary border-b border-subtle">
+            <div role="table" aria-label="Mission board tasks" className="overflow-hidden rounded-lg border border-subtle bg-card">
+              <div role="row" className="mission-board-list-row grid gap-3 border-b border-subtle px-4 py-2 text-xs text-tertiary">
                 <span role="columnheader">Session / Task</span><span role="columnheader">State</span><span role="columnheader" className="mission-board-list-secondary">Space</span><span role="columnheader" className="mission-board-list-secondary">Updated</span>
               </div>
               <div role="rowgroup" className="divide-y divide-subtle">
                 {visibleTasks.map((task) => (
-                  <div key={task.id} role="row" aria-selected={selectedTaskId === task.id} className={cn("mission-board-list-row grid min-h-10 w-full items-center gap-3 px-4 text-left text-xs hover:bg-hover transition-colors", selectedTaskId === task.id && "bg-selected")}>
-                    <span role="cell" className="min-w-0"><Button type="button" onClick={() => onOpenTask(task)} className="max-w-full justify-start truncate px-0 text-xs font-medium text-primary hover:text-accent hover:bg-transparent">{task.contract.mission}</Button></span>
-                    <span role="cell"><CardStatus lifecycle={lifecycleFor(task)} needsAttention={taskNeedsAttention(task, questions)} /></span>
-                    <span role="cell" className="mission-board-list-secondary truncate text-secondary">{projectNameForTask(task)}</span>
-                    <span role="cell" className="mission-board-list-secondary text-tertiary">{relativeTimestamp(task.updatedAt)}</span>
-                  </div>
+                  // Same gestures as a board card: click previews, double click
+                  // opens, right click offers the identical actions.
+                  <ContextMenu
+                    key={task.id}
+                    items={taskMenuItems({
+                      task,
+                      pending: pendingTaskId === task.id,
+                      onOpen: onOpenTask,
+                      onSelect: setSelectedTaskId,
+                      onInspect: onInspectTask,
+                      onTransition: chooseTransition,
+                    })}
+                  >
+                    <div
+                      role="row"
+                      aria-selected={selectedTaskId === task.id}
+                      // The row claimed a selected state that nothing could set:
+                      // in list mode the quick view was unreachable because only
+                      // board cards called onSelectTask.
+                      onClick={() => setSelectedTaskId(task.id)}
+                      onDoubleClick={() => onOpenTask(task)}
+                      className={cn("mission-board-list-row grid min-h-10 w-full cursor-default select-none items-center gap-3 px-4 text-left text-xs transition-colors hover:bg-hover", selectedTaskId === task.id && "bg-selected")}
+                    >
+                      <span role="cell" className="min-w-0"><Button type="button" onClick={() => onOpenTask(task)} className="max-w-full justify-start truncate px-0 text-xs text-primary hover:bg-transparent">{task.contract.mission}</Button></span>
+                      <span role="cell">
+                        <CardStatus
+                          lifecycle={lifecycleFor(task)}
+                          needsAttention={reasons.has(task.id)}
+                          {...(reasons.get(task.id) ? { label: reasons.get(task.id)!.label } : {})}
+                        />
+                      </span>
+                      <span role="cell" className="mission-board-list-secondary truncate text-secondary">{projectNameForTask(task)}</span>
+                      <span role="cell" className="mission-board-list-secondary text-tertiary">{relativeTimestamp(task.updatedAt)}</span>
+                    </div>
+                  </ContextMenu>
                 ))}
               </div>
             </div>
@@ -995,6 +1456,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
           <TaskQuickView
             task={selectedTask}
             lifecycle={lifecycleFor(selectedTask)}
+            reason={reasons.get(selectedTask.id) ?? null}
             questions={questions}
             pending={pendingTaskId === selectedTask.id}
             onClose={() => setSelectedTaskId(null)}
