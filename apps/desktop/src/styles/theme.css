@@ -61,6 +61,16 @@
   --shadow-md: var(--elevation-md);
   --shadow-lg: var(--elevation-lg);
 
+  /* Layer utilities. Without these, `z-popover` and friends compiled to
+     nothing, so every portaled menu sat at z-index auto and the composer's
+     own `z-[1]` painted over the access-level menu. */
+  --z-index-sticky: var(--z-sticky);
+  --z-index-popover: var(--z-popover);
+  --z-index-tooltip: var(--z-tooltip);
+  --z-index-dialog: var(--z-dialog);
+  --z-index-select: var(--z-select);
+  --z-index-toast: var(--z-toast);
+
   /* Crisp native radii. 12px is the ceiling — anything rounder reads as a
      web card, not an AppKit surface. */
   --radius-sm: 6px;

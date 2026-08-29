@@ -85,6 +85,11 @@ describe("CSS-first theme", () => {
     expect(themeCss).toContain("--color-diff: var(--bg-diff)");
     expect(themeCss).toContain("--color-on-accent: var(--text-on-accent)");
     expect(themeCss).toContain("--color-action-primary: var(--action-primary)");
+    // Every floating surface relies on these. Without them `z-popover` compiled
+    // to nothing and menus rendered behind the composer.
+    for (const layer of ["popover", "tooltip", "dialog", "select"]) {
+      expect(themeCss).toContain(`--z-index-${layer}: var(--z-${layer})`);
+    }
   });
 
   test("keeps code text legible on the dark terminal surface in both themes", () => {
