@@ -9,9 +9,9 @@
  *   - No dashboard, no statistics, no wall of recent activity
  *
  * The composer is docked at the bottom of the window rather than sitting under
- * the heading. The prompt sits in the lower part of the remaining surface so
- * the two read as one start action while the composer still lands in the same
- * place as the chat view after the first turn starts.
+ * the heading. The prompt remains centered in the usable surface above it,
+ * while the composer lands in the same place as the chat view after the first
+ * turn starts.
  *
  * No starter chips. Four generic prompts ("Explain this codebase",
  * "Find a bug", …) occupied the space under the composer on every launch and
@@ -137,9 +137,9 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
 
   return (
     <div className={cn("flex h-full w-full flex-col overflow-hidden bg-canvas", className)}>
-      {/* Keep the prompt close enough to the docked composer that the empty
-          surface reads as one action, not a heading and a floating widget. */}
-      <main className="scrollable flex min-h-0 flex-1 flex-col items-center justify-end overflow-y-auto px-8 pb-8 pt-6">
+      {/* Center the prompt in the usable surface. The composer is independently
+          docked below, so starting a task never moves the input. */}
+      <main className="scrollable flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-8 py-10">
         <h1
           id="new-task-heading"
           /* Named explicitly because the project name inside it is a menu
