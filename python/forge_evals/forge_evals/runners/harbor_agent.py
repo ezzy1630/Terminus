@@ -84,7 +84,7 @@ def _resolve_base_agent() -> type:
     Harbor loads the shim by import path.
     """
     try:  # pragma: no cover - exercised only where Harbor is installed
-        from harbor.agents.base import BaseAgent  # type: ignore[import-not-found]
+        from harbor.agents.base import BaseAgent
 
         return cast(type, BaseAgent)
     except Exception:
