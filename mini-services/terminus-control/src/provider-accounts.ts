@@ -72,6 +72,12 @@ export interface ProviderAccountRecord {
   readonly credentialUri: string;
   readonly fingerprint: string;
   readonly baseUrl: string;
+  readonly catalogDigest: string;
+  readonly credentialFingerprint: string;
+  readonly approvedBaseUrl: string;
+  readonly approvedCatalogDigest: string;
+  readonly secretState: string;
+  readonly secretOperationId: string;
   readonly host: string;
   readonly protocol: string;
   readonly connectorId: string;
@@ -87,11 +93,11 @@ export interface ProviderAccountRecord {
   readonly revision: number;
 }
 
+export type ProviderAccountSecretState = "none" | "import_pending" | "bound" | "revoke_pending";
+
 /** Non-secret identity the kernel reported alongside a credential. */
 export interface ProviderAccountMetadata {
   readonly account_id?: string;
-  readonly plan_type?: string;
-  readonly email?: string;
   /** Non-secret provenance for an account Terminus synthesized locally. */
   readonly connection_origin?: "installed_opencode";
 }
@@ -115,7 +121,7 @@ export interface ProviderAccountWire {
   readonly connection_destination: string;
   /** Immutable provider-catalog snapshot used to derive that destination. */
   readonly catalog_digest: string;
-  readonly metadata: { account_id?: string; plan_type?: string; email?: string };
+  readonly metadata: { account_id?: string };
   readonly discovered_at: string;
   readonly last_verified_at: string | null;
   readonly expires_at: string | null;
@@ -153,9 +159,9 @@ export function parseProviderAccountMetadata(json: string): ProviderAccountMetad
   }
   if (!isRecord(parsed)) return {};
   return {
-    ...(typeof parsed.account_id === "string" ? { account_id: parsed.account_id } : {}),
-    ...(typeof parsed.plan_type === "string" ? { plan_type: parsed.plan_type } : {}),
-    ...(typeof parsed.email === "string" ? { email: parsed.email } : {}),
+    ...(typeof parsed.account_id === "string" && /^[0-9a-f]{32}$/i.test(parsed.account_id)
+      ? { account_id: parsed.account_id.toLowerCase() }
+      : {}),
     ...(parsed.connection_origin === "installed_opencode"
       ? { connection_origin: parsed.connection_origin }
       : {}),
@@ -166,14 +172,14 @@ export function parseProviderAccountMetadata(json: string): ProviderAccountMetad
  * The client-facing account.
  *
  * `provider_metadata` is deliberately not projected: it is the local tool's own
- * bag and only the three named identity fields have a defined meaning here.
+ * bag; only the provider-bound account id has a defined routing meaning here.
  */
 export function providerAccountWire(
   account: ProviderAccountRecord,
   modelCount: number,
   catalogDigest: string,
 ): ProviderAccountWire {
-  const metadata = parseProviderAccountMetadata(account.metadataJson);
+  const metadata = parseProviderAccountMetadata(canonicalMetadataForAccount(account.source, account.metadataJson));
   return {
     id: account.id,
     source: account.source,
@@ -189,11 +195,9 @@ export function providerAccountWire(
     model_count: Math.max(0, Math.floor(modelCount)),
     credential_fingerprint: account.fingerprint,
     connection_destination: account.baseUrl,
-    catalog_digest: catalogDigest,
+    catalog_digest: account.catalogDigest || catalogDigest,
     metadata: {
       ...(metadata.account_id === undefined ? {} : { account_id: metadata.account_id }),
-      ...(metadata.plan_type === undefined ? {} : { plan_type: metadata.plan_type }),
-      ...(metadata.email === undefined ? {} : { email: metadata.email }),
     },
     discovered_at: account.discoveredAt.toISOString(),
     last_verified_at: account.lastVerifiedAt?.toISOString() ?? null,
@@ -215,12 +219,46 @@ export function providerAccountProviderId(account: Pick<ProviderAccountRecord, "
 
 /** The exact kernel scope one account's turn needs: one host, one secret. */
 export function providerAccountCapabilityScope(
-  account: Pick<ProviderAccountRecord, "host" | "credentialUri">,
+  account: Pick<
+    ProviderAccountRecord,
+    | "source"
+    | "host"
+    | "credentialUri"
+    | "fingerprint"
+    | "baseUrl"
+    | "catalogDigest"
+    | "credentialFingerprint"
+    | "approvedBaseUrl"
+    | "approvedCatalogDigest"
+    | "secretState"
+  >,
 ): { readonly networkDestinations: readonly string[]; readonly secretCapabilities: readonly string[] } {
+  if (account.source !== ZEN_SOURCE && !(
+    account.secretState === "bound"
+    && account.credentialUri !== ""
+    && account.credentialFingerprint === account.fingerprint
+    && account.approvedBaseUrl === account.baseUrl
+    && account.approvedCatalogDigest === account.catalogDigest
+  )) {
+    throw new Error("provider account has no current approved binding");
+  }
+  const destination = account.source === ZEN_SOURCE ? account.host : new URL(account.approvedBaseUrl).hostname;
   return {
-    networkDestinations: [`${account.host}:443`],
+    networkDestinations: [`${destination}:443`],
     secretCapabilities: account.credentialUri === "" ? [] : [account.credentialUri],
   };
+}
+
+export function providerAccountHasApprovedBinding(account: ProviderAccountRecord): boolean {
+  if (account.source === ZEN_SOURCE) return true;
+  return account.secretState === "bound"
+    && account.credentialUri !== ""
+    && account.credentialFingerprint !== ""
+    && account.credentialFingerprint === account.fingerprint
+    && account.approvedBaseUrl !== ""
+    && account.approvedBaseUrl === account.baseUrl
+    && account.approvedCatalogDigest !== ""
+    && account.approvedCatalogDigest === account.catalogDigest;
 }
 
 /** Whether this account may receive workspace-classified context. */
@@ -431,7 +469,6 @@ export interface MapLocalCredentialInput {
 export function mapLocalCredential(input: MapLocalCredentialInput): ProviderAccountMapping {
   const { credential } = input;
   const nowMs = input.nowMs ?? Date.now();
-  const metadata = parseProviderAccountMetadata(credential.metadataJson);
   const expiresAt = credential.expiresAtUnix > 0 ? new Date(credential.expiresAtUnix * 1_000) : null;
   const authKind = admittedAuthKind(credential.authKind);
 
@@ -442,7 +479,7 @@ export function mapLocalCredential(input: MapLocalCredentialInput): ProviderAcco
       vendorId: "openai",
       authKind: "chatgpt",
       detail: "ChatGPT subscriptions are available through the separate Codex App Server lane; the raw CLI token is not importable",
-      metadataJson: canonicalMetadata(metadata),
+      metadataJson: "{}",
       expiresAt,
     });
   }
@@ -454,12 +491,15 @@ export function mapLocalCredential(input: MapLocalCredentialInput): ProviderAcco
       vendorId: credential.source,
       authKind,
       detail: `credential source '${credential.source}' has no Terminus mapping`,
-      metadataJson: canonicalMetadata(metadata),
+      metadataJson: "{}",
       expiresAt,
     });
   }
 
   const vendorId = credential.source.slice(OPENCODE_SOURCE_PREFIX.length);
+  const metadata = vendorId === "cloudflare-workers-ai"
+    ? parseProviderAccountMetadata(credential.metadataJson)
+    : {};
   const provider = decodeModelsDevProvider(input.catalog, vendorId);
   const displayName = provider?.name ?? vendorId;
 
@@ -590,13 +630,19 @@ function resolveAccountBaseUrl(
   if (url.protocol !== "https:") {
     return { baseUrl: null, reason: `base URL '${substituted}' for '${provider.id}' is not HTTPS` };
   }
-  if (url.username !== "" || url.password !== "" || url.hash !== "" || (url.port !== "" && url.port !== "443")) {
+  if (
+    url.username !== ""
+    || url.password !== ""
+    || url.hash !== ""
+    || url.search !== ""
+    || (url.port !== "" && url.port !== "443")
+  ) {
     return { baseUrl: null, reason: `base URL '${substituted}' for '${provider.id}' has forbidden URL components` };
   }
   if (!isPublicProviderHost(url.hostname)) {
     return { baseUrl: null, reason: `base URL '${substituted}' for '${provider.id}' is not a public DNS origin` };
   }
-  return { baseUrl: trimTrailingSlashes(substituted), reason: "" };
+  return { baseUrl: trimTrailingSlashes(url.href), reason: "" };
 }
 
 /**
@@ -609,7 +655,7 @@ function accountPlaceholderValue(
   accountId: string | undefined,
 ): string | null {
   if (name !== "CLOUDFLARE_ACCOUNT_ID") return null;
-  return accountId !== undefined && /^[A-Za-z0-9_.-]{1,128}$/.test(accountId)
+  return accountId !== undefined && /^[0-9a-f]{32}$/i.test(accountId)
     ? accountId
     : null;
 }
@@ -714,7 +760,7 @@ export interface LocalCredentialDiscovery {
   readonly warnings: readonly string[];
   readonly codexInstalled: boolean;
   readonly opencodeInstalled: boolean;
-  readonly opencodeStoreStatus: "available" | "missing" | "rejected";
+  readonly opencodeStoreStatus: "available" | "missing" | "rejected" | "unavailable";
 }
 
 export interface ProviderAccountUpsert {
@@ -726,6 +772,12 @@ export interface ProviderAccountUpsert {
   readonly credentialUri: string;
   readonly fingerprint: string;
   readonly baseUrl: string;
+  readonly catalogDigest: string;
+  readonly credentialFingerprint: string;
+  readonly approvedBaseUrl: string;
+  readonly approvedCatalogDigest: string;
+  readonly secretState: ProviderAccountSecretState;
+  readonly secretOperationId: string;
   readonly host: string;
   readonly protocol: string;
   readonly connectorId: string;
@@ -766,16 +818,35 @@ export interface ProviderAccountDiscoveryDependencies {
    * Metadata only; no secret bytes cross this boundary. Optional so callers
    * that cannot probe keep the previous behaviour.
    */
-  readonly credentialResolves?: (credentialUri: string) => Promise<boolean>;
+  readonly credentialStatus?: (credentialUri: string) => Promise<"present" | "missing" | "unavailable">;
   /** Revoke a copied local credential after logout or rotation. */
   readonly revokeCredential?: (credentialUri: string) => Promise<boolean>;
-  /** Creates the row, or updates the existing row for the same source. */
+  /** Creates a row for a source that is not yet present. */
   readonly upsertAccount: (input: ProviderAccountUpsert) => Promise<ProviderAccountRecord>;
+  /** Replaces one observed row only if its security-relevant snapshot still matches. */
+  readonly reconcileAccount: (
+    input: ProviderAccountUpsert,
+    expected: ProviderAccountSecuritySnapshot,
+  ) => Promise<ProviderAccountRecord | null>;
   readonly readGatewayConfiguration: () => Promise<GatewayConfigurationSnapshot | null>;
-  readonly fetchCatalog: () => Promise<{ readonly catalog: unknown; readonly offline: boolean }>;
+  readonly fetchCatalog: () => Promise<{
+    readonly catalog: unknown;
+    readonly offline: boolean;
+    readonly digest: string;
+  }>;
   readonly newAccountId?: () => string;
+  readonly newOperationId?: () => string;
   readonly now?: () => Date;
   readonly warn?: (message: string) => void;
+}
+
+export interface ProviderAccountSecuritySnapshot {
+  readonly id: string;
+  readonly revision: number;
+  readonly fingerprint: string;
+  readonly credentialUri: string;
+  readonly secretState: ProviderAccountSecretState;
+  readonly secretOperationId: string;
 }
 
 export interface ProviderAccountDiscoveryResult {
@@ -795,6 +866,7 @@ export interface ProviderAccountConnectDependencies {
   /** Fingerprint shown with the consent surface; binds approval to exact bytes. */
   readonly expectedFingerprint: string;
   readonly expectedDestination: string;
+  readonly expectedCatalogDigest: string;
   /** Fresh per-connect destination so a failed CAS cannot overwrite a live key. */
   readonly capabilityUri: string;
   /** The user-visible confirmation must be true; discovery cannot supply it. */
@@ -809,14 +881,27 @@ export interface ProviderAccountConnectDependencies {
     readonly stored: boolean;
     readonly fingerprint: string;
   }>;
-  readonly fetchCatalog: () => Promise<{ readonly catalog: unknown; readonly offline: boolean }>;
-  /** Commit only if revision and fingerprint still match the approved row. */
-  readonly commitAccount: (
-    input: ProviderAccountUpsert,
-    expectedRevision: number,
-    expectedFingerprint: string,
+  readonly fetchCatalog: () => Promise<{
+    readonly catalog: unknown;
+    readonly offline: boolean;
+    readonly digest: string;
+  }>;
+  /** Persist the exact approval before the kernel may copy any bytes. */
+  readonly claimImport: (
+    account: ProviderAccountRecord,
+    claim: ProviderAccountImportClaim,
   ) => Promise<ProviderAccountRecord | null>;
+  readonly finalizeImport: (claimed: ProviderAccountRecord) => Promise<ProviderAccountRecord | null>;
+  readonly markImportForCleanup: (claimed: ProviderAccountRecord) => Promise<ProviderAccountRecord | null>;
   readonly now?: () => Date;
+}
+
+export interface ProviderAccountImportClaim {
+  readonly capabilityUri: string;
+  readonly operationId: string;
+  readonly credentialFingerprint: string;
+  readonly approvedBaseUrl: string;
+  readonly approvedCatalogDigest: string;
 }
 
 /**
@@ -845,6 +930,15 @@ export async function connectLocalProviderAccount(
   if (dependencies.account.credentialUri !== "") {
     throw new Error("provider account already has a credential binding; reconcile or disconnect it before connecting");
   }
+  if (dependencies.account.secretState !== "none") {
+    throw new Error("provider account credential recovery is still pending; reload it before connecting");
+  }
+  if (
+    dependencies.account.baseUrl !== dependencies.expectedDestination
+    || dependencies.account.catalogDigest !== dependencies.expectedCatalogDigest
+  ) {
+    throw new Error("provider destination changed; reload it before connecting");
+  }
 
   const discovery = await dependencies.discoverLocal();
   const credential = discovery.credentials.find((candidate) => candidate.source === dependencies.account.source);
@@ -854,14 +948,17 @@ export async function connectLocalProviderAccount(
   if (credential.fingerprint !== dependencies.expectedFingerprint) {
     throw new Error("provider credential changed after approval; run discovery and approve it again");
   }
-  const { catalog, offline } = await dependencies.fetchCatalog();
+  const { catalog, offline, digest } = await dependencies.fetchCatalog();
+  if (digest !== dependencies.expectedCatalogDigest) {
+    throw new Error("provider catalog changed after approval; reload it before connecting");
+  }
   const mapping = mapLocalCredential({
     credential,
     catalog,
     catalogOffline: offline,
     nowMs: (dependencies.now ?? (() => new Date()))().getTime(),
   });
-  if (mapping.status !== "connected" && mapping.status !== "expired") {
+  if (mapping.status !== "connected") {
     throw new Error(mapping.statusDetail || "this local credential is not supported by Terminus");
   }
   if (mapping.baseUrl !== dependencies.expectedDestination) {
@@ -872,29 +969,38 @@ export async function connectLocalProviderAccount(
   if (importLocal === undefined) {
     throw new Error("local credential import is unavailable");
   }
-  const result = await importLocal({
-    source: credential.source,
+  const claimed = await dependencies.claimImport(dependencies.account, {
     capabilityUri,
-    expectedFingerprint: dependencies.expectedFingerprint,
+    operationId: uuidV7(),
+    credentialFingerprint: dependencies.expectedFingerprint,
+    approvedBaseUrl: dependencies.expectedDestination,
+    approvedCatalogDigest: dependencies.expectedCatalogDigest,
   });
-  if (
-    !result.stored
-    || result.capabilityUri !== capabilityUri
-    || result.fingerprint !== dependencies.expectedFingerprint
-  ) {
-    throw new Error("kernel did not confirm credential storage");
+  if (claimed === null) {
+    throw new Error("provider account changed while claiming credential import; reload it before retrying");
   }
-  const committed = await dependencies.commitAccount({
-    id: dependencies.account.id,
-    ...mappingColumns(mapping),
-    credentialUri: capabilityUri,
-    fingerprint: credential.fingerprint,
-    discoveredAt: dependencies.account.discoveredAt,
-  }, dependencies.expectedRevision, dependencies.expectedFingerprint);
-  if (committed === null) {
-    throw new Error("provider account changed while connecting; reload it before retrying");
+  try {
+    const result = await importLocal({
+      source: credential.source,
+      capabilityUri,
+      expectedFingerprint: dependencies.expectedFingerprint,
+    });
+    if (
+      !result.stored
+      || result.capabilityUri !== capabilityUri
+      || result.fingerprint !== dependencies.expectedFingerprint
+    ) {
+      throw new Error("kernel did not confirm credential storage");
+    }
+    const committed = await dependencies.finalizeImport(claimed);
+    if (committed === null) {
+      throw new Error("provider account changed while connecting; reload it before retrying");
+    }
+    return committed;
+  } catch (error: unknown) {
+    await dependencies.markImportForCleanup(claimed);
+    throw error;
   }
-  return committed;
 }
 
 /**
@@ -915,6 +1021,7 @@ export async function discoverAndConnectLocalAccounts(
 ): Promise<ProviderAccountDiscoveryResult> {
   const now = dependencies.now ?? (() => new Date());
   const newAccountId = dependencies.newAccountId ?? (() => uuidV7());
+  const newOperationId = dependencies.newOperationId ?? (() => uuidV7());
   const warn = dependencies.warn ?? (() => {});
   const imported: string[] = [];
 
@@ -929,13 +1036,44 @@ export async function discoverAndConnectLocalAccounts(
     const current = existing.get(ZEN_SOURCE) ?? null;
     const upserted = await dependencies.upsertAccount({
       id: current?.id ?? newAccountId(),
-      ...mappingColumns(mapping),
+      ...mappingColumns(mapping, ""),
       credentialUri: zenAccountCredentialUri(gatewayRow),
       fingerprint: current?.fingerprint ?? "",
+      credentialFingerprint: "",
+      approvedBaseUrl: "",
+      approvedCatalogDigest: "",
+      secretState: "none",
+      secretOperationId: "",
       discoveredAt: current?.discoveredAt ?? now(),
     });
     existing.set(ZEN_SOURCE, upserted);
   }
+
+  const reconcile = async (
+    current: ProviderAccountRecord,
+    input: ProviderAccountUpsert,
+  ): Promise<ProviderAccountRecord> => {
+    const updated = await dependencies.reconcileAccount(
+      input,
+      providerAccountSecuritySnapshot(current),
+    );
+    if (updated !== null) return updated;
+    warn(`provider account ${current.source} changed during discovery; stale reconciliation was discarded`);
+    return current;
+  };
+
+  const disableUnverifiedAccounts = async (detail: string): Promise<void> => {
+    for (const current of [...existing.values()]) {
+      if (!current.source.startsWith(OPENCODE_SOURCE_PREFIX)) continue;
+      if (current.secretState === "import_pending" || current.secretState === "revoke_pending") continue;
+      const disabled = await reconcile(current, existingAccountUpsert(current, {
+        status: "error",
+        statusDetail: detail,
+        metadataJson: canonicalMetadataForAccount(current.source, current.metadataJson),
+      }));
+      existing.set(current.source, disabled);
+    }
+  };
 
   // 2. Everything the kernel can see in the local credential stores.
   let discovery: LocalCredentialDiscovery;
@@ -943,14 +1081,9 @@ export async function discoverAndConnectLocalAccounts(
     discovery = await dependencies.discoverLocal();
   } catch (error: unknown) {
     warn(`local credential discovery failed: ${errorMessage(error)}`);
-    for (const current of existing.values()) {
-      if (!current.source.startsWith(OPENCODE_SOURCE_PREFIX) || current.status !== "connected") continue;
-      const disabled = await dependencies.upsertAccount(existingAccountUpsert(current, {
-        status: "error",
-        statusDetail: "The OpenCode credential store is unavailable; routing is disabled until it can be verified.",
-      }));
-      existing.set(current.source, disabled);
-    }
+    await disableUnverifiedAccounts(
+      "The OpenCode credential store is unavailable; routing is disabled until it can be verified.",
+    );
     return {
       accounts: [...existing.values()].sort(byDisplayName),
       imported,
@@ -962,15 +1095,13 @@ export async function discoverAndConnectLocalAccounts(
     };
   }
 
-  if (discovery.opencodeStoreStatus === "rejected") {
-    for (const current of existing.values()) {
-      if (!current.source.startsWith(OPENCODE_SOURCE_PREFIX) || current.status !== "connected") continue;
-      const disabled = await dependencies.upsertAccount(existingAccountUpsert(current, {
-        status: "error",
-        statusDetail: "The OpenCode credential store was rejected; routing is disabled until it can be verified.",
-      }));
-      existing.set(current.source, disabled);
-    }
+  if (
+    discovery.opencodeStoreStatus === "rejected"
+    || discovery.opencodeStoreStatus === "unavailable"
+  ) {
+    await disableUnverifiedAccounts(discovery.opencodeStoreStatus === "rejected"
+      ? "The OpenCode credential store was rejected; routing is disabled until it can be verified."
+      : "The OpenCode credential store status is unavailable; routing is disabled until it can be verified.");
     return {
       accounts: [...existing.values()].sort(byDisplayName),
       imported,
@@ -982,9 +1113,62 @@ export async function discoverAndConnectLocalAccounts(
     };
   }
 
-  const { catalog, offline } = await dependencies.fetchCatalog();
+  const { catalog, offline, digest: catalogDigest } = await dependencies.fetchCatalog();
   const warnings = [...discovery.warnings];
   const observedSources = new Set(discovery.credentials.map((credential) => credential.source));
+
+  const candidateInput = (
+    mapping: ProviderAccountMapping,
+    current: ProviderAccountRecord | null,
+    fingerprint: string,
+    detail?: string,
+  ): ProviderAccountUpsert => ({
+    id: current?.id ?? newAccountId(),
+    ...mappingColumns(mapping, catalogDigest),
+    credentialUri: "",
+    fingerprint,
+    credentialFingerprint: "",
+    approvedBaseUrl: "",
+    approvedCatalogDigest: "",
+    secretState: "none",
+    secretOperationId: "",
+    status: mapping.status === "connected" ? "disconnected" : mapping.status,
+    statusDetail: detail ?? (mapping.status === "connected"
+      ? "Credential detected in the local OpenCode store; connect to approve copying it into the Terminus keyring."
+      : mapping.statusDetail),
+    discoveredAt: current?.discoveredAt ?? now(),
+  });
+
+  const revokeThenReplace = async (
+    current: ProviderAccountRecord,
+    replacement: ProviderAccountUpsert,
+  ): Promise<ProviderAccountRecord> => {
+    if (current.secretState === "import_pending") {
+      return reconcile(current, existingAccountUpsert(current, {
+        status: "error",
+        statusDetail: "Credential import settlement is pending; routing is disabled until recovery completes.",
+      }));
+    }
+    let claimed = current;
+    if (current.credentialUri !== "" && current.secretState !== "revoke_pending") {
+      claimed = await reconcile(current, existingAccountUpsert(current, {
+        secretState: "revoke_pending",
+        secretOperationId: newOperationId(),
+        status: "error",
+        statusDetail: "Credential cleanup is pending; routing is disabled.",
+      }));
+      if (claimed.revision === current.revision) return claimed;
+    }
+    if (claimed.credentialUri !== "") {
+      const revoked = await revokeCopiedCredential(dependencies, claimed.credentialUri, warn);
+      if (!revoked) return claimed;
+    }
+    return reconcile(claimed, {
+      ...replacement,
+      id: claimed.id,
+      discoveredAt: claimed.discoveredAt,
+    });
+  };
 
   // A fresh Terminus install has no legacy gateway row. Installation discovery
   // is sufficient for the credential-free Zen surface: model discovery still
@@ -995,9 +1179,14 @@ export async function discoverAndConnectLocalAccounts(
     const mapping = mapGatewayConfiguration(ANONYMOUS_ZEN_CONFIGURATION);
     const upserted = await dependencies.upsertAccount({
       id: newAccountId(),
-      ...mappingColumns(mapping),
+      ...mappingColumns(mapping, ""),
       credentialUri: "",
       fingerprint: "",
+      credentialFingerprint: "",
+      approvedBaseUrl: "",
+      approvedCatalogDigest: "",
+      secretState: "none",
+      secretOperationId: "",
       metadataJson: JSON.stringify({ connection_origin: "installed_opencode" }),
       discoveredAt: now(),
     });
@@ -1013,69 +1202,70 @@ export async function discoverAndConnectLocalAccounts(
       nowMs: now().getTime(),
     });
     const current = existing.get(credential.source) ?? null;
-    const accountId = current?.id ?? newAccountId();
-    // An account Terminus cannot route is stored for visibility, but its
-    // secret is not copied into the keyring: nothing would ever read it.
-    const routable = mapping.status === "connected" || mapping.status === "expired";
-    const rotated = current !== null && current.fingerprint !== credential.fingerprint;
-    // A row that already names a credential URI is only trusted if the kernel
-    // can still resolve it. Switching the kernel's secret backend, or losing
-    // the keychain entry, otherwise leaves the account broken forever: the
-    // fingerprint has not rotated, so nothing would ever re-import it.
-    const resolution = routable
-      && !rotated
-      && current !== null
+    const candidate = candidateInput(mapping, current, credential.fingerprint, current === null
+      ? undefined
+      : "Credential or destination changed; connect again to approve the current binding.");
+    if (current === null) {
+      const created = await dependencies.upsertAccount(candidate);
+      existing.set(credential.source, created);
+      continue;
+    }
+    if (current.secretState === "import_pending") {
+      existing.set(credential.source, current);
+      continue;
+    }
+    if (current.secretState === "revoke_pending") {
+      existing.set(credential.source, await revokeThenReplace(current, candidate));
+      continue;
+    }
+    const bindingMatches = current.secretState === "bound"
       && current.credentialUri !== ""
-      ? await credentialStillResolves(dependencies, current.credentialUri, warn)
-      : true;
-    const stale = resolution === false;
-    const needsImport = routable
-      && (current === null || rotated || current.credentialUri === "" || stale);
-
-    let status = mapping.status;
-    let statusDetail = mapping.statusDetail;
-    let storedUri = routable ? (current?.credentialUri ?? "") : "";
-    if (resolution === null) {
-      status = "error";
-      statusDetail = "The copied credential could not be verified; routing is disabled until the kernel recovers.";
-      storedUri = current?.credentialUri ?? "";
+      && current.credentialFingerprint === credential.fingerprint
+      && current.approvedBaseUrl === mapping.baseUrl
+      && current.approvedCatalogDigest === catalogDigest;
+    if (!bindingMatches) {
+      const updated = current.credentialUri === ""
+        ? await reconcile(current, candidate)
+        : await revokeThenReplace(current, candidate);
+      existing.set(credential.source, updated);
+      continue;
     }
-    // Discovery never imports or rotates secrets. A newly observed or rotated
-    // credential is visible, but remains disconnected until the user approves
-    // the explicit connect operation.
-    if (needsImport && resolution !== null) {
-      const oldSecretNeedsRevocation = rotated && current !== null && current.credentialUri !== "";
-      const revoked = !oldSecretNeedsRevocation
-        || await revokeCopiedCredential(dependencies, current.credentialUri, warn);
-      if (revoked) {
-        storedUri = "";
-        status = "disconnected";
-        statusDetail = current === null
-          ? "Credential detected in the local OpenCode store; connect to approve copying it into the Terminus keyring."
-          : "Credential changed or is no longer present in the Terminus keyring; connect again to approve import.";
-      } else {
-        storedUri = current?.credentialUri ?? "";
-        status = "error";
-        statusDetail = "The previous copied credential could not be revoked; routing is disabled until cleanup succeeds.";
-      }
-    } else if (!routable && current !== null && current.credentialUri !== "") {
-      const revoked = await revokeCopiedCredential(dependencies, current.credentialUri, warn);
-      storedUri = revoked ? "" : current.credentialUri;
-      if (!revoked) {
-        status = "error";
-        statusDetail = "An unusable copied credential could not be revoked; routing remains disabled.";
-      }
+    if (mapping.status !== "connected") {
+      const updated = await revokeThenReplace(current, candidate);
+      existing.set(credential.source, updated);
+      continue;
     }
-
-    const upserted = await dependencies.upsertAccount({
-      id: accountId,
-      ...mappingColumns(mapping),
-      status,
-      statusDetail,
-      credentialUri: storedUri,
-      fingerprint: credential.fingerprint,
-      discoveredAt: current?.discoveredAt ?? now(),
+    const credentialStatus = await credentialBindingStatus(dependencies, current.credentialUri, warn);
+    if (credentialStatus === "missing") {
+      const updated = await reconcile(current, candidateInput(
+        mapping,
+        current,
+        credential.fingerprint,
+        "Credential is no longer present in the Terminus keyring; connect again to approve import.",
+      ));
+      existing.set(credential.source, updated);
+      continue;
+    }
+    if (credentialStatus === "unavailable") {
+      const updated = await reconcile(current, existingAccountUpsert(current, {
+        status: "error",
+        statusDetail: "The copied credential could not be verified; routing is disabled until the kernel recovers.",
+      }));
+      existing.set(credential.source, updated);
+      continue;
+    }
+    const bound = await reconcile(current, {
+      ...candidate,
+      credentialUri: current.credentialUri,
+      credentialFingerprint: current.credentialFingerprint,
+      approvedBaseUrl: current.approvedBaseUrl,
+      approvedCatalogDigest: current.approvedCatalogDigest,
+      secretState: "bound",
+      secretOperationId: "",
+      status: "connected",
+      statusDetail: "",
     });
+    const upserted = bound;
     existing.set(credential.source, upserted);
   }
 
@@ -1088,25 +1278,31 @@ export async function discoverAndConnectLocalAccounts(
       || !current.source.startsWith(OPENCODE_SOURCE_PREFIX)
       || observedSources.has(current.source)
     ) continue;
-    const revoked = current.credentialUri === ""
-      || await revokeCopiedCredential(dependencies, current.credentialUri, warn);
-    const updated = await dependencies.upsertAccount(existingAccountUpsert(current, {
-      credentialUri: revoked ? "" : current.credentialUri,
+    const replacement = existingAccountUpsert(current, {
+      credentialUri: "",
       fingerprint: "",
-      status: revoked ? "disconnected" : "error",
-      statusDetail: revoked
-        ? "Credential is no longer present in the OpenCode store; connect again after signing in."
-        : "Credential left the OpenCode store, but the copied key could not be revoked; routing is disabled.",
-    }));
+      catalogDigest: "",
+      credentialFingerprint: "",
+      approvedBaseUrl: "",
+      approvedCatalogDigest: "",
+      secretState: "none",
+      secretOperationId: "",
+      metadataJson: "{}",
+      status: "disconnected",
+      statusDetail: "Credential is no longer present in the OpenCode store; connect again after signing in.",
+    });
+    const updated = current.credentialUri === ""
+      ? await reconcile(current, replacement)
+      : await revokeThenReplace(current, replacement);
     existing.set(current.source, updated);
   }
 
   // 3. Discovery never chooses or changes a default. An explicit connect or
   //    Settings action owns that user decision; the anonymous Zen account is
   //    selected in-memory by `resolveTurnProvider` when no default exists.
-  const accounts = [...existing.values()];
+  const accounts = await dependencies.listAccounts();
   return {
-    accounts: accounts.sort(byDisplayName),
+    accounts: [...accounts].sort(byDisplayName),
     imported: [...new Set(imported)],
     warnings,
     codexInstalled: discovery.codexInstalled,
@@ -1122,17 +1318,17 @@ export async function discoverAndConnectLocalAccounts(
  * `null` means the kernel could not answer. Callers disable routing but retain
  * the URI for a later probe; they neither import nor delete on uncertainty.
  */
-async function credentialStillResolves(
+async function credentialBindingStatus(
   dependencies: ProviderAccountDiscoveryDependencies,
   credentialUri: string,
   warn: (message: string) => void,
-): Promise<boolean | null> {
-  if (dependencies.credentialResolves === undefined) return null;
+): Promise<"present" | "missing" | "unavailable"> {
+  if (dependencies.credentialStatus === undefined) return "unavailable";
   try {
-    return await dependencies.credentialResolves(credentialUri);
+    return await dependencies.credentialStatus(credentialUri);
   } catch (error: unknown) {
     warn(`credential resolution probe failed for ${credentialUri}: ${errorMessage(error)}`);
-    return null;
+    return "unavailable";
   }
 }
 
@@ -1158,20 +1354,35 @@ export function chooseDefaultAccount(
   accounts: readonly ProviderAccountRecord[],
 ): ProviderAccountRecord | null {
   const connected = accounts
-    .filter((account) => account.status === "connected")
+    .filter((account) => account.status === "connected" && providerAccountHasApprovedBinding(account))
     .sort((left, right) => left.source.localeCompare(right.source));
   return connected.find((account) => account.source !== ZEN_SOURCE)
     ?? connected.find((account) => account.source === ZEN_SOURCE)
     ?? null;
 }
 
-function mappingColumns(mapping: ProviderAccountMapping): Omit<ProviderAccountUpsert, "id" | "credentialUri" | "fingerprint" | "discoveredAt"> {
+function mappingColumns(
+  mapping: ProviderAccountMapping,
+  catalogDigest: string,
+): Omit<
+  ProviderAccountUpsert,
+  | "id"
+  | "credentialUri"
+  | "fingerprint"
+  | "credentialFingerprint"
+  | "approvedBaseUrl"
+  | "approvedCatalogDigest"
+  | "secretState"
+  | "secretOperationId"
+  | "discoveredAt"
+> {
   return {
     source: mapping.source,
     displayName: mapping.displayName,
     vendorId: mapping.vendorId,
     authKind: mapping.authKind,
     baseUrl: mapping.baseUrl,
+    catalogDigest,
     host: mapping.host,
     protocol: mapping.protocol,
     connectorId: mapping.connectorId,
@@ -1186,7 +1397,21 @@ function mappingColumns(mapping: ProviderAccountMapping): Omit<ProviderAccountUp
 
 function existingAccountUpsert(
   account: ProviderAccountRecord,
-  changes: Partial<Pick<ProviderAccountUpsert, "credentialUri" | "fingerprint" | "status" | "statusDetail">>,
+  changes: Partial<Pick<
+    ProviderAccountUpsert,
+    | "credentialUri"
+    | "fingerprint"
+    | "baseUrl"
+    | "catalogDigest"
+    | "credentialFingerprint"
+    | "approvedBaseUrl"
+    | "approvedCatalogDigest"
+    | "secretState"
+    | "secretOperationId"
+    | "status"
+    | "statusDetail"
+    | "metadataJson"
+  >>,
 ): ProviderAccountUpsert {
   return {
     id: account.id,
@@ -1196,7 +1421,13 @@ function existingAccountUpsert(
     authKind: account.authKind,
     credentialUri: changes.credentialUri ?? account.credentialUri,
     fingerprint: changes.fingerprint ?? account.fingerprint,
-    baseUrl: account.baseUrl,
+    baseUrl: changes.baseUrl ?? account.baseUrl,
+    catalogDigest: changes.catalogDigest ?? account.catalogDigest,
+    credentialFingerprint: changes.credentialFingerprint ?? account.credentialFingerprint,
+    approvedBaseUrl: changes.approvedBaseUrl ?? account.approvedBaseUrl,
+    approvedCatalogDigest: changes.approvedCatalogDigest ?? account.approvedCatalogDigest,
+    secretState: changes.secretState ?? admittedSecretState(account.secretState),
+    secretOperationId: changes.secretOperationId ?? account.secretOperationId,
     host: account.host,
     protocol: account.protocol,
     connectorId: account.connectorId,
@@ -1204,10 +1435,29 @@ function existingAccountUpsert(
     status: changes.status ?? account.status,
     statusDetail: changes.statusDetail ?? account.statusDetail,
     billing: account.billing,
-    metadataJson: account.metadataJson,
+    metadataJson: changes.metadataJson ?? account.metadataJson,
     discoveredAt: account.discoveredAt,
     expiresAt: account.expiresAt,
   };
+}
+
+export function providerAccountSecuritySnapshot(
+  account: ProviderAccountRecord,
+): ProviderAccountSecuritySnapshot {
+  return {
+    id: account.id,
+    revision: account.revision,
+    fingerprint: account.fingerprint,
+    credentialUri: account.credentialUri,
+    secretState: admittedSecretState(account.secretState),
+    secretOperationId: account.secretOperationId,
+  };
+}
+
+function admittedSecretState(value: string): ProviderAccountSecretState {
+  return value === "import_pending" || value === "bound" || value === "revoke_pending"
+    ? value
+    : "none";
 }
 
 function byDisplayName(left: ProviderAccountRecord, right: ProviderAccountRecord): number {
@@ -1259,7 +1509,12 @@ export function resolveTurnProvider(input: ResolveTurnProviderInput): TurnProvid
     if (account === undefined) {
       return { kind: "error", code: "PROVIDER_ACCOUNT_NOT_FOUND", accountId: requested };
     }
-    if (account.status !== "connected" || account.renderProfile === "chatgpt_codex" || account.source === CODEX_SOURCE) {
+    if (
+      account.status !== "connected"
+      || !providerAccountHasApprovedBinding(account)
+      || account.renderProfile === "chatgpt_codex"
+      || account.source === CODEX_SOURCE
+    ) {
       return {
         kind: "error",
         code: "PROVIDER_ACCOUNT_UNAVAILABLE",
@@ -1276,6 +1531,7 @@ export function resolveTurnProvider(input: ResolveTurnProviderInput): TurnProvid
   if (
     installationDefault !== null
     && installationDefault.status === "connected"
+    && providerAccountHasApprovedBinding(installationDefault)
     && installationDefault.renderProfile !== "chatgpt_codex"
     && installationDefault.source !== CODEX_SOURCE
     && input.hasModel === true
@@ -1290,9 +1546,19 @@ export function resolveTurnProvider(input: ResolveTurnProviderInput): TurnProvid
 function canonicalMetadata(metadata: ProviderAccountMetadata): string {
   const ordered: Record<string, unknown> = {};
   if (metadata.account_id !== undefined) ordered.account_id = metadata.account_id;
-  if (metadata.email !== undefined) ordered.email = metadata.email;
-  if (metadata.plan_type !== undefined) ordered.plan_type = metadata.plan_type;
   return JSON.stringify(ordered);
+}
+
+/** Drop every legacy/provider extension field that Terminus does not own. */
+export function canonicalMetadataForAccount(source: string, metadataJson: string): string {
+  const metadata = parseProviderAccountMetadata(metadataJson);
+  if (source === "opencode:cloudflare-workers-ai" && metadata.account_id !== undefined) {
+    return canonicalMetadata({ account_id: metadata.account_id });
+  }
+  if (source === ZEN_SOURCE && metadata.connection_origin === "installed_opencode") {
+    return JSON.stringify({ connection_origin: "installed_opencode" });
+  }
+  return "{}";
 }
 
 function trimTrailingSlashes(value: string): string {

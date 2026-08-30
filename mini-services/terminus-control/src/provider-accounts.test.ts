@@ -69,6 +69,7 @@ const FINGERPRINT_B = "b".repeat(64);
 const FINGERPRINT_C = "c".repeat(64);
 const FINGERPRINT_D = "d".repeat(64);
 const FINGERPRINT_F = "f".repeat(64);
+const CATALOG_DIGEST = `sha256:${"1".repeat(64)}`;
 
 function credential(overrides: Partial<LocalProviderCredential> = {}): LocalProviderCredential {
   return {
@@ -83,15 +84,26 @@ function credential(overrides: Partial<LocalProviderCredential> = {}): LocalProv
 }
 
 function account(overrides: Partial<ProviderAccountRecord> = {}): ProviderAccountRecord {
+  const fingerprint = overrides.fingerprint ?? FINGERPRINT_0;
+  const baseUrl = overrides.baseUrl ?? "https://api.cerebras.ai/v1";
+  const catalogDigest = overrides.catalogDigest ?? CATALOG_DIGEST;
+  const credentialUri = overrides.credentialUri ?? providerAccountSecretUri("account-1");
+  const secretState = overrides.secretState ?? (credentialUri === "" ? "none" : "bound");
   return {
     id: "account-1",
     source: "opencode:cerebras",
     displayName: "Cerebras",
     vendorId: "cerebras",
     authKind: "api",
-    credentialUri: providerAccountSecretUri("account-1"),
-    fingerprint: FINGERPRINT_0,
-    baseUrl: "https://api.cerebras.ai/v1",
+    credentialUri,
+    fingerprint,
+    baseUrl,
+    catalogDigest,
+    credentialFingerprint: overrides.credentialFingerprint ?? (secretState === "bound" ? fingerprint : ""),
+    approvedBaseUrl: overrides.approvedBaseUrl ?? (secretState === "bound" ? baseUrl : ""),
+    approvedCatalogDigest: overrides.approvedCatalogDigest ?? (secretState === "bound" ? catalogDigest : ""),
+    secretState,
+    secretOperationId: "",
     host: "api.cerebras.ai",
     protocol: "chat_completions",
     connectorId: "openai-compatible",
@@ -105,6 +117,41 @@ function account(overrides: Partial<ProviderAccountRecord> = {}): ProviderAccoun
     lastVerifiedAt: null,
     expiresAt: null,
     revision: 1,
+    ...overrides,
+  };
+}
+
+function accountUpsert(
+  row: ProviderAccountRecord,
+  overrides: Partial<ProviderAccountUpsert> = {},
+): ProviderAccountUpsert {
+  return {
+    id: row.id,
+    source: row.source,
+    displayName: row.displayName,
+    vendorId: row.vendorId,
+    authKind: row.authKind,
+    credentialUri: row.credentialUri,
+    fingerprint: row.fingerprint,
+    baseUrl: row.baseUrl,
+    catalogDigest: row.catalogDigest,
+    credentialFingerprint: row.credentialFingerprint,
+    approvedBaseUrl: row.approvedBaseUrl,
+    approvedCatalogDigest: row.approvedCatalogDigest,
+    secretState: row.secretState === "import_pending" || row.secretState === "revoke_pending" || row.secretState === "bound"
+      ? row.secretState
+      : "none",
+    secretOperationId: row.secretOperationId,
+    host: row.host,
+    protocol: row.protocol,
+    connectorId: row.connectorId,
+    renderProfile: row.renderProfile,
+    status: row.status,
+    statusDetail: row.statusDetail,
+    billing: row.billing,
+    metadataJson: row.metadataJson,
+    discoveredAt: row.discoveredAt,
+    expiresAt: row.expiresAt,
     ...overrides,
   };
 }
@@ -136,17 +183,44 @@ describe("mapLocalCredential", () => {
   });
 
   test("substitutes only the allowlisted Cloudflare account id", () => {
+    const accountId = "0123456789abcdef0123456789abcdef";
     const mapping = mapLocalCredential({
       credential: credential({
         source: "opencode:cloudflare-workers-ai",
-        metadataJson: JSON.stringify({ account_id: "acc0unt1d" }),
+        metadataJson: JSON.stringify({ account_id: accountId }),
       }),
       catalog: CATALOG,
       nowMs: NOW_MS,
     });
     expect(mapping.status).toBe("connected");
-    expect(mapping.baseUrl).toBe("https://api.cloudflare.com/client/v4/accounts/acc0unt1d/ai/v1");
+    expect(mapping.baseUrl).toBe(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`);
     expect(mapping.host).toBe("api.cloudflare.com");
+  });
+
+  test("rejects token-shaped and dot-segment Cloudflare metadata", () => {
+    for (const accountId of ["..", "malformed-account-id", "malformed-account-id"]) {
+      const mapping = mapLocalCredential({
+        credential: credential({
+          source: "opencode:cloudflare-workers-ai",
+          metadataJson: JSON.stringify({ account_id: accountId }),
+        }),
+        catalog: CATALOG,
+        nowMs: NOW_MS,
+      });
+      expect(mapping.status).toBe("error");
+      expect(mapping.baseUrl).toBe("");
+      expect(mapping.metadataJson).toBe("{}");
+    }
+  });
+
+  test("never makes account metadata routing-active for another provider", () => {
+    const mapping = mapLocalCredential({
+      credential: credential({ metadataJson: JSON.stringify({ account_id: "0".repeat(32) }) }),
+      catalog: CATALOG,
+      nowMs: NOW_MS,
+    });
+    expect(mapping.baseUrl).toBe("https://api.cerebras.ai/v1");
+    expect(mapping.metadataJson).toBe("{}");
   });
 
   test("reports an unresolvable placeholder instead of inventing a destination", () => {
@@ -246,11 +320,7 @@ describe("mapLocalCredential", () => {
     });
     expect(mapping.baseUrl).toBe("");
     expect(mapping.host).toBe("");
-    expect(JSON.parse(mapping.metadataJson)).toEqual({
-      account_id: "acct-1",
-      email: "user@example.test",
-      plan_type: "plus",
-    });
+    expect(mapping.metadataJson).toBe("{}");
   });
 
   test("an expired ChatGPT token remains unsupported, not routable", () => {
@@ -325,18 +395,19 @@ function fakeDependencies(input: {
   readonly store?: FakeStore;
   readonly gateway?: Parameters<typeof mapGatewayConfiguration>[0] | null;
   readonly opencodeInstalled?: boolean;
-  readonly opencodeStoreStatus?: "available" | "missing" | "rejected";
+  readonly opencodeStoreStatus?: "available" | "missing" | "rejected" | "unavailable";
   /** Omitted entirely when absent, so the default (no probe) is exercised. */
-  readonly credentialResolves?: (credentialUri: string) => Promise<boolean>;
+  readonly credentialStatus?: (credentialUri: string) => Promise<"present" | "missing" | "unavailable">;
+  readonly revokeCredential?: (credentialUri: string) => Promise<boolean>;
 }): { readonly dependencies: Parameters<typeof discoverAndConnectLocalAccounts>[0]; readonly store: FakeStore } {
   const store: FakeStore = input.store ?? { rows: new Map(), imports: [] };
   let counter = 0;
   return {
     store,
     dependencies: {
-      ...(input.credentialResolves === undefined
+      ...(input.credentialStatus === undefined
         ? {}
-        : { credentialResolves: input.credentialResolves }),
+        : { credentialStatus: input.credentialStatus }),
       discoverLocal: async () => ({
         credentials: input.credentials,
         warnings: ["local-auth-store: one entry did not decode"],
@@ -351,7 +422,7 @@ function fakeDependencies(input: {
       listAccounts: async () => [...store.rows.values()],
       revokeCredential: async (credentialUri) => {
         store.revocations?.push(credentialUri);
-        return true;
+        return input.revokeCredential?.(credentialUri) ?? true;
       },
       upsertAccount: async (upsert: ProviderAccountUpsert) => {
         const current = store.rows.get(upsert.source) ?? null;
@@ -366,9 +437,29 @@ function fakeDependencies(input: {
         store.rows.set(upsert.source, row);
         return row;
       },
+      reconcileAccount: async (upsert, expected) => {
+        const current = store.rows.get(upsert.source);
+        if (
+          current === undefined
+          || current.id !== expected.id
+          || current.revision !== expected.revision
+          || current.fingerprint !== expected.fingerprint
+          || current.credentialUri !== expected.credentialUri
+          || current.secretState !== expected.secretState
+          || current.secretOperationId !== expected.secretOperationId
+        ) return null;
+        const row: ProviderAccountRecord = {
+          ...current,
+          ...upsert,
+          revision: current.revision + 1,
+        };
+        store.rows.set(upsert.source, row);
+        return row;
+      },
       readGatewayConfiguration: async () => input.gateway ?? null,
-      fetchCatalog: async () => ({ catalog: CATALOG, offline: false }),
+      fetchCatalog: async () => ({ catalog: CATALOG, offline: false, digest: CATALOG_DIGEST }),
       newAccountId: () => `account-${(counter += 1)}`,
+      newOperationId: () => `operation-${(counter += 1)}`,
       now: () => new Date(NOW_MS),
       warn: () => {},
     },
@@ -388,6 +479,7 @@ function connectDependencies(input: {
     expectedRevision: input.account.revision,
     expectedFingerprint,
     expectedDestination: input.account.baseUrl,
+    expectedCatalogDigest: input.account.catalogDigest,
     capabilityUri: providerAccountSecretUri(uuidV7()),
     userConsent: input.userConsent,
     discoverLocal: input.discovery.discoverLocal,
@@ -396,19 +488,46 @@ function connectDependencies(input: {
       input.store.imports.push({ source, capabilityUri, fingerprint: approvedFingerprint });
       return { capabilityUri, stored: true, fingerprint: approvedFingerprint };
     },
-    commitAccount: async (upsert, revision, fingerprint) => {
-      const current = input.store.rows.get(upsert.source);
-      if (current === undefined || current.revision !== revision || current.fingerprint !== fingerprint) {
-        return null;
-      }
-      const row: ProviderAccountRecord = {
-        ...current,
-        ...upsert,
-        revision: current.revision + 1,
-      };
-      input.store.rows.set(upsert.source, row);
-      return row;
-    },
+    claimImport: async (current, claim) => input.discovery.reconcileAccount(accountUpsert(current, {
+      credentialUri: claim.capabilityUri,
+      credentialFingerprint: claim.credentialFingerprint,
+      approvedBaseUrl: claim.approvedBaseUrl,
+      approvedCatalogDigest: claim.approvedCatalogDigest,
+      secretState: "import_pending",
+      secretOperationId: claim.operationId,
+      status: "error",
+    }), {
+      id: current.id,
+      revision: current.revision,
+      fingerprint: current.fingerprint,
+      credentialUri: current.credentialUri,
+      secretState: current.secretState === "bound" ? "bound" : "none",
+      secretOperationId: current.secretOperationId,
+    }),
+    finalizeImport: async (claimed) => input.discovery.reconcileAccount(accountUpsert(claimed, {
+      secretState: "bound",
+      secretOperationId: "",
+      status: "connected",
+      statusDetail: "",
+    }), {
+      id: claimed.id,
+      revision: claimed.revision,
+      fingerprint: claimed.fingerprint,
+      credentialUri: claimed.credentialUri,
+      secretState: "import_pending",
+      secretOperationId: claimed.secretOperationId,
+    }),
+    markImportForCleanup: async (claimed) => input.discovery.reconcileAccount(accountUpsert(claimed, {
+      secretState: "revoke_pending",
+      status: "error",
+    }), {
+      id: claimed.id,
+      revision: claimed.revision,
+      fingerprint: claimed.fingerprint,
+      credentialUri: claimed.credentialUri,
+      secretState: "import_pending",
+      secretOperationId: claimed.secretOperationId,
+    }),
     now: () => new Date(NOW_MS),
   };
 }
@@ -533,6 +652,27 @@ describe("discoverAndConnectLocalAccounts", () => {
     expect(result.accounts[0]).toMatchObject({ status: "error", credentialUri: oldUri });
   });
 
+  test("an unavailable or legacy-unspecified store never drives logout", async () => {
+    const oldUri = providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b");
+    const store: FakeStore = {
+      rows: new Map([["opencode:cerebras", account({ credentialUri: oldUri })]]),
+      imports: [],
+      revocations: [],
+    };
+    const result = await discoverAndConnectLocalAccounts(fakeDependencies({
+      credentials: [],
+      store,
+      opencodeStoreStatus: "unavailable",
+    }).dependencies);
+
+    expect(store.revocations).toEqual([]);
+    expect(result.accounts[0]).toMatchObject({
+      status: "error",
+      credentialUri: oldUri,
+      secretState: "bound",
+    });
+  });
+
   test("rotation revokes old copied material before offering reconnect", async () => {
     const oldUri = providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b");
     const revocations: string[] = [];
@@ -554,6 +694,112 @@ describe("discoverAndConnectLocalAccounts", () => {
       status: "disconnected",
       credentialUri: "",
       fingerprint: FINGERPRINT_B,
+    });
+  });
+
+  test("a failed rotation delete cannot reactivate old bytes on the next sweep", async () => {
+    const oldUri = providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b");
+    const revocations: string[] = [];
+    const store: FakeStore = {
+      rows: new Map([["opencode:cerebras", account({
+        credentialUri: oldUri,
+        fingerprint: FINGERPRINT_A,
+        credentialFingerprint: FINGERPRINT_A,
+      })]]),
+      imports: [],
+      revocations,
+    };
+    await discoverAndConnectLocalAccounts(fakeDependencies({
+      credentials: [credential({ fingerprint: FINGERPRINT_B })],
+      store,
+      revokeCredential: async () => false,
+    }).dependencies);
+
+    expect(store.rows.get("opencode:cerebras")).toMatchObject({
+      credentialUri: oldUri,
+      fingerprint: FINGERPRINT_A,
+      credentialFingerprint: FINGERPRINT_A,
+      secretState: "revoke_pending",
+      status: "error",
+    });
+
+    await discoverAndConnectLocalAccounts(fakeDependencies({
+      credentials: [credential({ fingerprint: FINGERPRINT_B })],
+      store,
+      revokeCredential: async () => true,
+    }).dependencies);
+    expect(revocations).toEqual([oldUri, oldUri]);
+    expect(store.rows.get("opencode:cerebras")).toMatchObject({
+      credentialUri: "",
+      fingerprint: FINGERPRINT_B,
+      credentialFingerprint: "",
+      secretState: "none",
+      status: "disconnected",
+    });
+  });
+
+  test("catalog drift revokes the old binding and requires fresh destination consent", async () => {
+    const oldUri = providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b");
+    const store: FakeStore = {
+      rows: new Map([["opencode:cerebras", account({ credentialUri: oldUri })]]),
+      imports: [],
+      revocations: [],
+    };
+    const { dependencies } = fakeDependencies({ credentials: [credential()], store });
+    const nextDigest = `sha256:${"2".repeat(64)}`;
+    await discoverAndConnectLocalAccounts({
+      ...dependencies,
+      fetchCatalog: async () => ({ catalog: CATALOG, offline: false, digest: nextDigest }),
+    });
+
+    expect(store.revocations).toEqual([oldUri]);
+    expect(store.rows.get("opencode:cerebras")).toMatchObject({
+      credentialUri: "",
+      catalogDigest: nextDigest,
+      approvedCatalogDigest: "",
+      secretState: "none",
+      status: "disconnected",
+    });
+  });
+
+  test("a stale discovery CAS never deletes or overwrites a concurrently connected credential", async () => {
+    const oldUri = providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b");
+    const freshUri = providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7c");
+    const store: FakeStore = {
+      rows: new Map([["opencode:cerebras", account({ credentialUri: oldUri, fingerprint: FINGERPRINT_A })]]),
+      imports: [],
+      revocations: [],
+    };
+    const { dependencies } = fakeDependencies({
+      credentials: [credential({ fingerprint: FINGERPRINT_B })],
+      store,
+    });
+    let raced = false;
+    await discoverAndConnectLocalAccounts({
+      ...dependencies,
+      reconcileAccount: async (upsert, expected) => {
+        if (!raced && upsert.secretState === "revoke_pending") {
+          raced = true;
+          const current = store.rows.get(upsert.source)!;
+          store.rows.set(upsert.source, account({
+            ...current,
+            credentialUri: freshUri,
+            fingerprint: FINGERPRINT_B,
+            credentialFingerprint: FINGERPRINT_B,
+            revision: current.revision + 1,
+          }));
+          return null;
+        }
+        return dependencies.reconcileAccount(upsert, expected);
+      },
+    });
+
+    expect(store.revocations).toEqual([]);
+    expect(store.rows.get("opencode:cerebras")).toMatchObject({
+      credentialUri: freshUri,
+      fingerprint: FINGERPRINT_B,
+      credentialFingerprint: FINGERPRINT_B,
+      secretState: "bound",
     });
   });
 
@@ -609,7 +855,7 @@ describe("discoverAndConnectLocalAccounts", () => {
     const store: FakeStore = { rows: new Map(), imports: [] };
     const credentials = [credential({ source: "opencode:cerebras", fingerprint: FINGERPRINT_A })];
     await discoverAndConnectLocalAccounts(
-      fakeDependencies({ credentials, store, credentialResolves: async () => true }).dependencies,
+      fakeDependencies({ credentials, store, credentialStatus: async () => "present" }).dependencies,
     );
     const before = store.rows.get("opencode:cerebras")!;
     expect(before.credentialUri).toBe("");
@@ -622,9 +868,9 @@ describe("discoverAndConnectLocalAccounts", () => {
       fakeDependencies({
         credentials,
         store,
-        credentialResolves: async (uri) => {
+        credentialStatus: async (uri) => {
           probed.push(uri);
-          return false;
+          return "missing";
         },
       }).dependencies,
     );
@@ -633,19 +879,22 @@ describe("discoverAndConnectLocalAccounts", () => {
     expect(store.imports).toHaveLength(0);
     expect(recovered.imported).toEqual([]);
     expect(store.rows.get("opencode:cerebras")?.credentialUri).toBe("");
-    expect(store.rows.get("opencode:cerebras")?.status).toBe("disconnected");
+    expect(store.rows.get("opencode:cerebras")).toMatchObject({
+      status: "disconnected",
+      secretState: "none",
+    });
   });
 
   test("a disconnected credential remains disconnected during discovery", async () => {
     const store: FakeStore = { rows: new Map(), imports: [] };
     const credentials = [credential({ source: "opencode:cerebras", fingerprint: FINGERPRINT_A })];
     await discoverAndConnectLocalAccounts(
-      fakeDependencies({ credentials, store, credentialResolves: async () => true }).dependencies,
+      fakeDependencies({ credentials, store, credentialStatus: async () => "present" }).dependencies,
     );
     store.imports.length = 0;
 
     const second = await discoverAndConnectLocalAccounts(
-      fakeDependencies({ credentials, store, credentialResolves: async () => true }).dependencies,
+      fakeDependencies({ credentials, store, credentialStatus: async () => "present" }).dependencies,
     );
     expect(store.imports).toHaveLength(0);
     expect(second.imported).toHaveLength(0);
@@ -669,7 +918,7 @@ describe("discoverAndConnectLocalAccounts", () => {
     const { dependencies } = fakeDependencies({
       credentials,
       store,
-      credentialResolves: async (): Promise<never> => { throw new Error("kernel restarting"); },
+      credentialStatus: async (): Promise<never> => { throw new Error("kernel restarting"); },
     });
     const result = await discoverAndConnectLocalAccounts({
       ...dependencies,
@@ -714,6 +963,24 @@ describe("discoverAndConnectLocalAccounts", () => {
     expect(store.imports[0]?.source).toBe("opencode:cerebras");
     expect(connected.credentialUri).toMatch(/^secret:\/\/provider-account\//);
     expect(connected.status).toBe("connected");
+  });
+
+  test("an expired credential cannot be imported", async () => {
+    const store: FakeStore = { rows: new Map(), imports: [] };
+    const { dependencies } = fakeDependencies({
+      credentials: [credential({ expiresAtUnix: Math.floor(NOW_MS / 1_000) - 1 })],
+      store,
+    });
+    const detected = await discoverAndConnectLocalAccounts(dependencies);
+    const expired = detected.accounts.find((row) => row.source === "opencode:cerebras")!;
+    expect(expired.status).toBe("expired");
+    await expect(connectLocalProviderAccount(connectDependencies({
+      discovery: dependencies,
+      store,
+      account: expired,
+      userConsent: true,
+    }))).rejects.toThrow("expired");
+    expect(store.imports).toEqual([]);
   });
 
   test("Codex credentials cannot be imported even with consent", async () => {
@@ -795,7 +1062,10 @@ describe("discoverAndConnectLocalAccounts", () => {
         fingerprint: FINGERPRINT_F,
       }),
     })).rejects.toThrow("kernel did not confirm");
-    expect(store.rows.get("opencode:cerebras")?.status).toBe("disconnected");
+    expect(store.rows.get("opencode:cerebras")).toMatchObject({
+      status: "error",
+      secretState: "revoke_pending",
+    });
   });
 
   test("a concurrent row change makes the final account commit fail closed", async () => {
@@ -812,9 +1082,12 @@ describe("discoverAndConnectLocalAccounts", () => {
 
     await expect(connectLocalProviderAccount({
       ...connect,
-      commitAccount: async () => null,
+      finalizeImport: async () => null,
     })).rejects.toThrow("changed while connecting");
-    expect(store.rows.get("opencode:cerebras")?.status).toBe("disconnected");
+    expect(store.rows.get("opencode:cerebras")).toMatchObject({
+      status: "error",
+      secretState: "revoke_pending",
+    });
     expect(store.imports).toHaveLength(1);
   });
 });
@@ -911,10 +1184,12 @@ describe("resolveTurnProvider", () => {
 
 describe("account projections", () => {
   test("the wire form exposes identity and never provider metadata", () => {
+    const accountId = "0123456789abcdef0123456789abcdef";
     const wire = providerAccountWire(
       account({
+        source: "opencode:cloudflare-workers-ai",
         metadataJson: JSON.stringify({
-          account_id: "acct-1",
+          account_id: accountId,
           plan_type: "plus",
           email: "user@example.test",
           provider_metadata: { accountId: "cf-account" },
@@ -926,14 +1201,12 @@ describe("account projections", () => {
       "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     );
     expect(wire.metadata).toEqual({
-      account_id: "acct-1",
-      plan_type: "plus",
-      email: "user@example.test",
+      account_id: accountId,
     });
     expect(wire.model_count).toBe(12);
     expect(wire.credential_fingerprint).toBe(FINGERPRINT_0);
     expect(wire.connection_destination).toBe("https://api.cerebras.ai/v1");
-    expect(wire.catalog_digest).toBe("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(wire.catalog_digest).toBe(CATALOG_DIGEST);
     expect(wire.discovered_at).toBe(new Date(NOW_MS).toISOString());
     expect(wire.last_verified_at).toBe(new Date(NOW_MS).toISOString());
     expect(wire.expires_at).toBe(new Date(NOW_MS + 1_000).toISOString());
@@ -946,12 +1219,12 @@ describe("account projections", () => {
   });
 
   test("the capability scope is one host and at most one secret", () => {
-    expect(providerAccountCapabilityScope({ host: "api.cerebras.ai", credentialUri: "secret://provider-account/a" }))
+    expect(providerAccountCapabilityScope(account({ credentialUri: "secret://provider-account/a" })))
       .toEqual({
         networkDestinations: ["api.cerebras.ai:443"],
         secretCapabilities: ["secret://provider-account/a"],
       });
-    expect(providerAccountCapabilityScope({ host: "opencode.ai", credentialUri: "" }))
+    expect(providerAccountCapabilityScope(account({ source: ZEN_SOURCE, host: "opencode.ai", credentialUri: "" })))
       .toEqual({ networkDestinations: ["opencode.ai:443"], secretCapabilities: [] });
   });
 
