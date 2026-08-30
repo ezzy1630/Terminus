@@ -45,6 +45,17 @@ describe("extractPatchChanges", () => {
     ]);
   });
 
+  test("does not unwrap a bare envelope's unrelated result field", () => {
+    expect(extractPatchChanges(JSON.stringify({
+      status: "success",
+      result: {
+        data: {
+          changed_files: [{ path: "not-a-tool-result.ts", operation: "EDIT" }],
+        },
+      },
+    }))).toEqual([]);
+  });
+
   test("malformed JSON yields no changes", () => {
     expect(extractPatchChanges("not json")).toEqual([]);
   });

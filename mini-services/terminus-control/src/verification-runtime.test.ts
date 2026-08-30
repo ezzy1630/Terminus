@@ -244,8 +244,81 @@ describe("resolveWorkspaceRevision fallback", () => {
     ]);
   });
 
+  test("Git revision lookup hashes every path when long paths force short batches", async () => {
+    const paths = Array.from(
+      { length: 300 },
+      (_, index) => `untracked/${"p".repeat(190)}-${index}.ts`,
+    );
+    const calls: Array<{ readonly program: string; readonly args: readonly string[] }> = [];
+    let callIndex = 0;
+    const clients = {
+      process: {
+        Start(request: { readonly command: { readonly program: string; readonly args: readonly string[] } }) {
+          calls.push(request.command);
+          const output = callIndex === 0
+            ? `${"a".repeat(40)}\n`
+            : callIndex === 1
+              ? paths.map((path) => `?? ${path}\0`).join("")
+              : request.command.args.slice(3).map(() => "b".repeat(40)).join("\n") + "\n";
+          callIndex += 1;
+          return {
+            subscribe(observer: { next: (event: unknown) => void }) {
+              observer.next({ stdout: { bytes: new TextEncoder().encode(output) } });
+              observer.next({ exited: { exitCode: 0 } });
+              return { unsubscribe: () => undefined };
+            },
+          };
+        },
+      },
+    };
+    const revision = await resolveWorkspaceRevision(
+      clients as unknown as Parameters<typeof resolveWorkspaceRevision>[0],
+      {} as Parameters<typeof resolveWorkspaceRevision>[1],
+      "workspace",
+    );
+    expect(revision).toMatch(/^git:a{40}:dirty:[0-9a-f]{64}$/);
+    const hashCalls = calls.filter((call) => call.args[0] === "hash-object");
+    const batchSizes = hashCalls.map((call) => call.args.length - 3);
+    expect(batchSizes.length).toBeGreaterThan(1);
+    expect(batchSizes.every((size) => size > 0 && size < 256)).toBe(true);
+    expect(batchSizes.reduce((sum, size) => sum + size, 0)).toBe(paths.length);
+  });
+
+  test("Git revision lookup admits deleted-only worktrees without hashing absent paths", async () => {
+    const calls: Array<{ readonly program: string; readonly args: readonly string[] }> = [];
+    const outputs = [
+      { stdout: `${"a".repeat(40)}\n`, exitCode: 0 },
+      { stdout: " D deleted file.ts\0", exitCode: 0 },
+    ];
+    const clients = {
+      process: {
+        Start(request: { readonly command: { readonly program: string; readonly args: readonly string[] } }) {
+          calls.push(request.command);
+          const output = outputs.shift();
+          if (output === undefined) throw new Error("unexpected process call");
+          return {
+            subscribe(observer: { next: (event: unknown) => void }) {
+              observer.next({ stdout: { bytes: new TextEncoder().encode(output.stdout) } });
+              observer.next({ exited: { exitCode: output.exitCode } });
+              return { unsubscribe: () => undefined };
+            },
+          };
+        },
+      },
+    };
+    const revision = await resolveWorkspaceRevision(
+      clients as unknown as Parameters<typeof resolveWorkspaceRevision>[0],
+      {} as Parameters<typeof resolveWorkspaceRevision>[1],
+      "workspace",
+    );
+    expect(revision).toMatch(/^git:a{40}:dirty:[0-9a-f]{64}$/);
+    expect(calls.map((call) => call.args[0])).toEqual(["rev-parse", "status"]);
+  });
+
   test("rejects unbounded or unterminated Git status output", () => {
     expect(() => parseGitStatusPorcelain(" M file.ts")).toThrow("NUL terminated");
     expect(() => parseGitStatusPorcelain(`${"x".repeat(512 * 1024)}\0`)).toThrow("bounded workspace revision limit");
+    expect(() => parseGitStatusPorcelain("xx file.ts\0")).toThrow("malformed porcelain");
+    expect(() => parseGitStatusPorcelain("R  renamed.ts\0")).toThrow("missing its old path");
   });
 });

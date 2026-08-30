@@ -94,7 +94,9 @@ export function extractPatchChanges(resultJson: string): readonly WorkspaceChang
   // result envelope. Accept both shapes at this boundary so a bounded context
   // window cannot erase durable patch observations.
   const wrapper = parsed as ToolResultTranscriptShape;
-  const envelope = isRecord(wrapper.result) ? wrapper.result : parsed;
+  const envelope = wrapper.protocol === "terminus.tool-result.v1" && isRecord(wrapper.result)
+    ? wrapper.result
+    : parsed;
   const data = isRecord(envelope.data) ? envelope.data : envelope;
   const files = (data as PatchResultShape).changed_files;
   if (!Array.isArray(files)) return [];

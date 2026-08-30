@@ -239,7 +239,7 @@ export function parseGitStatusPorcelain(output: string): readonly GitStatusEntry
   const entries: GitStatusEntry[] = [];
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index]!;
-    if (record.length < 4 || record[2] !== " ") {
+    if (record.length < 4 || record[2] !== " " || !/^[ MADRCU?!]{2}$/.test(record.slice(0, 2))) {
       throw new Error("git status output contained a malformed porcelain record");
     }
     const status = record.slice(0, 2);
@@ -310,7 +310,8 @@ async function hashChangedGitPaths(
     pathHashes.set(entry.path, null);
   }
   const paths = [...pathsToHash].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
-  for (let offset = 0; offset < paths.length; offset += MAX_GIT_HASH_BATCH_PATHS) {
+  let offset = 0;
+  while (offset < paths.length) {
     const batch: string[] = [];
     let batchBytes = 0;
     for (const path of paths.slice(offset, offset + MAX_GIT_HASH_BATCH_PATHS)) {
@@ -341,7 +342,9 @@ async function hashChangedGitPaths(
       throw new Error("git changed-path hash output was malformed or incomplete");
     }
     batch.forEach((path, index) => pathHashes.set(path, hashes[index]!));
-    offset += batch.length - 1;
+    // The byte cap can make a batch smaller than the path-count cap. Advance
+    // by exactly what was sent, or paths between batches would be skipped.
+    offset += batch.length;
   }
   return pathHashes;
 }
