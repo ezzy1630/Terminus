@@ -814,8 +814,7 @@ mod tests {
                 .expect("bwrap fixture metadata")
                 .permissions();
             permissions.set_mode(0o755);
-            std::fs::set_permissions(&bwrap, permissions)
-                .expect("make bwrap fixture executable");
+            std::fs::set_permissions(&bwrap, permissions).expect("make bwrap fixture executable");
 
             let backend = LinuxSandboxBackend::with_bwrap_path(bwrap.clone());
             assert!(
