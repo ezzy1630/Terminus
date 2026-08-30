@@ -98,6 +98,17 @@ describe("extractLastCommand", () => {
     expect(outcome?.failed).toBe(true);
     expect(outcome?.exitCode).toBe(2);
   });
+
+  test("reads exit code zero from a canonical tool-result transcript", () => {
+    const outcome = extractLastCommand(
+      "bun verify.ts",
+      JSON.stringify({
+        protocol: "terminus.tool-result.v1",
+        result: { status: "success", data: { exit_code: 0, stdout: "ok", stderr: "" } },
+      }),
+    );
+    expect(outcome).toEqual({ command: "bun verify.ts", exitCode: 0, failed: false });
+  });
 });
 
 describe("deriveWorldSignals", () => {
@@ -129,5 +140,28 @@ describe("deriveWorldSignals", () => {
     expect(signals.changedFiles).toEqual([]);
     expect(signals.diagnostics).toEqual([]);
     expect(signals.lastCommand).toBeNull();
+  });
+
+  test("parses stdout and stderr from a canonical failing tool-result transcript", () => {
+    const signals = deriveWorldSignals([
+      [
+        "exec",
+        JSON.stringify({
+          protocol: "terminus.tool-result.v1",
+          result: {
+            status: "error",
+            data: {
+              exit_code: 1,
+              stdout: "FAILED tests/auth.test.ts::rejects_expired - AssertionError: expired token accepted",
+              stderr: "src/auth.ts(42,7): error TS2345: Type 'string' is not assignable",
+            },
+          },
+        }),
+      ],
+    ]);
+    expect(signals.lastCommand).toEqual({ command: "exec", exitCode: 1, failed: true });
+    expect(signals.failingTests[0]?.id).toBe("tests/auth.test.ts::rejects_expired");
+    expect(signals.diagnostics[0]?.path).toBe("src/auth.ts");
+    expect(signals.diagnostics[0]?.line).toBe(42);
   });
 });

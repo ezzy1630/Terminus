@@ -80,6 +80,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Remove the durable transcript wrapper while preserving the universal
+ * result envelope used by both bare and settled tool artifacts.
+ */
+function unwrapToolResultTranscript(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const wrapper = value as ToolResultTranscriptShape;
+  if (wrapper.protocol === "terminus.tool-result.v1" && isRecord(wrapper.result)) {
+    return wrapper.result;
+  }
+  return value;
+}
+
 /** Decode a settled patch tool result into workspace changes. */
 export function extractPatchChanges(resultJson: string): readonly WorkspaceChange[] {
   let parsed: unknown;
@@ -88,15 +101,8 @@ export function extractPatchChanges(resultJson: string): readonly WorkspaceChang
   } catch {
     return [];
   }
-  if (!isRecord(parsed)) return [];
-  // Settled artifacts store the provider-facing transcript wrapper around the
-  // result (`terminus.tool-result.v1`). Older artifacts contain the bare
-  // result envelope. Accept both shapes at this boundary so a bounded context
-  // window cannot erase durable patch observations.
-  const wrapper = parsed as ToolResultTranscriptShape;
-  const envelope = wrapper.protocol === "terminus.tool-result.v1" && isRecord(wrapper.result)
-    ? wrapper.result
-    : parsed;
+  const envelope = unwrapToolResultTranscript(parsed);
+  if (envelope === null) return [];
   const data = isRecord(envelope.data) ? envelope.data : envelope;
   const files = (data as PatchResultShape).changed_files;
   if (!Array.isArray(files)) return [];
@@ -178,11 +184,12 @@ export function extractLastCommand(
   } catch {
     return null;
   }
-  if (!isRecord(parsed)) return null;
-  const data = isRecord(parsed.data) ? parsed.data : parsed;
+  const envelope = unwrapToolResultTranscript(parsed);
+  if (envelope === null) return null;
+  const data = isRecord(envelope.data) ? envelope.data : envelope;
   const exitCode =
     typeof data.exit_code === "number" ? data.exit_code : null;
-  const status = typeof parsed.status === "string" ? parsed.status : "unknown";
+  const status = typeof envelope.status === "string" ? envelope.status : "unknown";
   return {
     command: commandLine.slice(0, 500),
     exitCode,
@@ -235,8 +242,9 @@ export function deriveWorldSignals(
 function extractExecOutput(resultJson: string): string {
   try {
     const parsed: unknown = JSON.parse(resultJson);
-    if (!isRecord(parsed)) return "";
-    const data = isRecord(parsed.data) ? parsed.data : parsed;
+    const envelope = unwrapToolResultTranscript(parsed);
+    if (envelope === null) return "";
+    const data = isRecord(envelope.data) ? envelope.data : envelope;
     const stdout = typeof data.stdout === "string" ? data.stdout : "";
     const stderr = typeof data.stderr === "string" ? data.stderr : "";
     return `${stdout}\n${stderr}`.slice(0, 64 * 1_024);
