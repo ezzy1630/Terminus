@@ -9,8 +9,8 @@ application before calling the accessibility gate complete.
 
 - The sidebar uses native buttons for navigation and task rows. Long task
   sections use roving focus with `ArrowUp`/`ArrowDown`, `Home`, and `End`.
-- The composer is a multiline textarea. `⌘Enter`/`Ctrl+Enter` sends or steers;
-  `Enter` inserts a newline.
+- The composer is a multiline textarea. `Enter` sends or queues,
+  `⌘Enter`/`Ctrl+Enter` sends or steers, and `Shift+Enter` inserts a newline.
 - The command palette supports arrows, `Home`, `End`, `Enter`, and `Esc`.
 - Diff review supports `J`, `K`, `[`, `]`, and `U` when focus is not in an
   editable or interactive control. See `keyboard-shortcuts.md` for the full

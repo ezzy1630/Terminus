@@ -179,7 +179,7 @@ function CommandPaletteImpl({
   open,
   onClose,
   commands,
-  placeholder = "Search commands…",
+  placeholder = "Search tasks and commands…",
   className,
 }: CommandPaletteProps): JSX.Element {
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -335,7 +335,7 @@ function CommandPaletteImpl({
             onChange={(e) => setQuery(e.target.value)}
             placeholder={placeholder}
             role="combobox"
-            aria-label="Search commands"
+            aria-label="Search tasks and commands"
             aria-controls="command-palette-results"
             aria-autocomplete="list"
             aria-expanded="true"

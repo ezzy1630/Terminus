@@ -182,38 +182,28 @@ function openOnProjectsTree(): void {
   window.localStorage.setItem("terminus-desktop.sidebar-view.v1", "projects");
 }
 
-describe("the sidebar header", () => {
-  test("names the current project and keeps the add control visible with no projects", async () => {
+function openOnActivity(): void {
+  window.localStorage.setItem("terminus-desktop.sidebar-view.v1", "recent");
+}
+
+describe("the sidebar project view", () => {
+  test("keeps the add control visible with no projects and has no redundant app menu", () => {
     openOnProjectsTree();
     install([], null);
     render(<Sidebar onOpenProject={() => undefined} />);
 
-    // The old build hid `+` until a project existed, which is exactly backwards.
     expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Switch project" })).not.toBeInTheDocument();
+  });
 
-    cleanup();
+  test("selecting a project row lands on that project's new-task screen", async () => {
     openOnProjectsTree();
-    install([session("a", "Terminus", "file:///Volumes/Workspace/Terminus")], "a");
-    render(<Sidebar onOpenProject={() => undefined} />);
-    expect(screen.getByRole("button", { name: "Switch project" })).toHaveTextContent("Terminus");
-  });
-
-  test("the header names the app until a project is chosen", () => {
-    // The header is the switcher, so it is always present — an empty label
-    // would leave the column headed by a bare chevron.
-    install([], null);
-    render(<Sidebar onOpenProject={() => undefined} />);
-    expect(screen.getByRole("button", { name: "Switch project" })).toHaveTextContent("Terminus");
-  });
-
-  test("switching from the header lands on the project's new-task screen", async () => {
     install([session("a", "Terminus"), session("b", "Site")], "a");
     const onNavigate = vi.fn();
     const user = userEvent.setup();
     render(<Sidebar onNavigate={onNavigate} onOpenProject={() => undefined} />);
 
-    await user.click(screen.getByRole("button", { name: "Switch project" }));
-    await user.click(await screen.findByRole("menuitem", { name: /Site/ }));
+    await user.click(screen.getByRole("button", { name: "Site" }));
 
     await waitFor(() => expect(useTerminusStore.getState().selectedSessionId).toBe("b"));
     // Landing on the previous project's task while the header says "Site"
@@ -309,7 +299,7 @@ describe("inbox grouping", () => {
 });
 
 describe("the sidebar inbox", () => {
-  test("opens on activity and swaps to projects without changing the workspace destination", async () => {
+  test("switches through visible Projects and Activity controls without changing the workspace destination", async () => {
     const user = userEvent.setup();
     install([session("a", "Terminus")], "a");
     useTerminusStore.setState({
@@ -317,28 +307,29 @@ describe("the sidebar inbox", () => {
     });
     render(<Sidebar onOpenProject={() => undefined} />);
 
-    // Priority and recency are the default orientation. Project hierarchy is
-    // still one explicit action away and the destination itself never moves.
+    // Projects is the stable default. Both choices stay named and visible.
     expect(screen.getByText("Clean git and rebuild")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Show projects" })).toHaveAttribute("aria-pressed", "true");
-
-    await user.click(screen.getByRole("button", { name: "Show projects" }));
-
-    // Same task, now filed under its project. This is a sidebar projection, so
-    // the primary destinations remain available and no new task is created.
     expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
-    expect(screen.getByText("Clean git and rebuild")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Show activity" })).toHaveAttribute("aria-pressed", "false");
-    expect(screen.getByRole("button", { name: "New task" })).toBeInTheDocument();
-    expect(window.localStorage.getItem("terminus-desktop.sidebar-view.v1")).toBe("project");
+    expect(screen.getByRole("button", { name: "Projects" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Activity" })).toHaveAttribute("aria-pressed", "false");
 
-    await user.click(screen.getByRole("button", { name: "Show activity" }));
+    await user.click(screen.getByRole("button", { name: "Activity" }));
+
+    // Same task, now filed by activity. This is a sidebar projection, so the
+    // primary destinations remain available and no new task is created.
     expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
+    expect(screen.getByText("Clean git and rebuild")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Activity" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "New task" })).toBeInTheDocument();
     expect(window.localStorage.getItem("terminus-desktop.sidebar-view.v1")).toBe("recent");
+
+    await user.click(screen.getByRole("button", { name: "Projects" }));
+    expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
+    expect(window.localStorage.getItem("terminus-desktop.sidebar-view.v1")).toBe("project");
   });
 
   test("selecting an inbox row opens that task", async () => {
+    openOnActivity();
     const user = userEvent.setup();
     const onNavigate = vi.fn();
     install([session("a", "Terminus")], "a");
@@ -363,6 +354,7 @@ describe("the sidebar inbox", () => {
   // no undo is a trap. Crucially, the row does not move either way: only
   // *finishing* files a task, and only *state* decides which shelf it is on.
   test("a finished task is marked unread in its day rather than hoisted into the queue", async () => {
+    openOnActivity();
     const user = userEvent.setup();
     install([session("a", "Terminus")], "a");
     const finished = { ...task("t-done", "Ship the release", localAt(28, 9)), status: "COMPLETED" as const };
@@ -386,6 +378,7 @@ describe("the sidebar inbox", () => {
   });
 
   test("a read terminal failure leaves Priority and settles into recency", () => {
+    openOnActivity();
     install([session("a", "Terminus")], "a");
     const failed = {
       ...task("t-failed", "Old failed request", localAt(28, 9)),

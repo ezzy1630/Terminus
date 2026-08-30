@@ -16,6 +16,7 @@ Windows. These bindings are not user-configurable.
 | `⌘D` | Open or close Changes for the selected task |
 | `⌘]` | Toggle the inspector |
 | `⌘\\` | Toggle the sidebar |
+| `⌘J` | Show Activity and focus Priority |
 | `⌘.` | Stop the run on the selected task |
 | `⌘1`–`⌘9` | Select task 1–9 in the active session |
 
@@ -42,19 +43,19 @@ accelerator Terminus registers.
 
 | Shortcut | Action |
 | --- | --- |
-| `↵` | Send a new message, or steer the running turn |
+| `↵` | Send a new message, or queue it while a run is active |
 | `⇧↵` | Insert a newline |
-| `⌘↵` | Send or steer (retained for muscle memory) |
+| `⌘↵` | Send a new message, or steer the running turn |
 
-`↵` and `⌘↵` do the same thing. Shift is what makes a newline, so a multi-line
-message is `⇧↵` between lines and `↵` to send.
+Plain Return is the non-disruptive path. During an active run it queues the
+message for the next turn. Command-Return explicitly steers the current run.
+Shift-Return always inserts a newline.
 
 While an input method has an active composition — Japanese, Chinese, Korean —
 `↵` commits the candidate and does not send. The composer detects this through
 both `isComposing` and the legacy `keyCode === 229` that WebKit reports.
 
-The composer intentionally has no queue, stop, or interrupt shortcut. Stop is a
-separate control, offered only while a run is in flight.
+Stop is a separate control, offered only while a run is in flight.
 
 ## Command palette
 
@@ -75,8 +76,8 @@ uses the shared focus hook, so `Tab` and `Shift+Tab` stay within the palette.
 | `Return` | Open the focused task title's conversation |
 | `Space` | Open the focused task title's conversation |
 
-Preview is an explicit item in each task's actions menu. The menu trigger and
-items use their native button/menu keyboard behavior; the card does not
+Show context is an explicit item in each task's actions menu. The menu trigger
+and items use their native button/menu keyboard behavior; the card does not
 override Space with a second meaning.
 
 ## Diff review

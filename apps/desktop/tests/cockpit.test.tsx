@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -398,7 +398,9 @@ describe("truthful operator cockpit", () => {
 
     expect(screen.getByRole("button", { name: /Sessions|Board|Kanban/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Mission Ledger" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Agents" })).toBeInTheDocument();
+    // Agents has no complete, actionable control-plane surface, so it is not
+    // exposed as a permanent destination.
+    expect(screen.queryByRole("button", { name: "Agents" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Sessions|Board|Kanban/ }));
 
     expect(onNavigate).toHaveBeenNthCalledWith(1, "board");
@@ -589,7 +591,7 @@ describe("truthful operator cockpit", () => {
     // Exactly one, deliberately: the sidebar used to offer "Open project"
     // three times at once — the Spaces header, the empty state, and a docked
     // nav row.
-    await user.click(screen.getByRole("button", { name: "Show projects" }));
+    await user.click(screen.getByRole("button", { name: "Projects" }));
     await user.click(screen.getByRole("button", { name: "Open project" }));
 
     expect(await screen.findByRole("dialog", { name: "Open project" })).toBeInTheDocument();
@@ -600,27 +602,31 @@ describe("truthful operator cockpit", () => {
     const refreshAll = vi.fn(async () => {});
     useTerminusStore.setState({ refreshAll });
     window.localStorage.setItem("terminus-desktop.onboarding.completed.v1", "true");
-    const user = userEvent.setup();
     render(<App />);
     await waitFor(() => expect(refreshAll).toHaveBeenCalled());
 
-    // The palette is reached from the task search's quick actions rather
-    // than from a second magnifying glass beside the first.
-    await user.click(screen.getByRole("button", { name: "Search tasks" }));
-    await user.click(await screen.findByRole("option", { name: /Commands/ }));
+    // Global search and navigation share one visible command surface.
+    const searchTrigger = screen.getByRole("button", { name: "Search and commands" });
+    await userEvent.click(searchTrigger);
 
-    expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
+    const commandDialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await waitFor(() => expect(commandDialog).toContainElement(document.activeElement as HTMLElement));
     expect(screen.getByText("Open board")).toBeInTheDocument();
     expect(screen.queryByText("Task overview")).not.toBeInTheDocument();
     expect(screen.queryByText("Task changes")).not.toBeInTheDocument();
     expect(screen.queryByText("Toggle inspector")).not.toBeInTheDocument();
+
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(searchTrigger).toHaveFocus());
   });
 
-  test("keeps a Board-only canonical task selected across the task workspace tabs", async () => {
+  test("opens Board-only canonical task context in the shared inspector", async () => {
     const refreshAll = vi.fn(async () => {});
     useTerminusStore.setState({ refreshAll });
     window.localStorage.setItem("terminus-desktop.onboarding.completed.v1", "true");
     vi.spyOn(arpV2, "listTasks").mockResolvedValue([CANONICAL_TASK]);
+    vi.spyOn(arpV2, "getTask").mockResolvedValue(CANONICAL_TASK);
+    vi.spyOn(arpV2, "listEffects").mockResolvedValue([]);
     vi.spyOn(arpV2, "listMaterialQuestions").mockResolvedValue([]);
     vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue({
       readyState: 1,
@@ -635,25 +641,13 @@ describe("truthful operator cockpit", () => {
     await user.click(screen.getByRole("button", { name: /Sessions|Board|Kanban/ }));
     await screen.findByRole("heading", { name: /Sessions|Board|Kanban/ });
     await user.click(await screen.findByRole("button", { name: "Actions for Polish the desktop UI" }));
-    await user.click(screen.getByRole("menuitem", { name: /Task details|View details/ }));
+    await user.click(screen.getByRole("menuitem", { name: "Show context" }));
 
-    // Two tabs, session first. The retired governance tabs must not come back.
-    const sessionTab = await screen.findByRole("tab", { name: "Session" });
-    expect(sessionTab).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "Changes" })).toBeInTheDocument();
-    expect(screen.getAllByRole("tab")).toHaveLength(2);
-    for (const retired of ["Overview", "Activity", "Replay", "Usage", "Evidence"]) {
-      expect(screen.queryByRole("tab", { name: retired })).not.toBeInTheDocument();
-    }
-
-    // Switching tabs must not drop the canonical task that the Board selected.
-    await user.click(screen.getByRole("tab", { name: "Changes" }));
-    await waitFor(() => expect(screen.getByRole("tab", { name: "Changes" })).toHaveAttribute("aria-selected", "true"));
-
-    // A board-only canonical task has no durable event stream yet, so Changes
-    // states that plainly instead of rendering an empty pane.
-    expect(await screen.findByText("Choose a task")).toBeInTheDocument();
-    expect(document.querySelector('[data-cockpit-state="task-required"]')).toBeInTheDocument();
+    const taskPanel = await screen.findByTestId("task-v2-panel");
+    await waitFor(() => expect(taskPanel).toHaveTextContent("Polish the desktop UI"));
+    expect(taskPanel).toHaveTextContent("RUNNING");
+    expect(screen.queryByRole("tab", { name: "Session" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Changes" })).not.toBeInTheDocument();
   });
 
   // The Agents workspace is built from a directory of departments, operators

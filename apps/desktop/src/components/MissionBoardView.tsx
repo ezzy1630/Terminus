@@ -77,7 +77,7 @@ interface MissionBoardData {
 }
 interface MissionBoardViewProps {
   onOpenTask: (task: TaskV2Snapshot) => void;
-  onInspectTask: (taskId: string) => void;
+  onInspectTask: (task: TaskV2Snapshot) => void;
 }
 
 type StreamState = "connecting" | "live" | "reconnecting";
@@ -169,21 +169,18 @@ function taskMenuItems({
   task,
   pending,
   onOpen,
-  onSelect,
   onInspect,
   onTransition,
 }: {
   task: TaskV2Snapshot;
   pending: boolean;
   onOpen: (task: TaskV2Snapshot) => void;
-  onSelect: (taskId: string) => void;
-  onInspect: (taskId: string) => void;
+  onInspect: (task: TaskV2Snapshot) => void;
   onTransition: (task: TaskV2Snapshot, targetStatus: TaskV2Status, destructive: boolean) => void;
 }): MenuItem[] {
   return [
     { id: "open", label: "Open conversation", onSelect: () => onOpen(task) },
-    { id: "preview", label: "Quick preview", onSelect: () => onSelect(task.id) },
-    { id: "details", label: "View details", onSelect: () => onInspect(task.id) },
+    { id: "context", label: "Show context", onSelect: () => onInspect(task) },
     ...directTaskActions(task).map((action) => ({
       id: `transition-${action.targetStatus.toLowerCase()}`,
       label: action.label,
@@ -287,7 +284,7 @@ const MissionBoardCard = memo(function MissionBoardCard({
   pending: boolean;
   onSelect: (taskId: string) => void;
   onOpen: (task: TaskV2Snapshot) => void;
-  onInspect: (taskId: string) => void;
+  onInspect: (task: TaskV2Snapshot) => void;
   onFocusCard: (taskId: string) => void;
   registerRef: (taskId: string, element: HTMLElement | null) => void;
   onDragStart: (task: TaskV2Snapshot, event: DragEvent<HTMLElement>) => void;
@@ -333,7 +330,7 @@ const MissionBoardCard = memo(function MissionBoardCard({
   // panel rather than a board.
   const showGlyph = isRunning || needsAttention;
 
-  const menuItems = taskMenuItems({ task, pending, onOpen, onSelect, onInspect, onTransition });
+  const menuItems = taskMenuItems({ task, pending, onOpen, onInspect, onTransition });
 
   return (
     <ContextMenu items={menuItems}>
@@ -490,7 +487,7 @@ function BoardColumn({
   lifecycleFor: (task: TaskV2Snapshot) => TaskLifecycle;
   onSelectTask: (taskId: string) => void;
   onOpenTask: (task: TaskV2Snapshot) => void;
-  onInspectTask: (taskId: string) => void;
+  onInspectTask: (task: TaskV2Snapshot) => void;
   onFocusCard: (taskId: string) => void;
   registerCardRef: (taskId: string, element: HTMLElement | null) => void;
   onTransition: (task: TaskV2Snapshot, targetStatus: TaskV2Status, destructive: boolean) => void;
@@ -1439,7 +1436,6 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                       task,
                       pending: pendingTaskId === task.id,
                       onOpen: onOpenTask,
-                      onSelect: selectBoardTask,
                       onInspect: onInspectTask,
                       onTransition: chooseTransition,
                     })}

@@ -1008,7 +1008,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
             onBlur={flushPendingDraft}
             onKeyDown={onKeyDown}
             rows={1}
-            placeholder={task ? "Reply or steer…" : isStartSurface ? "Do anything" : "Describe what you want to build…"}
+            placeholder={task ? "Message the agent…" : "Describe the task…"}
             aria-label="Message composer"
             role="textbox"
             aria-multiline="true"

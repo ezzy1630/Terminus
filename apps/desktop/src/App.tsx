@@ -21,9 +21,9 @@
  * task inspector and operator cockpit are split behind React.lazy boundaries.
  */
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, Ellipsis, FolderClosed, MessageCircle, PanelLeft, PanelRight } from "lucide-react";
+import { ArrowLeft, ArrowRight, Ellipsis, FolderClosed, MessageCircle, PanelLeft, PanelRight, Search } from "lucide-react";
 import { Layout } from "./components/Layout";
-import { ConnectionBanner } from "./components/ConnectionBanner";
+import { ConnectionBanner, useConnectionIssueVisible } from "./components/ConnectionBanner";
 import { ProviderAccountsNotice } from "./components/ProviderAccountsNotice";
 import { projectUriToPath } from "./lib/projects";
 import { readSidebarVisible, writeSidebarVisible } from "./lib/sidebar-prefs";
@@ -83,8 +83,6 @@ import { DialogSurface } from "./ui/Dialog";
 import { IconButton } from "./ui/IconButton";
 import { Menu, type MenuItem } from "./ui/Menu";
 import { Skeleton, Spinner } from "./ui/Status";
-import { Tabs } from "./ui/Tabs";
-import { TaskRequiredState } from "./components/Cockpit/CockpitPrimitives";
 
 /**
  * Feature chunks, named rather than inlined into `lazy()` so they can also be
@@ -102,25 +100,21 @@ import { TaskRequiredState } from "./components/Cockpit/CockpitPrimitives";
  * They are all pulled in on the frame after the shell paints instead. First
  * paint is still unblocked; everything after it is already in memory.
  */
-const importTaskSearch = () => import("./components/TaskSearch");
 const importCommandPalette = () => import("./components/CommandPalette");
 const importSettings = () => import("./components/Settings");
 const importOnboarding = () => import("./components/Onboarding");
 const importReviewPane = () => import("./components/ReviewPane");
 const importConversation = () => import("./components/Conversation");
 const importInspector = () => import("./components/Inspector");
-const importAgentsView = () => import("./components/AgentsView");
 
 const FEATURE_CHUNKS = [
   // The surfaces behind the sidebar and the task tabs come first: they are
   // what the operator reaches for before anything else.
   importConversation,
   importInspector,
-  importTaskSearch,
   importCommandPalette,
   importSettings,
   importReviewPane,
-  importAgentsView,
   importOnboarding,
 ];
 
@@ -130,10 +124,6 @@ function warmFeatureChunks(): void {
   for (const load of FEATURE_CHUNKS) void load().catch(() => { /* the boundary retries */ });
 }
 
-const TaskSearch = lazy(async () => {
-  const searchModule = await importTaskSearch();
-  return { default: searchModule.TaskSearch };
-});
 const CommandPalette = lazy(async () => {
   const paletteModule = await importCommandPalette();
   return { default: paletteModule.CommandPalette };
@@ -164,12 +154,6 @@ const Inspector = lazy(async () => {
   return { default: inspectorModule.Inspector };
 });
 
-
-const AgentsView = lazy(async () => {
-  const agentsModule = await importAgentsView();
-  return { default: agentsModule.AgentsView };
-});
-
 function SelectedTaskReviewPane({
   taskId,
   onClose,
@@ -193,12 +177,6 @@ function SelectedTaskReviewPane({
   );
 }
 
-import {
-  parseTaskWorkspaceTab as parseTaskWorkspaceTabValue,
-  taskWorkspaceTabs,
-  type TaskWorkspaceTab,
-} from "./lib/session-view";
-
 /**
  * Which surfaces show the task-context dock.
  *
@@ -212,10 +190,7 @@ const SURFACES_WITH_INSPECTOR = new Set<SidebarDestination>(["chat", "board"]);
 
 const ONBOARDING_KEY = "terminus-desktop.onboarding.completed.v1";
 const INSPECTOR_VISIBILITY_KEY = "terminus-desktop.inspector-visible.";
-type AppOverlay = "palette" | "search" | "settings" | "onboarding" | null;
-// Session-first tabs live in lib/session-view.
-const parseTaskWorkspaceTab = parseTaskWorkspaceTabValue;
-
+type AppOverlay = "palette" | "settings" | "onboarding" | null;
 /** Matches `--duration-fast`, which drives the `dialog-out` keyframes. */
 const OVERLAY_EXIT_MS = 140;
 
@@ -353,6 +328,7 @@ export function App(): JSX.Element {
   const refreshAll = useTerminusStore((s) => s.refreshAll);
   const selectedSessionId = useTerminusStore((s) => s.selectedSessionId);
   const sessions = useTerminusStore((s) => s.sessions);
+  const tasksBySession = useTerminusStore((s) => s.tasksBySession);
   const selectedTaskId = useTerminusStore((s) => s.selectedTaskId);
   const selectedTaskPage = useTerminusStore((s) => s.selectedSessionId ? s.taskPagesBySession[s.selectedSessionId] : undefined);
   const loadMoreTasks = useTerminusStore((s) => s.loadMoreTasks);
@@ -361,7 +337,6 @@ export function App(): JSX.Element {
   const stopTask = useTerminusStore((s) => s.stopTask);
   const setDraft = useTerminusStore((s) => s.setDraft);
   const selectedTask = useSelectedTask();
-  const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const selectedSessionTasks = useSelectedSessionTasks();
   // The stored status says ACTIVE for as long as a task exists. What the shell
   // reports is what the run is actually doing.
@@ -388,16 +363,15 @@ export function App(): JSX.Element {
     useTerminusStore.getState().selectedTaskId ? "chat" : "new_task",
   );
   const [selectedCanonicalTaskId, setSelectedCanonicalTaskId] = useState<string | null>(null);
-  const [taskWorkspaceTab, setTaskWorkspaceTab] = useState<TaskWorkspaceTab>("session");
-
   const [changesOpen, setChangesOpen] = useState(false);
   const [inspectorVisibilityByTask, setInspectorVisibilityByTask] = useState<Record<string, boolean>>({});
   // Hiding the rail is a deliberate act — usually to give a diff the width —
   // and it did not survive a relaunch, so the next launch undid it.
   const [sidebarVisible, setSidebarVisible] = useState(readSidebarVisible);
-  const inspectorVisible = selectedTaskId === null
+  const contextTaskId = selectedTask?.id ?? selectedCanonicalTaskId;
+  const inspectorVisible = contextTaskId === null
     ? false
-    : inspectorVisibilityByTask[selectedTaskId] ?? readInspectorVisibility(selectedTaskId);
+    : inspectorVisibilityByTask[contextTaskId] ?? readInspectorVisibility(contextTaskId);
 
   useEffect(() => {
     if (selectedTaskId && activeDestination === "new_task") {
@@ -421,9 +395,7 @@ export function App(): JSX.Element {
 
   useLayoutEffect(() => {
     const previous = previousOverlayRef.current;
-    if (previous === null && overlay !== null) {
-      setAppDialogFocusOrigin(document.activeElement instanceof HTMLElement ? document.activeElement : null);
-    } else if (previous !== null && overlay === null) {
+    if (previous !== null && overlay === null) {
       restoreAppDialogFocusOrigin();
     }
     previousOverlayRef.current = overlay;
@@ -433,12 +405,26 @@ export function App(): JSX.Element {
     if (previousOverlayRef.current !== null) restoreAppDialogFocusOrigin();
   }, []);
 
+  /**
+   * Capture and release the launching control before Radix hides the app tree.
+   * Leaving focus on that control for the opening commit causes Chromium to
+   * reject `aria-hidden` on the shell and announce the background as active.
+   */
+  const openOverlay = useCallback((next: Exclude<AppOverlay, null>): void => {
+    if (overlay === null) {
+      const origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      setAppDialogFocusOrigin(origin);
+      origin?.blur();
+    }
+    setOverlay(next);
+  }, [overlay]);
+
   const toggleInspector = useCallback((): void => {
-    if (!selectedTaskId) return;
-    const next = !(inspectorVisibilityByTask[selectedTaskId] ?? readInspectorVisibility(selectedTaskId));
-    setInspectorVisibilityByTask((current) => ({ ...current, [selectedTaskId]: next }));
-    try { window.localStorage.setItem(`${INSPECTOR_VISIBILITY_KEY}${selectedTaskId}`, String(next)); } catch { /* optional preference */ }
-  }, [inspectorVisibilityByTask, selectedTaskId]);
+    if (!contextTaskId || changesOpen) return;
+    const next = !(inspectorVisibilityByTask[contextTaskId] ?? readInspectorVisibility(contextTaskId));
+    setInspectorVisibilityByTask((current) => ({ ...current, [contextTaskId]: next }));
+    try { window.localStorage.setItem(`${INSPECTOR_VISIBILITY_KEY}${contextTaskId}`, String(next)); } catch { /* optional preference */ }
+  }, [changesOpen, contextTaskId, inspectorVisibilityByTask]);
 
   const goToNewTask = useCallback((): void => {
     setActiveDestination("new_task");
@@ -453,30 +439,24 @@ export function App(): JSX.Element {
     if (destination !== "chat") setChangesOpen(false);
   }, []);
 
-  const openTaskWorkspace = useCallback((tab: TaskWorkspaceTab): void => {
-    const allowed = taskWorkspaceTabs().some((entry) => entry.value === tab);
-    setTaskWorkspaceTab(allowed ? tab : "session");
-    setActiveDestination("task_details");
+  const inspectBoardTask = useCallback((task: TaskV2Snapshot): void => {
+    setSelectedCanonicalTaskId(task.id);
+    if (task.conversationContext !== null) selectTask(task.id);
+    setInspectorVisibilityByTask((current) => ({ ...current, [task.id]: true }));
+    try { window.localStorage.setItem(`${INSPECTOR_VISIBILITY_KEY}${task.id}`, "true"); } catch { /* optional preference */ }
     setChangesOpen(false);
-  }, []);
-
-  const inspectCanonicalTask = useCallback((taskId: string): void => {
-    setSelectedCanonicalTaskId(taskId);
-    setTaskWorkspaceTab("session");
-    setActiveDestination("task_details");
-    setChangesOpen(false);
-  }, []);
+  }, [selectTask]);
 
   const openBoardTask = useCallback((task: TaskV2Snapshot): void => {
     if (task.conversationContext === null) {
-      inspectCanonicalTask(task.id);
+      inspectBoardTask(task);
       return;
     }
     setSelectedCanonicalTaskId(null);
     setActiveDestination("chat");
     setChangesOpen(false);
     selectTask(task.id);
-  }, [inspectCanonicalTask, selectTask]);
+  }, [inspectBoardTask, selectTask]);
 
   /** Open a task by id — from a clicked notification, or from the board. */
   const openTaskById = useCallback((taskId: string): void => {
@@ -515,6 +495,7 @@ export function App(): JSX.Element {
   // The connection state is a fact about the whole window, so it is checked and
   // shown here rather than inferred separately by each surface.
   useHealthMonitor();
+  const connectionIssueVisible = useConnectionIssueVisible();
 
   const openSettings = useCallback((category: SettingCategoryId = "appearance"): void => {
     // Always in-app. Settings used to prefer a second native window, which
@@ -523,16 +504,16 @@ export function App(): JSX.Element {
     // current. Every entry point — the menu bar's ⌘,, the sidebar gear, the
     // palette — routes through here, so they all stay in one window.
     setSettingsRequest((current) => ({ category, nonce: current.nonce + 1 }));
-    setOverlay("settings");
-  }, []);
+    openOverlay("settings");
+  }, [openOverlay]);
 
   const openProject = useCallback((projectPath?: string): void => {
     // React passes a MouseEvent to unwrapped click handlers. Keep the native
     // drop path, but never let an event object become persisted path state.
     setOnboardingProjectPath(typeof projectPath === "string" ? projectPath : undefined);
     setOnboardingInitialStep(2);
-    setOverlay("onboarding");
-  }, []);
+    openOverlay("onboarding");
+  }, [openOverlay]);
 
   useEffect(() => {
     const desktop = window.terminusDesktop;
@@ -540,7 +521,8 @@ export function App(): JSX.Element {
     return desktop.onCommand((commandId) => {
       switch (commandId) {
         case "command-palette":
-          setOverlay((current) => current === "palette" ? null : "palette");
+          if (previousOverlayRef.current === "palette") setOverlay(null);
+          else openOverlay("palette");
           break;
         case "open-project":
           openProject();
@@ -573,7 +555,7 @@ export function App(): JSX.Element {
         }
       }
     });
-  }, [goToNewTask, openProject, openSettings, selectedTaskId, toggleInspector]);
+  }, [goToNewTask, openOverlay, openProject, openSettings, selectedTaskId, toggleInspector]);
 
   /**
    * Where the native shell is asking the window to go.
@@ -620,10 +602,9 @@ export function App(): JSX.Element {
     const objective = activeDestination === "chat"
       ? selectedTask?.contract?.objective?.trim()
       : undefined;
-    const project = selectedSession?.title ?? "Terminus";
-    const title = objective ? `${objective} — ${project}` : project;
+    const title = objective ? `${objective} — Terminus` : "Terminus";
     void window.terminusDesktop?.setWindowTitle(title);
-  }, [activeDestination, selectedSession?.title, selectedTask?.contract?.objective]);
+  }, [activeDestination, selectedTask?.contract?.objective]);
 
   // Initial data load.
   useEffect(() => {
@@ -652,7 +633,8 @@ export function App(): JSX.Element {
     const onKey = (e: KeyboardEvent): void => {
       if (matchesShortcut(e, FIXED_SHORTCUTS.commandPalette)) {
         e.preventDefault();
-        setOverlay((current) => current === "palette" ? null : current === null ? "palette" : current);
+        if (overlay === "palette") setOverlay(null);
+        else if (overlay === null) openOverlay("palette");
         return;
       }
       if (matchesShortcut(e, FIXED_SHORTCUTS.settings)) {
@@ -710,7 +692,7 @@ export function App(): JSX.Element {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [goToNewTask, openProject, openSettings, overlay, selectedSessionTasks, selectedTaskId, selectTask, toggleInspector]);
+  }, [goToNewTask, openOverlay, openProject, openSettings, overlay, selectedSessionTasks, selectedTaskId, selectTask, toggleInspector]);
 
   useEffect(() => {
     const onOpenSettings = (event: Event): void => {
@@ -720,9 +702,7 @@ export function App(): JSX.Element {
       openSettings(settingsCategoryFor(detail?.category));
     };
     const openOnboarding = (): void => openProject();
-    const openCommandPalette = (): void => setOverlay("palette");
-    const openTaskSearch = (): void => setOverlay((current) => current === "search" ? null : current === null ? "search" : current);
-    window.addEventListener("terminus:open-task-search", openTaskSearch);
+    const openCommandPalette = (): void => openOverlay("palette");
     window.addEventListener("terminus:open-settings", onOpenSettings);
     window.addEventListener("terminus:open-onboarding", openOnboarding);
     window.addEventListener("terminus:open-command-palette", openCommandPalette);
@@ -730,13 +710,11 @@ export function App(): JSX.Element {
       window.removeEventListener("terminus:open-settings", onOpenSettings);
       window.removeEventListener("terminus:open-onboarding", openOnboarding);
       window.removeEventListener("terminus:open-command-palette", openCommandPalette);
-      window.removeEventListener("terminus:open-task-search", openTaskSearch);
     };
-  }, [openProject, openSettings]);
+  }, [openOverlay, openProject, openSettings]);
 
   // Build the command catalog. Memoized so the palette doesn't re-rank
   // on every App re-render.
-  const taskCommandsEnabled = selectedTaskId !== null || selectedCanonicalTaskId !== null;
   // Stop applies to whichever task is on screen, including one selected only
   // on the board and therefore absent from the v1 selection.
   const stopTarget = selectedTaskId ?? selectedCanonicalTaskId;
@@ -777,17 +755,18 @@ export function App(): JSX.Element {
           selectTask(null);
         },
       }),
-      ...selectedSessionTasks.map((task) => ({
+      ...sessions.flatMap((session) => (tasksBySession[session.id] ?? []).map((task) => ({
         id: `task.open.${task.id}`,
         label: task.contract?.objective ?? task.id,
         group: "Task" as const,
-        description: `Open loaded task ${task.id}`,
-        keywords: [task.id, "open", "switch", "loaded task"],
+        description: `Open in ${session.title}`,
+        keywords: [task.id, session.title, "open", "switch", "loaded task"],
         action: () => {
+          selectSession(session.id);
           selectTask(task.id);
           openDestination("chat");
         },
-      })),
+      }))),
       ...(selectedSessionId && selectedTaskPage?.nextCursor ? [{
         id: `task.load-more.${selectedSessionId}`,
         label: "Load more tasks",
@@ -797,7 +776,7 @@ export function App(): JSX.Element {
         action: () => loadMoreTasks(selectedSessionId),
       }] : []),
     ],
-    [canStopRun, cycleTheme, goToNewTask, loadMoreTasks, openDestination, openProject, openSettings, openTaskWorkspace, selectSession, selectTask, selectedSessionId, selectedSessionTasks, selectedTask, selectedTaskId, selectedTaskPage?.nextCursor, sessions, sidebarVisible, stopTarget, stopTask, taskCommandsEnabled, toggleDensity, toggleInspector],
+    [canStopRun, cycleTheme, goToNewTask, loadMoreTasks, openDestination, openProject, openSettings, selectSession, selectTask, selectedSessionId, selectedTaskId, selectedTaskPage?.nextCursor, sessions, sidebarVisible, stopTarget, stopTask, tasksBySession, toggleDensity, toggleInspector],
   );
 
   /**
@@ -814,19 +793,23 @@ export function App(): JSX.Element {
         label: "Copy task ID",
         onSelect: () => { void navigator.clipboard?.writeText(selectedTask.id); },
       },
-      {
-        id: "task.show-changes",
-        label: "Show changes",
-        shortcut: shortcutDisplay(FIXED_SHORTCUTS.showChanges),
-        onSelect: () => setChangesOpen(true),
-      },
-      {
-        id: "task.toggle-inspector",
-        label: inspectorVisible ? "Hide context panel" : "Show context panel",
-        shortcut: shortcutDisplay(FIXED_SHORTCUTS.toggleInspector),
-        onSelect: toggleInspector,
-      },
     ];
+    if (!changesOpen) {
+      items.push(
+        {
+          id: "task.show-changes",
+          label: "Show changes",
+          shortcut: shortcutDisplay(FIXED_SHORTCUTS.showChanges),
+          onSelect: () => setChangesOpen(true),
+        },
+        {
+          id: "task.toggle-inspector",
+          label: inspectorVisible ? "Hide context panel" : "Show context panel",
+          shortcut: shortcutDisplay(FIXED_SHORTCUTS.toggleInspector),
+          onSelect: toggleInspector,
+        },
+      );
+    }
     // Offered only against a run that can actually be stopped. "Stop" on an
     // idle task is a button whose only possible outcome is an error.
     if (selectedRunIsActive) {
@@ -840,7 +823,7 @@ export function App(): JSX.Element {
       });
     }
     return items;
-  }, [inspectorVisible, selectedRunIsActive, selectedTask, stopTask, toggleInspector]);
+  }, [changesOpen, inspectorVisible, selectedRunIsActive, selectedTask, stopTask, toggleInspector]);
 
   const showNewTask = selectedTaskId === null && activeDestination === "new_task";
   const showNavigationSurface = selectedTaskId === null && activeDestination === "chat";
@@ -855,6 +838,8 @@ export function App(): JSX.Element {
     if (!selectedTaskId) return;
     const existing = useTerminusStore.getState().draftsByTask[selectedTaskId]?.trim() ?? "";
     setDraft(selectedTaskId, existing ? `${existing}\n\n${instruction}` : instruction);
+    setChangesOpen(false);
+    window.requestAnimationFrame(() => window.dispatchEvent(new Event("terminus:focus-composer")));
   }, [selectedTaskId, setDraft]);
 
   const conversation = (
@@ -880,25 +865,20 @@ export function App(): JSX.Element {
                 first; both are hairline strips that render nothing when they
                 have nothing to say. */}
             <ConnectionBanner />
-            <ProviderAccountsNotice />
+            {connectionIssueVisible ? null : <ProviderAccountsNotice />}
           </>
         )}
         sidebarVisible={sidebarVisible}
-        inspectorVisible={SURFACES_WITH_INSPECTOR.has(activeDestination) && inspectorVisible && durableTaskId !== null && !changesOpen}
+        inspectorVisible={SURFACES_WITH_INSPECTOR.has(activeDestination) && inspectorVisible && contextTaskId !== null && !changesOpen}
         backgroundInert={overlay !== null}
-        center={activeDestination === "task_details" ? (
-          <span className="ui-label text-secondary">{selectedSession?.title ?? "Task"}</span>
-        ) : activeDestination === "chat" && selectedTask ? (
+        center={activeDestination === "chat" && selectedTask ? (
           <span className="flex min-w-0 items-center gap-2 text-primary">
             <FolderClosed size={14} className="shrink-0 text-tertiary" aria-hidden />
             {/* Native document titles are 13px semibold; the 15px page title
                 made the bar read as a web page header. The run's state is not
                 repeated here — the sidebar row and the composer both show it,
                 and a third copy in the title bar was the one that never moved. */}
-            <span className="min-w-0 truncate text-base font-semibold">
-              <span className="mr-1.5 text-secondary">{selectedSession?.title ?? "Task"} /</span>
-              {selectedTask.contract?.objective ?? selectedTask.id}
-            </span>
+            <span className="truncate text-base font-semibold">{selectedTask.contract?.objective ?? selectedTask.id}</span>
             <Menu
               label="Task actions"
               align="start"
@@ -928,9 +908,10 @@ export function App(): JSX.Element {
           />
         }
         inspector={
-          SURFACES_WITH_INSPECTOR.has(activeDestination) && durableTaskId ? (
+          SURFACES_WITH_INSPECTOR.has(activeDestination) && contextTaskId ? (
             <Suspense fallback={null}>
               <Inspector
+                canonicalTaskId={selectedCanonicalTaskId}
                 onShowChanges={() => setChangesOpen(true)}
               />
             </Suspense>
@@ -943,45 +924,7 @@ export function App(): JSX.Element {
             ) : activeDestination === "board" ? (
               <MissionBoardView
                 onOpenTask={openBoardTask}
-                onInspectTask={inspectCanonicalTask}
-              />
-            ) : activeDestination === "agents" ? (
-              <AgentsView />
-            ) : activeDestination === "task_details" ? (
-              <Tabs
-                value={taskWorkspaceTab}
-                onValueChange={(value) => {
-                  const tab = parseTaskWorkspaceTab(value);
-                  if (tab) setTaskWorkspaceTab(tab);
-                }}
-                label="Task workspace views"
-                items={[
-                  ...taskWorkspaceTabs().map((tab) => ({
-                    value: tab.value,
-                    label: tab.label,
-                    content: tab.value === "session"
-                      ? (
-                          <div className="flex h-full flex-col">
-                            <div className="min-h-0 flex-1">{conversation}</div>
-                            <div className="composer-dock shrink-0 pb-3 pt-2">
-                              <Composer />
-                            </div>
-                          </div>
-                        )
-                      : durableTaskId
-                        ? (
-                            <SelectedTaskReviewPane
-                              taskId={durableTaskId}
-                              onClose={() => setTaskWorkspaceTab("session")}
-                              onDraftRevision={draftReviewRevision}
-                            />
-                          )
-                        // The review pane reads the durable task's event
-                        // stream, which a task selected only on the board does
-                        // not have yet. Say so rather than render a blank tab.
-                        : <TaskRequiredState feature="Changes" />,
-                  })),
-                ]}
+                onInspectTask={inspectBoardTask}
               />
             ) : showNavigationSurface ? (
               <ChatDestinationSurface onStartTask={goToNewTask} />
@@ -1014,11 +957,9 @@ export function App(): JSX.Element {
           </Suspense>
         }
         left={
-          /* Codex's cluster, in Codex's order: the panel toggle that owns the
-             column beneath it, then the shell's own back/forward. The project
-             name is no longer duplicated here — it is the sidebar's header,
-             directly below, and two switchers for one project was one too
-             many. */
+          /* The panel toggle owns the column beneath it; back and forward are
+             the shell's navigation. Project switching lives in the project
+             view and command palette, not in the title bar. */
           <>
             <IconButton
               onClick={() => setSidebarVisible((visible) => !visible)}
@@ -1044,41 +985,31 @@ export function App(): JSX.Element {
               data-tooltip="Forward"
               className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-default disabled:opacity-30"
             />
+            <IconButton
+              onClick={() => openOverlay("palette")}
+              label="Search and commands"
+              icon={<Search size={14} />}
+              data-tooltip={`Search and commands ${shortcutDisplay(FIXED_SHORTCUTS.commandPalette)}`}
+              className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary"
+            />
           </>
         }
         right={
           <>
-            {SURFACES_WITH_INSPECTOR.has(activeDestination) ? (
+            {SURFACES_WITH_INSPECTOR.has(activeDestination) && !changesOpen ? (
               <IconButton
                 onClick={toggleInspector}
-                disabled={!selectedTask}
+                disabled={!contextTaskId}
                 label={inspectorVisible ? "Hide task context" : "Show task context"}
                 icon={<PanelRight size={14} />}
                 aria-pressed={inspectorVisible}
-                data-tooltip={selectedTask ? (inspectorVisible ? "Hide task context" : "Show task context") : "Task context appears when a task is selected"}
+                data-tooltip={contextTaskId ? (inspectorVisible ? "Hide task context" : "Show task context") : "Task context appears when a task is selected"}
                 className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-35"
               />
             ) : null}
           </>
         }
       />
-      {mountedOverlay === "search" ? (
-        <Suspense fallback={<ModalLoadingFallback label="task search" onClose={() => setOverlay(null)} />}>
-          <TaskSearch
-            open={overlay === "search"}
-            onClose={() => setOverlay(null)}
-            onSelectTask={(taskId) => {
-              selectTask(taskId);
-              openDestination("chat");
-              setChangesOpen(false);
-            }}
-            onNewTask={goToNewTask}
-            onOpenProject={() => openProject()}
-            onOpenBoard={() => openDestination("board")}
-            onOpenCommands={() => setOverlay("palette")}
-          />
-        </Suspense>
-      ) : null}
       {mountedOverlay === "palette" ? (
         <Suspense fallback={<ModalLoadingFallback label="command palette" onClose={() => setOverlay(null)} />}>
           <CommandPalette open={overlay === "palette"} onClose={() => setOverlay(null)} commands={commands} />
