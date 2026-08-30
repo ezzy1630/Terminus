@@ -99,6 +99,7 @@ export function setupDevMock(): void {
     discovery: {
       last_run_at: mockDiscoveredAt,
       installed_tools: ["codex", "opencode"],
+      opencode_store_status: "available",
       warnings: [],
     },
     accounts: [
@@ -120,6 +121,9 @@ export function setupDevMock(): void {
         last_verified_at: mockDiscoveredAt,
         expires_at: new Date(Date.now() + 86_400_000 * 9).toISOString(),
         revision: 1,
+        credential_fingerprint: "a".repeat(64),
+        connection_destination: "https://chatgpt.com",
+        catalog_digest: `sha256:${"b".repeat(64)}`,
       },
       {
         id: "mock-account-baseten",
@@ -139,6 +143,9 @@ export function setupDevMock(): void {
         last_verified_at: mockDiscoveredAt,
         expires_at: null,
         revision: 1,
+        credential_fingerprint: "c".repeat(64),
+        connection_destination: "https://inference.baseten.co/v1",
+        catalog_digest: `sha256:${"b".repeat(64)}`,
       },
       {
         id: "mock-account-zen",
@@ -158,6 +165,9 @@ export function setupDevMock(): void {
         last_verified_at: null,
         expires_at: null,
         revision: 1,
+        credential_fingerprint: "d".repeat(64),
+        connection_destination: "https://opencode.ai/zen/v1",
+        catalog_digest: `sha256:${"b".repeat(64)}`,
       },
       {
         id: "mock-account-cloudflare",
@@ -177,6 +187,9 @@ export function setupDevMock(): void {
         last_verified_at: null,
         expires_at: null,
         revision: 1,
+        credential_fingerprint: "e".repeat(64),
+        connection_destination: "https://api.cloudflare.com",
+        catalog_digest: `sha256:${"b".repeat(64)}`,
       },
     ],
   };

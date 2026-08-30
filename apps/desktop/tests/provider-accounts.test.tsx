@@ -57,6 +57,8 @@ vi.mock("../src/lib/api", async () => {
 });
 
 const now = new Date().toISOString();
+const FINGERPRINT = "a".repeat(64);
+const CATALOG_DIGEST = `sha256:${"b".repeat(64)}`;
 
 function account(overrides: Partial<ProviderAccount> = {}): ProviderAccount {
   return {
@@ -77,12 +79,15 @@ function account(overrides: Partial<ProviderAccount> = {}): ProviderAccount {
     last_verified_at: now,
     expires_at: null,
     revision: 3,
+    credential_fingerprint: FINGERPRINT,
+    connection_destination: "https://inference.baseten.co/v1",
+    catalog_digest: CATALOG_DIGEST,
     ...overrides,
   };
 }
 
 function discovery(overrides: Partial<ProviderAccountDiscovery> = {}): ProviderAccountDiscovery {
-  return { last_run_at: now, installed_tools: ["codex", "opencode"], warnings: [], ...overrides };
+  return { last_run_at: now, installed_tools: ["codex", "opencode"], opencode_store_status: "available", warnings: [], ...overrides };
 }
 
 function response(
@@ -126,7 +131,9 @@ describe("the connected accounts section", () => {
       id: "mock-account-disconnected",
       status: "disconnected",
       status_detail: "Credential discovered but not imported.",
-      credential_fingerprint: "sha256:credential-fingerprint",
+      credential_fingerprint: FINGERPRINT,
+      connection_destination: "https://api.example.test/v1",
+      catalog_digest: CATALOG_DIGEST,
       revision: 7,
       host: "api.example.test",
     });
@@ -136,17 +143,41 @@ describe("the connected accounts section", () => {
 
     const row = await screen.findByTestId("provider-account-mock-account-disconnected");
     await userEvent.click(within(row).getByRole("button", { name: "Connect Baseten" }));
-    expect(row).toHaveTextContent(/Copy the API key for Baseten from OpenCode into Terminus keyring/);
-    expect(screen.getByText("https://api.example.test")).toBeInTheDocument();
+    expect(row).toHaveTextContent(/exact credential for Baseten/);
+    expect(row).toHaveTextContent("opencode:baseten");
+    expect(row).toHaveTextContent("https://api.example.test/v1");
+    expect(row).toHaveTextContent("aaaaaaaaaa…aaaaaa");
+    expect(row).toHaveTextContent("sha256:bbb…bbbbbb");
     expect(api.connectProviderAccount).not.toHaveBeenCalled();
 
     await userEvent.click(within(row).getByRole("button", { name: "Approve and connect Baseten" }));
     await waitFor(() => expect(api.connectProviderAccount).toHaveBeenCalledWith(
       "mock-account-disconnected",
       7,
-      "sha256:credential-fingerprint",
+      FINGERPRINT,
+      "https://api.example.test/v1",
+      CATALOG_DIGEST,
       expect.objectContaining({ idempotencyKey: expect.any(String) }),
     ));
+  });
+
+  test("invalidates an approval when discovery changes its reviewed tuple", async () => {
+    const disconnected = account({ status: "disconnected", connection_destination: "https://api.example.test/v1" });
+    installList(response([disconnected]));
+    vi.mocked(api.discoverProviderAccounts).mockResolvedValueOnce({
+      ...response([account({ status: "disconnected", connection_destination: "https://api.example.test/v2" })]),
+      imported: [],
+    });
+    const user = userEvent.setup();
+    render(<ProviderAccountSettings />);
+
+    const row = await screen.findByTestId("provider-account-mock-account-baseten");
+    await user.click(within(row).getByRole("button", { name: "Connect Baseten" }));
+    await user.click(screen.getByRole("button", { name: "Detect again" }));
+
+    expect(await within(row).findByRole("alert")).toHaveTextContent("approval expired");
+    expect(within(row).getByRole("button", { name: "Approve and connect Baseten" })).toBeDisabled();
+    expect(api.connectProviderAccount).not.toHaveBeenCalled();
   });
 
   test("states where each credential came from, its status, and what it reaches", async () => {
@@ -358,6 +389,18 @@ describe("install and sign-in hints", () => {
       "Codex CLI is installed but no usable ChatGPT login was found — run `codex` to sign in.",
       "OpenCode is installed but no usable provider login was found — run `opencode auth login`.",
     ]);
+  });
+
+  test("distinguishes missing, rejected, and unavailable OpenCode stores", () => {
+    expect(discoveryHints(discovery({ opencode_store_status: "missing" }), [])).toContain(
+      "OpenCode credential store is missing — run `opencode auth login` to create it.",
+    );
+    expect(discoveryHints(discovery({ opencode_store_status: "rejected" }), [])).toContain(
+      "OpenCode credential store was rejected by Terminus — fix its permissions or format, then run discovery again.",
+    );
+    expect(discoveryHints(discovery({ opencode_store_status: "unavailable" }), [])).toContain(
+      "OpenCode credential store is unavailable — make it readable, then run discovery again.",
+    );
   });
 
   test("calls out an installed login that needs action", () => {

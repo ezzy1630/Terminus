@@ -36,6 +36,7 @@ import type {
 const EMPTY_DISCOVERY: ProviderAccountDiscovery = {
   last_run_at: null,
   installed_tools: [],
+  opencode_store_status: null,
   warnings: [],
 };
 
@@ -243,6 +244,8 @@ export function useProviderAccounts(): ProviderAccountsState {
         account.id,
         account.revision,
         account.credential_fingerprint,
+        account.connection_destination,
+        account.catalog_digest,
         { idempotencyKey: createIdempotencyKey(`provider-account-connect:${account.id}`) },
       );
       if (!mounted.current) return;
@@ -512,6 +515,12 @@ export function discoveryHints(
   }
   if (!installed("opencode")) {
     hints.push("OpenCode is not installed — install it, then run `opencode auth login` to connect a provider.");
+  } else if (discovery.opencode_store_status === "missing") {
+    hints.push("OpenCode credential store is missing — run `opencode auth login` to create it.");
+  } else if (discovery.opencode_store_status === "rejected") {
+    hints.push("OpenCode credential store was rejected by Terminus — fix its permissions or format, then run discovery again.");
+  } else if (discovery.opencode_store_status === "unavailable") {
+    hints.push("OpenCode credential store is unavailable — make it readable, then run discovery again.");
   } else if (!hasVendorKeys && !hasZen) {
     const errored = opencodeAccounts.find((account) => account.status === "error");
     const expired = opencodeAccounts.some((account) => account.status === "expired");

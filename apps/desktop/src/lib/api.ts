@@ -61,6 +61,7 @@ import type {
   ProviderAccountDiscoveryResponse,
   ProviderAccountMetadata,
   ProviderAccountsResponse,
+  OpenCodeStoreStatus,
   CodexLaneAccountResponse,
   CodexLaneEventsResponse,
   CodexLaneEvent,
@@ -498,6 +499,47 @@ function decodeGatewayProviderConfigurationResponse(
 const PROVIDER_ACCOUNT_AUTH_KINDS = ["api", "oauth", "wellknown", "chatgpt", "anonymous"] as const;
 const PROVIDER_ACCOUNT_STATUSES = ["connected", "expired", "error", "unsupported", "disconnected"] as const;
 const PROVIDER_ACCOUNT_BILLINGS = ["subscription", "free", "paid", "unknown"] as const;
+const OPENCODE_STORE_STATUSES = ["available", "missing", "rejected", "unavailable"] as const;
+const CREDENTIAL_FINGERPRINT = /^[0-9a-f]{64}$/;
+const CATALOG_DIGEST = /^sha256:[0-9a-f]{64}$/;
+
+function responseCredentialFingerprint(value: unknown, what: string): string {
+  const fingerprint = responseString(value, what, true);
+  if (fingerprint !== "" && !CREDENTIAL_FINGERPRINT.test(fingerprint)) {
+    throw new TerminusApiError(502, `${what} was not a 64-character lowercase hexadecimal fingerprint`, null);
+  }
+  return fingerprint;
+}
+
+function responseConnectionDestination(value: unknown, what: string): string {
+  const destination = responseString(value, what, true);
+  if (destination === "") return destination;
+  let parsed: URL;
+  try {
+    parsed = new URL(destination);
+  } catch {
+    throw new TerminusApiError(502, `${what} was not a valid canonical HTTPS URL`, null);
+  }
+  if (
+    parsed.protocol !== "https:"
+    || parsed.href !== destination
+    || parsed.username.length > 0
+    || parsed.password.length > 0
+    || parsed.search.length > 0
+    || parsed.hash.length > 0
+  ) {
+    throw new TerminusApiError(502, `${what} was not a valid canonical HTTPS URL`, null);
+  }
+  return destination;
+}
+
+function responseCatalogDigest(value: unknown, what: string): string {
+  const digest = responseString(value, what, true);
+  if (digest !== "" && !CATALOG_DIGEST.test(digest)) {
+    throw new TerminusApiError(502, `${what} was not a sha256 catalog digest`, null);
+  }
+  return digest;
+}
 
 /**
  * Non-secret metadata only.
@@ -540,9 +582,9 @@ function decodeProviderAccount(value: unknown): ProviderAccount {
     last_verified_at: responseNullableTimestamp(account.last_verified_at ?? null, "provider account.last_verified_at"),
     expires_at: responseNullableTimestamp(account.expires_at ?? null, "provider account.expires_at"),
     revision: responseNonNegativeInteger(account.revision, "provider account.revision"),
-    ...(account.credential_fingerprint === undefined || account.credential_fingerprint === null
-      ? {}
-      : { credential_fingerprint: responseString(account.credential_fingerprint, "provider account.credential_fingerprint", true) }),
+    credential_fingerprint: responseCredentialFingerprint(account.credential_fingerprint ?? "", "provider account.credential_fingerprint"),
+    connection_destination: responseConnectionDestination(account.connection_destination ?? "", "provider account.connection_destination"),
+    catalog_digest: responseCatalogDigest(account.catalog_digest ?? "", "provider account.catalog_digest"),
   };
 }
 
@@ -551,6 +593,9 @@ function decodeProviderAccountDiscovery(value: unknown): ProviderAccountDiscover
   return {
     last_run_at: responseNullableTimestamp(discovery.last_run_at ?? null, "provider account discovery.last_run_at"),
     installed_tools: responseStringArray(discovery.installed_tools ?? [], "provider account discovery.installed_tools"),
+    opencode_store_status: discovery.opencode_store_status === undefined || discovery.opencode_store_status === null
+      ? null
+      : responseEnum(discovery.opencode_store_status, OPENCODE_STORE_STATUSES, "provider account discovery.opencode_store_status") as OpenCodeStoreStatus,
     warnings: responseStringArray(discovery.warnings ?? [], "provider account discovery.warnings"),
   };
 }
@@ -1071,7 +1116,7 @@ export class TerminusApiClient {
       if (error instanceof TerminusApiError && error.status === 404) {
         return {
           accounts: [],
-          discovery: { last_run_at: null, installed_tools: [], warnings: [] },
+          discovery: { last_run_at: null, installed_tools: [], opencode_store_status: null, warnings: [] },
           supported: false,
         };
       }
@@ -1133,10 +1178,18 @@ export class TerminusApiClient {
     accountId: string,
     expectedRevision: number,
     expectedFingerprint: string,
+    expectedDestination: string,
+    expectedCatalogDigest: string,
     options: MutationRequestOptions,
   ): Promise<ProviderAccountsResponse> {
     return decodeProviderAccountsResponse(await this.request<unknown>("POST", `/v1/provider-accounts/${encodeURIComponent(accountId)}/connect`, {
-      body: { expected_revision: expectedRevision, expected_fingerprint: expectedFingerprint, consent: true },
+      body: {
+        expected_revision: expectedRevision,
+        expected_fingerprint: expectedFingerprint,
+        expected_destination: expectedDestination,
+        expected_catalog_digest: expectedCatalogDigest,
+        consent: true,
+      },
       ...options,
     }), "provider account connection");
   }

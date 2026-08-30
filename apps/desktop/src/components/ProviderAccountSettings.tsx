@@ -37,6 +37,26 @@ import { deriveMark } from "../hooks/use-model-inventory";
 import type { ProviderAccount } from "../types";
 import { Button } from "../ui/Button";
 
+type ConnectApproval = Pick<
+  ProviderAccount,
+  "id" | "source" | "status" | "revision" | "credential_fingerprint" | "connection_destination" | "catalog_digest"
+>;
+
+function sameConnectTuple(left: ConnectApproval, right: ConnectApproval): boolean {
+  return left.id === right.id
+    && left.source === right.source
+    && left.status === right.status
+    && left.revision === right.revision
+    && left.credential_fingerprint === right.credential_fingerprint
+    && left.connection_destination === right.connection_destination
+    && left.catalog_digest === right.catalog_digest;
+}
+
+function abbreviated(value: string): string {
+  if (value.length <= 18) return value;
+  return `${value.slice(0, 10)}…${value.slice(-6)}`;
+}
+
 /** Colour carries meaning only: a caution is orange, a failure is red. */
 function statusToneClass(status: ProviderAccount["status"]): string {
   switch (status) {
@@ -78,14 +98,15 @@ function AccountRow({
 }: {
   account: ProviderAccount;
   busy: boolean;
-  onConnect: () => void;
+  onConnect: (approval: ConnectApproval) => void;
   onSetDefault: () => void;
   onDisconnect: () => void;
 }): JSX.Element {
   const [confirming, setConfirming] = useState(false);
-  const [confirmingConnect, setConfirmingConnect] = useState(false);
+  const [connectApproval, setConnectApproval] = useState<ConnectApproval | null>(null);
   const expires = formatDate(account.expires_at);
   const connected = account.status === "connected";
+  const approvalMatches = connectApproval !== null && sameConnectTuple(account, connectApproval);
   // One line of quiet meta: where the credential lives, how many models it
   // reaches, when it stops working. Each clause is dropped when unknown rather
   // than rendered as "0 models" or "expires —".
@@ -117,21 +138,49 @@ function AccountRow({
         ) : null}
       </div>
       <div className="flex flex-shrink-0 items-center gap-1.5">
-        {confirmingConnect ? (
+        {connectApproval !== null ? (
           <div className="flex max-w-[24rem] flex-wrap items-center justify-end gap-1.5">
-            <span className="ui-meta text-right">
-              Copy the API key for <span className="text-primary">{account.display_name}</span> from OpenCode into Terminus keyring at <span className="font-mono">https://{account.host}</span>?
-            </span>
+            {approvalMatches ? (
+              <>
+                <span className="ui-meta w-full text-right">
+                  The exact credential for <span className="text-primary">{account.display_name}</span> will be copied into the Terminus keyring and routed only to the exact destination below.
+                </span>
+                <dl className="ui-meta grid w-full grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-right">
+                  <dt className="text-tertiary">Source</dt>
+                  <dd className="truncate font-mono text-secondary">{connectApproval.source}</dd>
+                  <dt className="text-tertiary">Destination</dt>
+                  <dd className="truncate font-mono text-secondary">{connectApproval.connection_destination}</dd>
+                  <dt className="text-tertiary">Credential</dt>
+                  <dd className="font-mono text-secondary">{abbreviated(connectApproval.credential_fingerprint)}</dd>
+                  <dt className="text-tertiary">Catalog</dt>
+                  <dd className="font-mono text-secondary">{abbreviated(connectApproval.catalog_digest)}</dd>
+                </dl>
+              </>
+            ) : (
+              <span className="ui-meta w-full text-right text-warning" role="alert">
+                This approval expired because the account changed. Review the updated destination and credential before connecting again.
+              </span>
+            )}
             <Button
               variant="secondary"
               size="sm"
-              disabled={busy}
+              disabled={busy || !approvalMatches}
               aria-label={`Approve and connect ${account.display_name}`}
-              onClick={() => { setConfirmingConnect(false); onConnect(); }}
+              onClick={() => {
+                if (!approvalMatches || connectApproval === null) return;
+                setConnectApproval(null);
+                onConnect(connectApproval);
+              }}
             >
-              {busy ? "Connecting…" : "Approve & connect"}
+              {busy ? "Connecting…" : approvalMatches ? "Approve & connect" : "Approval expired"}
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => setConfirmingConnect(false)}>Cancel</Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setConnectApproval(null)}
+            >
+              {approvalMatches ? "Cancel" : "Review updated account"}
+            </Button>
           </div>
         ) : confirming ? (
           <>
@@ -155,7 +204,15 @@ function AccountRow({
                 size="sm"
                 disabled={busy}
                 aria-label={`Connect ${account.display_name}`}
-                onClick={() => setConfirmingConnect(true)}
+                onClick={() => setConnectApproval({
+                  id: account.id,
+                  source: account.source,
+                  status: account.status,
+                  revision: account.revision,
+                  credential_fingerprint: account.credential_fingerprint,
+                  connection_destination: account.connection_destination,
+                  catalog_digest: account.catalog_digest,
+                })}
               >
                 Connect
               </Button>
@@ -194,9 +251,11 @@ function CodexLaneSettings(): JSX.Element {
   const sessions = useTerminusStore((state) => state.sessions);
   const selectedSessionId = useTerminusStore((state) => state.selectedSessionId);
   const session = sessions.find((candidate) => candidate.id === selectedSessionId) ?? sessions[0] ?? null;
+  const sessionId = session?.id;
+  const workspaceId = session?.workspace_id;
   const identity = useMemo(
-    () => session === null ? null : { session_id: session.id, workspace_id: session.workspace_id },
-    [session?.id, session?.workspace_id],
+    () => sessionId === undefined || workspaceId === undefined ? null : { session_id: sessionId, workspace_id: workspaceId },
+    [sessionId, workspaceId],
   );
   const codex = useCodexLane(identity);
   const [turnText, setTurnText] = useState("");
@@ -376,7 +435,7 @@ export function ProviderAccountSettings(): JSX.Element {
               key={account.id}
               account={account}
               busy={accounts.busyId === account.id}
-              onConnect={() => { void accounts.connect(account); }}
+              onConnect={(approval) => { void accounts.connect({ ...account, ...approval }); }}
               onSetDefault={() => { void accounts.setDefault(account); }}
               onDisconnect={() => { void accounts.disconnect(account); }}
             />

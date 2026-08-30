@@ -142,6 +142,8 @@ export type ProviderAccountStatus =
 /** How a turn on this account is paid for. `paid` prices per model, not here. */
 export type ProviderAccountBilling = "subscription" | "free" | "paid" | "unknown";
 
+export type OpenCodeStoreStatus = "available" | "missing" | "rejected" | "unavailable";
+
 /** Non-secret facts the credential carried. Never tokens. */
 export interface ProviderAccountMetadata {
   account_id?: string;
@@ -172,8 +174,12 @@ export interface ProviderAccount {
   expires_at: string | null;
   /** Guards Set default and Disconnect against a concurrent change. */
   revision: number;
-  /** Non-secret credential identity used for explicit reconnect confirmation. */
-  credential_fingerprint?: string;
+  /** Non-secret credential identity used for explicit reconnect confirmation. Empty for non-routable rows. */
+  credential_fingerprint: string;
+  /** Exact canonical HTTPS destination bound by an explicit connect approval. Empty for non-routable rows. */
+  connection_destination: string;
+  /** Provider catalogue snapshot bound by an explicit connect approval. Empty for non-routable rows. */
+  catalog_digest: string;
 }
 
 /** What the last credential-store sweep found, and what is installed to sweep. */
@@ -189,6 +195,8 @@ export interface ProviderAccountDiscovery {
    * extends to a third store without another wire field.
    */
   installed_tools: string[];
+  /** Authority state of the OpenCode credential store, when discovery inspected it. */
+  opencode_store_status: OpenCodeStoreStatus | null;
   /** Store-level problems (bad permissions, unparseable file), verbatim. */
   warnings: string[];
 }
