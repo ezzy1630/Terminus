@@ -140,12 +140,16 @@ fn opencode_entries_decode_by_kind_and_allowlist_account_metadata() {
     write_store(
         &fixture.opencode_store,
         &serde_json::json!({
-            "cerebras": { "type": "api", "key": CEREBRAS_FIXTURE_KEY },
+            "cerebras": {
+                "type": "api",
+                "key": CEREBRAS_FIXTURE_KEY,
+                "metadata": { "accountId": "0123456789abcdef0123456789abcdef" }
+            },
             "cloudflare-workers-ai": {
                 "type": "api",
                 "key": CLOUDFLARE_FIXTURE_KEY,
                 "metadata": {
-                    "accountId": "fixture-cloudflare-account",
+                    "accountId": "0123456789abcdef0123456789abcdef",
                     "accessToken": "must-never-cross-the-kernel-boundary",
                     "arbitrary": { "nested": true }
                 }
@@ -203,12 +207,12 @@ fn opencode_entries_decode_by_kind_and_allowlist_account_metadata() {
     let cloudflare = &discovery.credentials[1];
     assert_eq!(
         cloudflare.metadata.account_id.as_deref(),
-        Some("fixture-cloudflare-account"),
+        Some("0123456789abcdef0123456789abcdef"),
         "only the named account id is admitted"
     );
     assert_eq!(
         cloudflare.metadata.to_json(),
-        r#"{"account_id":"fixture-cloudflare-account"}"#,
+        r#"{"account_id":"0123456789abcdef0123456789abcdef"}"#,
         "arbitrary and token-shaped plugin metadata is dropped"
     );
     assert_eq!(
@@ -231,6 +235,37 @@ fn opencode_entries_decode_by_kind_and_allowlist_account_metadata() {
         fingerprint_of("fixture-not-a-real-wellknown-token"),
         "a wellknown entry's credential is its token, not its key"
     );
+}
+
+#[test]
+fn account_metadata_is_provider_bound_and_rejects_token_shaped_values() {
+    let fixture = fixture();
+    write_store(
+        &fixture.opencode_store,
+        &serde_json::json!({
+            "cloudflare-workers-ai": {
+                "type": "api",
+                "key": CLOUDFLARE_FIXTURE_KEY,
+                "metadata": { "accountId": "eyJhbGciOiJIUzI1NiJ9.payload.signature" }
+            },
+            "cerebras": {
+                "type": "api",
+                "key": CEREBRAS_FIXTURE_KEY,
+                "metadata": { "accountId": "0123456789abcdef0123456789abcdef" }
+            }
+        })
+        .to_string(),
+    );
+
+    let discovery = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&ctx(&discover_token(&fixture.kernel)))
+        .expect("discovery succeeds");
+
+    assert_eq!(discovery.credentials.len(), 2);
+    assert_eq!(discovery.credentials[0].metadata.to_json(), "{}");
+    assert_eq!(discovery.credentials[1].metadata.to_json(), "{}");
 }
 
 #[test]
@@ -358,6 +393,26 @@ fn a_malformed_store_is_refused_without_echoing_its_contents() {
     assert_eq!(
         discovery.warnings,
         vec!["opencode-auth-store: contains malformed JSON".to_string()]
+    );
+    assert_eq!(discovery.opencode_store_status.as_str(), "rejected");
+}
+
+#[test]
+fn a_valid_json_array_is_rejected_as_a_structurally_invalid_store() {
+    let fixture = fixture();
+    write_store(&fixture.opencode_store, "[]");
+
+    let discovery = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&ctx(&discover_token(&fixture.kernel)))
+        .expect("discovery succeeds");
+
+    assert!(discovery.credentials.is_empty());
+    assert_eq!(discovery.opencode_store_status.as_str(), "rejected");
+    assert_eq!(
+        discovery.warnings,
+        vec!["opencode-auth-store: root must be a JSON object".to_string()]
     );
 }
 

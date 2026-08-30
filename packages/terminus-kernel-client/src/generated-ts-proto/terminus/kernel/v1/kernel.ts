@@ -70,6 +70,28 @@ export enum CapabilityOperationProto {
 }
 
 /**
+ * Metadata-only result of checking a secret capability. UNSPECIFIED is the
+ * protobuf default and is never authoritative; callers must treat it as an
+ * indeterminate result rather than as absence.
+ */
+export enum SecretPresenceProto {
+  SECRET_PRESENCE_UNSPECIFIED = 0,
+  SECRET_PRESENCE_PRESENT = 1,
+  SECRET_PRESENCE_MISSING = 2,
+  SECRET_PRESENCE_UNAVAILABLE = 3,
+  UNRECOGNIZED = -1,
+}
+
+export enum OpencodeStoreStatusProto {
+  OPENCODE_STORE_STATUS_UNSPECIFIED = 0,
+  OPENCODE_STORE_STATUS_AVAILABLE = 1,
+  OPENCODE_STORE_STATUS_MISSING = 2,
+  OPENCODE_STORE_STATUS_REJECTED = 3,
+  OPENCODE_STORE_STATUS_UNAVAILABLE = 4,
+  UNRECOGNIZED = -1,
+}
+
+/**
  * RequestContext is carried by every privileged kernel RPC. The capability
  * token MUST be validated against the kernel's instance identity before any
  * effect is authorized (SPEC §31.6).
@@ -798,6 +820,16 @@ export interface SecretMutationResponse {
   stored: boolean;
 }
 
+export interface InspectSecretRequest {
+  context: RequestContext | undefined;
+  capabilityUri: string;
+}
+
+export interface InspectSecretResponse {
+  capabilityUri: string;
+  presence: SecretPresenceProto;
+}
+
 /** A credential found in a local tool's store. Never carries secret bytes. */
 export interface LocalProviderCredentialMessage {
   /**
@@ -843,10 +875,10 @@ export interface DiscoverLocalProviderCredentialsResponse {
   codexInstalled: boolean;
   opencodeInstalled: boolean;
   /**
-   * "available" | "missing" | "rejected". Callers must not treat a
-   * rejected store as authoritative absence.
+   * The protobuf default is non-authoritative. Callers must not treat
+   * REJECTED or UNAVAILABLE as authoritative absence.
    */
-  opencodeStoreStatus: string;
+  opencodeStoreStatus: OpencodeStoreStatusProto;
 }
 
 export interface ImportLocalProviderCredentialRequest {
@@ -8438,6 +8470,124 @@ export const SecretMutationResponse: MessageFns<SecretMutationResponse> = {
   },
 };
 
+function createBaseInspectSecretRequest(): InspectSecretRequest {
+  return { context: undefined, capabilityUri: "" };
+}
+
+export const InspectSecretRequest: MessageFns<InspectSecretRequest> = {
+  encode(message: InspectSecretRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.capabilityUri !== "") {
+      writer.uint32(18).string(message.capabilityUri);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InspectSecretRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInspectSecretRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.capabilityUri = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<InspectSecretRequest>, I>>(base?: I): InspectSecretRequest {
+    return InspectSecretRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InspectSecretRequest>, I>>(object: I): InspectSecretRequest {
+    const message = createBaseInspectSecretRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.capabilityUri = object.capabilityUri ?? "";
+    return message;
+  },
+};
+
+function createBaseInspectSecretResponse(): InspectSecretResponse {
+  return { capabilityUri: "", presence: 0 };
+}
+
+export const InspectSecretResponse: MessageFns<InspectSecretResponse> = {
+  encode(message: InspectSecretResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.capabilityUri !== "") {
+      writer.uint32(10).string(message.capabilityUri);
+    }
+    if (message.presence !== 0) {
+      writer.uint32(16).int32(message.presence);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): InspectSecretResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseInspectSecretResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.capabilityUri = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.presence = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<InspectSecretResponse>, I>>(base?: I): InspectSecretResponse {
+    return InspectSecretResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<InspectSecretResponse>, I>>(object: I): InspectSecretResponse {
+    const message = createBaseInspectSecretResponse();
+    message.capabilityUri = object.capabilityUri ?? "";
+    message.presence = object.presence ?? 0;
+    return message;
+  },
+};
+
 function createBaseLocalProviderCredentialMessage(): LocalProviderCredentialMessage {
   return { source: "", authKind: "", fingerprint: "", metadataJson: "", expiresAtUnix: 0, store: "" };
 }
@@ -8599,7 +8749,7 @@ export const DiscoverLocalProviderCredentialsRequest: MessageFns<DiscoverLocalPr
 };
 
 function createBaseDiscoverLocalProviderCredentialsResponse(): DiscoverLocalProviderCredentialsResponse {
-  return { credentials: [], warnings: [], codexInstalled: false, opencodeInstalled: false, opencodeStoreStatus: "" };
+  return { credentials: [], warnings: [], codexInstalled: false, opencodeInstalled: false, opencodeStoreStatus: 0 };
 }
 
 export const DiscoverLocalProviderCredentialsResponse: MessageFns<DiscoverLocalProviderCredentialsResponse> = {
@@ -8616,8 +8766,8 @@ export const DiscoverLocalProviderCredentialsResponse: MessageFns<DiscoverLocalP
     if (message.opencodeInstalled !== false) {
       writer.uint32(32).bool(message.opencodeInstalled);
     }
-    if (message.opencodeStoreStatus !== "") {
-      writer.uint32(42).string(message.opencodeStoreStatus);
+    if (message.opencodeStoreStatus !== 0) {
+      writer.uint32(40).int32(message.opencodeStoreStatus);
     }
     return writer;
   },
@@ -8662,11 +8812,11 @@ export const DiscoverLocalProviderCredentialsResponse: MessageFns<DiscoverLocalP
           continue;
         }
         case 5: {
-          if (tag !== 42) {
+          if (tag !== 40) {
             break;
           }
 
-          message.opencodeStoreStatus = reader.string();
+          message.opencodeStoreStatus = reader.int32() as any;
           continue;
         }
       }
@@ -8691,7 +8841,7 @@ export const DiscoverLocalProviderCredentialsResponse: MessageFns<DiscoverLocalP
     message.warnings = object.warnings?.map((e) => e) || [];
     message.codexInstalled = object.codexInstalled ?? false;
     message.opencodeInstalled = object.opencodeInstalled ?? false;
-    message.opencodeStoreStatus = object.opencodeStoreStatus ?? "";
+    message.opencodeStoreStatus = object.opencodeStoreStatus ?? 0;
     return message;
   },
 };
@@ -11695,6 +11845,7 @@ export interface SecretService {
   Mint(request: MintSecretRequest): Promise<SecretCapabilityMessage>;
   Store(request: StoreSecretRequest): Promise<SecretMutationResponse>;
   Delete(request: DeleteSecretRequest): Promise<SecretMutationResponse>;
+  Inspect(request: InspectSecretRequest): Promise<InspectSecretResponse>;
 }
 
 export const SecretServiceServiceName = "terminus.kernel.v1.SecretService";
@@ -11707,6 +11858,7 @@ export class SecretServiceClientImpl implements SecretService {
     this.Mint = this.Mint.bind(this);
     this.Store = this.Store.bind(this);
     this.Delete = this.Delete.bind(this);
+    this.Inspect = this.Inspect.bind(this);
   }
   Mint(request: MintSecretRequest): Promise<SecretCapabilityMessage> {
     const data = MintSecretRequest.encode(request).finish();
@@ -11724,6 +11876,12 @@ export class SecretServiceClientImpl implements SecretService {
     const data = DeleteSecretRequest.encode(request).finish();
     const promise = this.rpc.request(this.service, "Delete", data);
     return promise.then((data) => SecretMutationResponse.decode(new BinaryReader(data)));
+  }
+
+  Inspect(request: InspectSecretRequest): Promise<InspectSecretResponse> {
+    const data = InspectSecretRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "Inspect", data);
+    return promise.then((data) => InspectSecretResponse.decode(new BinaryReader(data)));
   }
 }
 

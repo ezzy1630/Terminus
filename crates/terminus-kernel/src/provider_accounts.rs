@@ -55,6 +55,9 @@ const MAX_STORE_BYTES: u64 = 64 * 1_024;
 const MAX_PROVIDER_ID_BYTES: usize = 128;
 /// Ceiling on `PATH` entries scanned by the install probe.
 const MAX_PATH_ENTRIES: usize = 256;
+/// The only provider whose account identity is needed to construct a safe
+/// endpoint URL. OpenCode's other metadata fields remain provider-owned.
+const CLOUDFLARE_WORKERS_AI_PROVIDER: &str = "cloudflare-workers-ai";
 
 /// Capability-URI prefix of the connected-provider-account namespace. The
 /// keyring provider enforces the same shape; validating it here means an
@@ -189,6 +192,8 @@ pub enum LocalCredentialStoreStatus {
     Available,
     /// A store exists but is unreadable, unsafe, oversized or malformed.
     Rejected,
+    /// The store could not be inspected authoritatively.
+    Unavailable,
 }
 
 impl LocalCredentialStoreStatus {
@@ -198,6 +203,7 @@ impl LocalCredentialStoreStatus {
             Self::Missing => "missing",
             Self::Available => "available",
             Self::Rejected => "rejected",
+            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -649,9 +655,13 @@ fn load_store(path: Option<&Path>, store: LocalCredentialStore) -> StoreRead {
         return reject("is larger than the 64 KiB the kernel will read");
     }
     match serde_json::from_slice::<serde_json::Value>(&buffer) {
+        // The auth store's root is an object. A valid JSON array, scalar, or
+        // null is structurally invalid and must not become AVAILABLE merely
+        // because parsing succeeded.
+        Ok(document) if document.is_object() => StoreRead::Loaded(document),
+        Ok(_) => reject("root must be a JSON object"),
         // The parsed value is dropped with `buffer` at the end of discovery;
         // the error text is fixed so no file content can leak into a warning.
-        Ok(document) => StoreRead::Loaded(document),
         Err(_) => reject("contains malformed JSON"),
     }
 }
@@ -667,7 +677,9 @@ fn decode_opencode_store(
 ) {
     let store = LocalCredentialStore::OpencodeAuthStore;
     let Some(object) = document.as_object() else {
-        warnings.push(format!("{store}: is not a JSON object"));
+        // `load_store` rejects this before decode. Keep this guard for callers
+        // inside the module and make the invariant explicit.
+        warnings.push(format!("{store}: root must be a JSON object"));
         return;
     };
     // `serde_json::Map` iterates in key order, so the result is stable.
@@ -692,7 +704,7 @@ fn decode_opencode_store(
                     LocalAuthKind::Api,
                     key,
                     0,
-                    admitted_account_id(entry.get("metadata")),
+                    admitted_account_id(provider_id, entry.get("metadata")),
                 )
             }),
             "wellknown" => match (
@@ -736,21 +748,16 @@ fn decode_opencode_store(
     }
 }
 
-/// Admit the one provider metadata field Terminus has a defined use for.
+/// Admit only Cloudflare's documented account identity field and shape.
 /// OpenCode plugins may persist arbitrary objects here; copying that bag into
 /// Terminus state would turn an untrusted extension field into routing input.
-fn admitted_account_id(metadata: Option<&serde_json::Value>) -> Option<String> {
+fn admitted_account_id(provider_id: &str, metadata: Option<&serde_json::Value>) -> Option<String> {
+    if provider_id != CLOUDFLARE_WORKERS_AI_PROVIDER {
+        return None;
+    }
     let object = metadata?.as_object()?;
-    let value = object
-        .get("accountId")
-        .or_else(|| object.get("account_id"))?
-        .as_str()?;
-    if value.is_empty()
-        || value.len() > 128
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
+    let value = object.get("accountId")?.as_str()?;
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     Some(value.to_string())

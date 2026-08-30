@@ -250,6 +250,7 @@ mod tests {
             "/terminus.kernel.v1.WorkspaceService/Register",
             "/terminus.kernel.v1.PolicyService/Evaluate",
             "/terminus.kernel.v1.SecretService/Mint",
+            "/terminus.kernel.v1.SecretService/Inspect",
             "/terminus.kernel.v1.NetworkService/Decide",
             "/terminus.kernel.v1.FileService/Read",
             "/terminus.kernel.v1.SandboxService/Report",

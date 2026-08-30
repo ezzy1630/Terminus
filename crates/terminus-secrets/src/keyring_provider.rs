@@ -50,7 +50,7 @@ impl SecretProvider for KeyringSecretProvider {
         let value = self
             .entry(&account)?
             .get_password()
-            .map_err(map_keyring_error)?
+            .map_err(|error| map_keyring_lookup_error(error, uri))?
             .into_bytes();
         let now = unix_time()?;
         Ok(SecretHandle::from_value(
@@ -96,6 +96,13 @@ impl KeyringSecretProvider {
 
 fn map_keyring_error(error: keyring::Error) -> SecretError {
     SecretError::ProviderUnavailable(error.to_string())
+}
+
+fn map_keyring_lookup_error(error: keyring::Error, uri: &str) -> SecretError {
+    match error {
+        keyring::Error::NoEntry => SecretError::UnknownCapability(uri.to_string()),
+        error => map_keyring_error(error),
+    }
 }
 
 #[cfg(test)]

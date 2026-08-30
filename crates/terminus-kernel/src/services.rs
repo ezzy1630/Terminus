@@ -3083,6 +3083,62 @@ impl SecretService {
             .map_err(secret_resolution_error)
     }
 
+    /// Inspect whether a credential exists without exposing its bytes or
+    /// caching a resolved handle. Provider and policy failures are reported
+    /// as `Unavailable`, never as authoritative absence.
+    pub fn inspect(
+        &self,
+        ctx: &RequestContext,
+        uri: &str,
+        requested_by: &str,
+    ) -> KernelResult<terminus_secrets::SecretPresence> {
+        self.authorize_request(ctx, uri, requested_by)?;
+        let presence = self
+            .broker
+            .inspect(uri)
+            .unwrap_or(terminus_secrets::SecretPresence::Unavailable);
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "secret.inspected",
+            request_id = %ctx.request_id,
+            task_id = %ctx.task_id,
+            actor_id = %ctx.actor_id,
+            secret_uri = %uri,
+            requested_by = %requested_by,
+            presence = ?presence,
+            "secret presence inspected",
+        );
+        Ok(presence)
+    }
+
+    /// Bounded metadata-only inspection for async transports. A keychain
+    /// prompt that exceeds the broker ceiling becomes `Unavailable`.
+    pub async fn inspect_async(
+        &self,
+        ctx: &RequestContext,
+        uri: &str,
+        requested_by: &str,
+    ) -> KernelResult<terminus_secrets::SecretPresence> {
+        self.authorize_request(ctx, uri, requested_by)?;
+        let presence = self
+            .broker
+            .inspect_async(uri)
+            .await
+            .unwrap_or(terminus_secrets::SecretPresence::Unavailable);
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "secret.inspected",
+            request_id = %ctx.request_id,
+            task_id = %ctx.task_id,
+            actor_id = %ctx.actor_id,
+            secret_uri = %uri,
+            requested_by = %requested_by,
+            presence = ?presence,
+            "secret presence inspected",
+        );
+        Ok(presence)
+    }
+
     /// §31.3 step 3 + step 10 for a secret request: capability-token
     /// validation and the AUTHORIZED audit record, before any store read.
     fn authorize_request(
