@@ -22,7 +22,7 @@
  *   - "Codex CLI not installed" is stated only when discovery said so. Nothing
  *     here guesses at what is on the machine.
  */
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { cn } from "../lib/cn";
 import {
@@ -194,7 +194,10 @@ function CodexLaneSettings(): JSX.Element {
   const sessions = useTerminusStore((state) => state.sessions);
   const selectedSessionId = useTerminusStore((state) => state.selectedSessionId);
   const session = sessions.find((candidate) => candidate.id === selectedSessionId) ?? sessions[0] ?? null;
-  const identity = session === null ? null : { session_id: session.id, workspace_id: session.workspace_id };
+  const identity = useMemo(
+    () => session === null ? null : { session_id: session.id, workspace_id: session.workspace_id },
+    [session?.id, session?.workspace_id],
+  );
   const codex = useCodexLane(identity);
   const [turnText, setTurnText] = useState("");
   const connected = codex.lane?.available === true && codex.status === "ready";
