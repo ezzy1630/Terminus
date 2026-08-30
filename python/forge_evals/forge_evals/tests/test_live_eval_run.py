@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 import yaml
 
-from forge_evals.cli import build_live_run_record, main
+from forge_evals.cli import _write_record, build_live_run_record, main
 from forge_evals.run_record import GraderResult, Outcome, RunRecord
 from forge_evals.runners.harness_runner import Budgets, ModelCapabilitySnapshot, RunRequest
 from forge_evals.runners.live_runner import (
@@ -123,6 +123,8 @@ def _route_attempts() -> list[dict[str, Any]]:
             "cost_source": "computed",
             "started_at": "2026-08-29T12:00:01+00:00",
             "completed_at": "2026-08-29T12:00:03+00:00",
+            "request_artifact": f"artifact://sha256/{n:064x}",
+            "response_artifact": f"artifact://sha256/{n + 100:064x}",
         }
 
     return [
@@ -375,6 +377,7 @@ class _ControlPlane(BaseHTTPRequestHandler):
                         "cost_micros": "9000",
                     },
                     "repair_metrics": {"repair_attempts": 0, "stop_reason": None},
+                    "repair_attempts": [],
                     "contract": {
                         "version": 1,
                         "content_hash": "sha256:" + "c" * 64,
@@ -780,7 +783,12 @@ def test_run_record_passes_the_local_exit_gate_shape(control_url: str, tmp_path:
     """The digest, verdict, cost and timestamps the exit gate demands are present."""
     from forge_evals.cli import _local_exit_gate_issues
 
-    record = _record(control_url, _task_package(tmp_path, grader_passes=True))
+    record = _record(
+        control_url,
+        _task_package(tmp_path, grader_passes=True),
+        provider_account_id="acct-chatgpt",
+        provider_endpoint="https://api.example.test/v1",
+    )
     issues = [i for i in _local_exit_gate_issues([record]) if "independent seeds" not in i]
     assert issues == []
 
@@ -1324,9 +1332,14 @@ def test_the_record_carries_the_per_attempt_array(control_url: str, tmp_path: Pa
     assert RunRecord.from_dict(json.loads(record.to_jsonl_line())).attempts == record.attempts
 
 
-def _record_with(*, graders: list[GraderResult], verdict: dict[str, Any]) -> RunRecord:
+def _record_with(
+    *,
+    graders: list[GraderResult],
+    verdict: dict[str, Any],
+    run_id: str = "r-1",
+) -> RunRecord:
     return RunRecord(
-        run_id="r-1",
+        run_id=run_id,
         suite="terminus-internal",
         task="tiny-bugfix/01-fix-typo",
         harness="terminus-live",
@@ -1339,3 +1352,16 @@ def _record_with(*, graders: list[GraderResult], verdict: dict[str, Any]) -> Run
         grader_results=graders,
         harness_verdict=verdict,
     )
+
+
+def test_json_record_filename_cannot_escape_the_output_directory(tmp_path: Path) -> None:
+    record = _record_with(
+        graders=[],
+        verdict={"admitted": None, "status": "unknown"},
+        run_id="../../build-failure/build-001",
+    )
+
+    _write_record(record, tmp_path, "json")
+
+    assert len(list(tmp_path.glob("run-*.json"))) == 1
+    assert next(iter(tmp_path.iterdir())).is_file()

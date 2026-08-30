@@ -1,0 +1,49 @@
+hypothesis: >-
+  A deterministic local provider run through TerminusHarness, terminus-control,
+  and the Rust kernel will catch runtime integration failures that the scripted
+  fixture harness cannot observe.
+target_cohort: build_failure
+changed_components:
+  - eval-smoke orchestration
+  - deterministic local provider fixture
+  - live run evidence projection
+predicted_improvements:
+  runtime_path_coverage: 1.0
+predicted_regressions:
+  eval_smoke_wall_seconds: 30.0
+metrics:
+  - task_grader_pass
+  - provider_attempt_count
+  - kernel_tool_settlement_count
+  - wall_clock_ms
+budget:
+  max_cost_usd: 0.0
+  max_wall_seconds: 120
+  max_tool_calls: 6
+seeds: 1
+holdouts: []
+rollback_condition:
+  metric: task_grader_pass
+  threshold: ">= 1.0"
+  action: rollback
+owner: terminus
+observed:
+  primary_metric_delta: null
+  secondary_metric_deltas:
+    task_grader_pass: 1.0
+    provider_attempt_count: 4.0
+    kernel_tool_settlement_count: 3.0
+  confidence_intervals: {}
+  security_guardrail_results:
+    local_evidence_label_preserved: true
+  cost_guardrail_results:
+    computed_cost_usd: 0.0
+  regression_cohorts: []
+  notes: >-
+    The deterministic runtime smoke completed through terminus-control and the
+    Rust kernel, produced a non-empty workspace patch, and passed the independent
+    build-001 task grader. This remains fixture-only local evidence.
+decision: promote
+decision_reason: >-
+  Promote the deterministic runtime path into the per-change smoke gate. It does
+  not replace external-provider live evaluation or release evidence.
