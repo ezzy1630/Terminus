@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  attenuateScoutAuthority,
   buildCleanReview,
   subagentEnabled,
   validateScoutResult,
@@ -39,6 +40,39 @@ describe("validateScoutResult", () => {
     expect(() =>
       validateScoutResult({ ...base, filesChanged: ["src/auth.ts"] }),
     ).toThrow();
+  });
+
+  test("rejects a success-shaped empty result", () => {
+    expect(() => validateScoutResult({ ...base, claims: [], evidenceRefs: [], filesInspected: [] })).toThrow();
+  });
+
+  test("rejects negative or unknown accounting fields", () => {
+    expect(() => validateScoutResult({ ...base, costMicros: -1 })).toThrow();
+    expect(() => validateScoutResult({ ...base, unexpected: true })).toThrow();
+  });
+});
+
+describe("scout authority attenuation", () => {
+  test("keeps only read/search tools and covered paths", () => {
+    const authority = attenuateScoutAuthority({
+      parentTaskId: "task-1",
+      delegationId: "delegation-1",
+      parentAllowedTools: ["read", "grep", "patch"],
+      parentReadPaths: ["src/**"],
+      requestedReadPaths: ["src/auth.ts"],
+    });
+    expect(authority.allowedTools).toEqual(["read", "grep"]);
+    expect(authority.allowedWritePaths).toEqual([]);
+  });
+
+  test("fails closed when child asks outside the parent scope", () => {
+    expect(() => attenuateScoutAuthority({
+      parentTaskId: "task-1",
+      delegationId: "delegation-1",
+      parentAllowedTools: ["read"],
+      parentReadPaths: ["src/**"],
+      requestedReadPaths: ["tests/**"],
+    })).toThrow();
   });
 });
 
