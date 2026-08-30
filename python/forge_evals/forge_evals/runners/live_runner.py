@@ -65,11 +65,22 @@ class TaskWorkspace:
             "vcs_status": self.vcs_status,
             "grader_assets": (
                 {
-                    "isolated": True,
+                    # The assets are outside the model workspace, but this
+                    # local filesystem move is not a verified sandbox.
+                    "isolated": False,
+                    "path_separated": True,
+                    "access_isolation_verified": False,
+                    "isolation_method": "parent_directory_path_separation_only",
                     "digest": self.grader_assets_digest,
                 }
                 if self.grader_assets_dir is not None
-                else {"isolated": False, "digest": None}
+                else {
+                    "isolated": False,
+                    "path_separated": False,
+                    "access_isolation_verified": False,
+                    "isolation_method": "unavailable",
+                    "digest": None,
+                }
             ),
         }
 

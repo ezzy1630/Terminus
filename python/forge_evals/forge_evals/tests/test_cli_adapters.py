@@ -103,7 +103,9 @@ print(json.dumps({'type': 'text', 'text': 'done'}))
     assert result.metrics["tokens_reasoning"] == 7
     assert result.evidence_class is EvidenceClass.FIXTURE_ONLY
     assert len(result.provider_receipts) == 1
-    assert has_complete_provider_receipt(result.provider_receipts[0])
+    assert not has_complete_provider_receipt(result.provider_receipts[0])
+    assert result.provider_receipts[0]["receipt_kind"] == "diagnostic"
+    assert result.provider_receipts[0]["verified"] is False
     stdout_artifact = result.artifacts[1]
     assert Path(stdout_artifact["path"]).read_text().endswith('"done"}\n')
     assert stdout_artifact["truncated"] is False

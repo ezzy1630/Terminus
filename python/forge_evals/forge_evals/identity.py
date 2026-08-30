@@ -37,6 +37,11 @@ class EvaluationIdentity:
     budget_hash: str
     tool_schema_hash: str
     instruction_hash: str
+    # Provider routing is part of the model-fixed identity, but only its
+    # content hashes are persisted.  The raw endpoint and account identifier
+    # must never become benchmark evidence.
+    provider_endpoint_hash: str = "missing:provider_endpoint_hash"
+    provider_account_hash: str = "missing:provider_account_hash"
 
     def __post_init__(self) -> None:
         for name, value in self.to_dict().items():
@@ -89,6 +94,8 @@ class EvaluationIdentity:
             "budget_hash": self.budget_hash,
             "tool_schema_hash": self.tool_schema_hash,
             "instruction_hash": self.instruction_hash,
+            "provider_endpoint_hash": self.provider_endpoint_hash,
+            "provider_account_hash": self.provider_account_hash,
         }
 
     @property
@@ -122,6 +129,19 @@ class EvaluationIdentity:
         seed = data["random_seed"]
         if not isinstance(seed, int) or isinstance(seed, bool):
             raise ValueError("random_seed must be an integer")
+        # These fields were added after the original identity schema.  Decode
+        # old records explicitly as incomplete instead of silently treating a
+        # legacy record as release-grade provider binding.
+        provider_endpoint_hash = data.get(
+            "provider_endpoint_hash", "missing:provider_endpoint_hash"
+        )
+        provider_account_hash = data.get(
+            "provider_account_hash", "missing:provider_account_hash"
+        )
+        if not isinstance(provider_endpoint_hash, str):
+            raise ValueError("provider_endpoint_hash must be a string")
+        if not isinstance(provider_account_hash, str):
+            raise ValueError("provider_account_hash must be a string")
         return cls(
             task_id=text("task_id"),
             task_version=text("task_version"),
@@ -141,6 +161,8 @@ class EvaluationIdentity:
             budget_hash=text("budget_hash"),
             tool_schema_hash=text("tool_schema_hash"),
             instruction_hash=text("instruction_hash"),
+            provider_endpoint_hash=provider_endpoint_hash,
+            provider_account_hash=provider_account_hash,
         )
 
 
