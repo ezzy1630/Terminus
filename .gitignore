@@ -104,5 +104,11 @@ apps/desktop/release/
 artifacts/release-gate/*
 !artifacts/release-gate/.gitkeep
 
+# Local benchmark campaigns and codegen comparison manifests are reproducible
+# run output. Durable golden summaries belong under evals/results/golden/.
+artifacts/codegen/
+artifacts/paired-pilot-*/
+artifacts/terminus-live-*/
+
 # Local development runtime state (SQLite db, kernel data, UDS socket, tokens)
 .terminus-dev/
