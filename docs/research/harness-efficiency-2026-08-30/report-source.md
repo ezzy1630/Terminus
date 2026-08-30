@@ -29,6 +29,7 @@ The concrete high-leverage defect was at the OpenAI Responses wire boundary. The
 - Volatile content after that boundary remains unmarked.
 - The supported `30m` TTL is declared from provider capabilities.
 - Stable affinity keys are forwarded through the live native executor and normalized to at most 64 characters without exposing an oversized human-readable scope.
+- Responses usage now preserves `cache_write_tokens`; exact cost and runtime budget reconciliation apply GPT-5.6's 1.25x cache-write rate.
 - Older OpenAI model families and Chat Completions keep automatic-prefix behavior because the new fields are model and protocol specific.
 
 This is a request-shape and capability correction, not proof of a live cache hit. Local tests prove the exact JSON boundary. A paid GPT-5.6 conformance run is still needed to measure `cached_tokens`, `cache_write_tokens`, TTFT, cost, and task success across repeated turns.
@@ -108,7 +109,7 @@ SGLang's RadixAttention is a broader serving design for reusing KV cache across 
 | Area | Present in the repository | Gap or risk | Decision |
 |---|---|---|---|
 | Stable prefix | Compiler ordering, content hashes, cache epochs, provider plans | OpenAI Responses discarded the selected boundary | Fixed on this branch |
-| Cache accounting | Predicted and actual cache read/write telemetry | No paid repeated-turn GPT-5.6 conformance evidence yet | Measure before claiming savings |
+| Cache accounting | Predicted and actual read/write telemetry; exact read, write, input, output, and reasoning cost components | No paid repeated-turn GPT-5.6 conformance evidence yet | Measure before claiming savings |
 | Tool output | Bounded previews, artifacts, continuation, exact recall | Learned observation compression is not proven on Terminus cohorts | Defer behind paired eval |
 | Tool schemas | Progressive activation and minimal/adaptive profiles | More pruning may hide necessary tools | Defer behind ACI and completion eval |
 | Compaction | Structured claims, call/result integrity, recent tail, recall | Rewriting can lose prefix reuse; generic semantic compaction is disabled live | Keep disabled until long-horizon cost-quality evidence |
@@ -136,6 +137,10 @@ SGLang's RadixAttention is a broader serving design for reusing KV cache across 
 
 `mini-services/terminus-control/src/providers/native-direct-executor.ts` forwards the stable context-epoch key that the control loop already supplied. `openai-runtime.ts` normalizes the key before a late body override, so the live path cannot bypass the renderer's bound.
 
+`packages/provider-openai/src/stream.ts` decodes GPT-5.6's `cache_write_tokens`. Provider economics now represents a cache-write rate separately, and the direct GPT-5.6 capability snapshot declares the documented 1.25x input rate. Actual native spend and budget reconciliation include that component instead of treating writes as ordinary input.
+
+The compiler separately carries the estimated full input and the complete prefix through the latest selected breakpoint, including tool schemas. Pre-dispatch admission prices that span as a cold write when the provider declares a write rate. Automatic-cache input is priced as an ordinary cold miss because cache warmth is not guaranteed. Observed reads and writes replace the conservative bound after settlement without corrupting read-hit telemetry.
+
 ### Before and after
 
 ```text
@@ -156,9 +161,11 @@ After for GPT-5.6 Responses
 
 Observed locally in the isolated worktree:
 
-- 32 focused provider, profile, direct-configuration, and native-runtime tests passed.
+- All 47 focused compiler, provider, economics, profile, direct-configuration, and native-runtime tests passed with 224 assertions.
 - The OpenAI provider conformance test passed in the broader provider test run.
 - Package TypeScript checking passed.
+- All 772 package unit tests passed with 5,679 assertions.
+- The first-party standalone dependency check passed.
 - Repository ESLint completed with zero errors and two pre-existing warnings in generated kernel client files.
 - `git diff --check` passed.
 
@@ -171,6 +178,8 @@ The test suite includes explicit assertions for:
 - deterministic bounded fallback and caller affinity keys;
 - live-executor cache-key forwarding;
 - GPT-5.6 capability/profile agreement.
+- cache-write usage decoding, provider-specific write pricing, and runtime budget reconciliation.
+- full latest-breakpoint span propagation, explicit cold-write admission, and automatic-cache cold-miss admission.
 
 The complete repository gate is reported separately in the branch handoff. A clean worktree initially lacked Prisma output; after local client generation, `typecheck:scripts` reached one unrelated existing error in `mini-services/terminus-control/src/permission-profiles.ts:110` (`TS2366`). This branch does not modify that file.
 

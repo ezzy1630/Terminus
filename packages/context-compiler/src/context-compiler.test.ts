@@ -141,6 +141,12 @@ class FakeRenderer implements ProviderRenderer {
         signal: input.signal,
       },
       predictedCachedTokens: 0n as TokenCount,
+      ...(input.estimatedInputTokens === undefined
+        ? {}
+        : { estimatedInputTokens: input.estimatedInputTokens }),
+      ...(input.predictedCacheWriteTokens === undefined
+        ? {}
+        : { predictedCacheWriteTokens: input.predictedCacheWriteTokens }),
       body: { manifestId: input.manifestId },
     };
   }
@@ -299,6 +305,12 @@ describe("Context Compiler", () => {
     expect(compiled.manifest.fragments.some((fragment) => fragment.required)).toBe(true);
     expect(compiled.rendered.request.blocks.length).toBeGreaterThan(0);
     expect(compiled.rendered.request.cachePlan.stablePrefixHash).toMatch(/^sha256:/);
+    expect(compiled.rendered.estimatedInputTokens).toBe(
+      BigInt(compiled.totalEstimatedTokens) as TokenCount,
+    );
+    expect(compiled.rendered.predictedCacheWriteTokens).toBeGreaterThanOrEqual(
+      compiled.manifest.cachePlan.predictedCachedTokens,
+    );
     expect(compiled.manifest.compilerVersion).toContain("token-estimator=terminus.token-estimator.v1");
     expect(compiled.manifest.decisionRecord?.tokenEstimator).toMatchObject({
       status: "degraded",

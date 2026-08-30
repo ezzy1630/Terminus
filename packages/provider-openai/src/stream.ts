@@ -350,7 +350,7 @@ export function responsesUsage(value: Readonly<Record<string, unknown>>): UsageR
   return {
     inputTokens: BigInt(numberOrZero(value.input_tokens)) as TokenCount,
     cachedInputTokens: BigInt(numberOrZero(details.cached_tokens)) as TokenCount,
-    cacheWriteTokens: 0n as TokenCount,
+    cacheWriteTokens: BigInt(numberOrZero(details.cache_write_tokens)) as TokenCount,
     outputTokens: BigInt(numberOrZero(value.output_tokens)) as TokenCount,
     reasoningTokens: BigInt(numberOrZero(outputDetails.reasoning_tokens)) as TokenCount,
     toolSchemaTokens: 0n as TokenCount,

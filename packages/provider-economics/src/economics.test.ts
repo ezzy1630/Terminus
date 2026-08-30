@@ -41,4 +41,22 @@ describe("estimateCostMicros", () => {
     expect(micros > 0n).toBe(true);
     expect(micros).toBe(100n as Micros);
   });
+
+  test("includes observed cache writes when reconciling actual spend", () => {
+    const micros = estimateCostMicros(
+      {
+        promptTokens: tokens(1_000_000),
+        predictedOutputTokens: tokens(0),
+        predictedReasoningTokens: tokens(0),
+        predictedCachedTokens: tokens(200_000),
+        cacheWriteTokens: tokens(300_000),
+      },
+      {
+        ...ECONOMICS,
+        cacheWriteMicrosPerMillion: 1_250_000n as Micros,
+      },
+    );
+
+    expect(micros).toBe(895_000n as Micros);
+  });
 });

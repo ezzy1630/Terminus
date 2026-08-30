@@ -188,6 +188,9 @@ export function configuredDirectProviderSnapshot(
     economics: {
       inputMicrosPerMillion: BigInt(model.inputMicrosPerMillion) as Micros,
       cachedInputMicrosPerMillion: BigInt(model.cachedInputMicrosPerMillion) as Micros,
+      ...(explicitOpenAiCaching
+        ? { cacheWriteMicrosPerMillion: BigInt(Math.round(model.inputMicrosPerMillion * 1.25)) as Micros }
+        : {}),
       outputMicrosPerMillion: BigInt(model.outputMicrosPerMillion) as Micros,
       reasoningAccounting: model.reasoning,
     },

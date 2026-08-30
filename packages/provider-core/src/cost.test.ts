@@ -57,6 +57,28 @@ describe("provider cost accounting", () => {
     expect(cost.computedCostMicros).toBe(3_600_150n as Micros);
   });
 
+  test("charges cache writes at their provider-specific rate", () => {
+    const cost = computeCost({
+      usage: usage({
+        inputTokens: 1_000_000n as TokenCount,
+        cachedInputTokens: 200_000n as TokenCount,
+        cacheWriteTokens: 300_000n as TokenCount,
+        outputTokens: 0n as TokenCount,
+        reasoningTokens: 0n as TokenCount,
+      }),
+      economics: {
+        ...economics,
+        cacheWriteMicrosPerMillion: 3_750_000n as Micros,
+      },
+      providerReportedCostMicros: null,
+    });
+
+    expect(cost.inputMicros).toBe(1_500_000n as Micros);
+    expect(cost.cachedInputMicros).toBe(150_000n as Micros);
+    expect(cost.cacheWriteMicros).toBe(1_125_000n as Micros);
+    expect(cost.computedCostMicros).toBe(2_775_000n as Micros);
+  });
+
   test("detects large-value accounting anomalies without lossy comparisons", () => {
     const computed = computeExactCostMicros(usage({
       inputTokens: 9_007_199_254_740_993n as TokenCount,

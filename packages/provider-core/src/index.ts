@@ -63,6 +63,8 @@ export interface ReasoningProfile {
 export interface ProviderEconomics {
   readonly inputMicrosPerMillion: Micros;
   readonly cachedInputMicrosPerMillion: Micros;
+  /** Defaults to the ordinary input rate when the provider has no write surcharge. */
+  readonly cacheWriteMicrosPerMillion?: Micros | undefined;
   readonly outputMicrosPerMillion: Micros;
   readonly reasoningAccounting: boolean;
 }
@@ -264,6 +266,7 @@ export interface CostRecord {
   readonly computedCostMicros: Micros;
   readonly inputMicros: Micros;
   readonly cachedInputMicros: Micros;
+  readonly cacheWriteMicros: Micros;
   readonly outputMicros: Micros;
   readonly reasoningMicros: Micros;
   readonly anomaly: boolean;
@@ -295,6 +298,7 @@ function costComponents(
 ): {
   readonly inputMicros: Micros;
   readonly cachedInputMicros: Micros;
+  readonly cacheWriteMicros: Micros;
   readonly outputMicros: Micros;
   readonly reasoningMicros: Micros;
 } {
@@ -303,9 +307,18 @@ function costComponents(
   const cachedInputTokens = cachedInputTokensValue > inputTokens
     ? inputTokens
     : cachedInputTokensValue;
-  const uncachedInputTokens = inputTokens - cachedInputTokens;
+  const cacheWriteTokensValue = nonNegative(usage.cacheWriteTokens, "cache write token count");
+  const remainingInputTokens = inputTokens - cachedInputTokens;
+  const cacheWriteTokens = cacheWriteTokensValue > remainingInputTokens
+    ? remainingInputTokens
+    : cacheWriteTokensValue;
+  const uncachedInputTokens = remainingInputTokens - cacheWriteTokens;
   const inputMicros = roundedMicros(uncachedInputTokens, economics.inputMicrosPerMillion);
   const cachedInputMicros = roundedMicros(cachedInputTokens, economics.cachedInputMicrosPerMillion);
+  const cacheWriteMicros = roundedMicros(
+    cacheWriteTokens,
+    economics.cacheWriteMicrosPerMillion ?? economics.inputMicrosPerMillion,
+  );
   const outputMicros = roundedMicros(
     nonNegative(usage.outputTokens, "output token count"),
     economics.outputMicrosPerMillion,
@@ -316,7 +329,7 @@ function costComponents(
         economics.outputMicrosPerMillion,
       )
     : (0n as Micros);
-  return { inputMicros, cachedInputMicros, outputMicros, reasoningMicros };
+  return { inputMicros, cachedInputMicros, cacheWriteMicros, outputMicros, reasoningMicros };
 }
 
 /** Compute provider economics with bigint arithmetic and deterministic rounding. */
@@ -328,6 +341,7 @@ export function computeExactCostMicros(
   return (
     components.inputMicros
     + components.cachedInputMicros
+    + components.cacheWriteMicros
     + components.outputMicros
     + components.reasoningMicros
   ) as Micros;
@@ -399,6 +413,10 @@ export interface CanonicalRenderInput {
   readonly reasoningReserveTokens: TokenCount;
   readonly outputReserveTokens: TokenCount;
   readonly hardInputLimit: TokenCount;
+  /** Compiler estimate for all selected fragments and tool schemas. */
+  readonly estimatedInputTokens?: TokenCount | undefined;
+  /** Compiler estimate through the latest selected cache breakpoint. */
+  readonly predictedCacheWriteTokens?: TokenCount | undefined;
   readonly signal: AbortSignal | null;
   /**
    * Optional compiled manifest ID. Required for authority validation.
@@ -426,6 +444,10 @@ export interface RenderedProviderRequest {
   readonly model: ModelKey;
   readonly request: ProviderRequest;
   readonly predictedCachedTokens: TokenCount;
+  /** Estimated full provider input, including tool schemas. */
+  readonly estimatedInputTokens?: TokenCount | undefined;
+  /** Estimated prefix through the latest provider cache-write breakpoint. */
+  readonly predictedCacheWriteTokens?: TokenCount | undefined;
   readonly body: Readonly<Record<string, unknown>>;
 }
 
@@ -511,11 +533,11 @@ export interface CostComputationInput {
 }
 
 export function computeCost(input: CostComputationInput): CostRecord {
-  const { inputMicros, cachedInputMicros, outputMicros, reasoningMicros } = costComponents(
+  const { inputMicros, cachedInputMicros, cacheWriteMicros, outputMicros, reasoningMicros } = costComponents(
     input.usage,
     input.economics,
   );
-  const computed = (inputMicros + cachedInputMicros + outputMicros + reasoningMicros) as Micros;
+  const computed = (inputMicros + cachedInputMicros + cacheWriteMicros + outputMicros + reasoningMicros) as Micros;
   const tolerance = input.anomalyTolerance ?? 0.05;
   let anomaly = false;
   let anomalyReason: string | null = null;
@@ -531,6 +553,7 @@ export function computeCost(input: CostComputationInput): CostRecord {
     computedCostMicros: computed,
     inputMicros,
     cachedInputMicros,
+    cacheWriteMicros,
     outputMicros,
     reasoningMicros,
     anomaly,

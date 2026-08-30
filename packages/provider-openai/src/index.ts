@@ -329,6 +329,12 @@ export class OpenAiRenderer extends BaseProviderRenderer {
       model: input.model.modelKey,
       request: toProviderRequest(input, this.providerId),
       predictedCachedTokens: predictCachedTokens(input),
+      ...(input.estimatedInputTokens === undefined
+        ? {}
+        : { estimatedInputTokens: input.estimatedInputTokens }),
+      ...(input.predictedCacheWriteTokens === undefined
+        ? {}
+        : { predictedCacheWriteTokens: input.predictedCacheWriteTokens }),
       body: body as unknown as Readonly<Record<string, unknown>>,
     };
   }

@@ -111,6 +111,9 @@ describe("direct provider configuration (audit P0-2)", () => {
       minimumTokens: 1_024,
       ttlOptions: ["30m"],
     });
+    expect(gptSnapshot.economics.cacheWriteMicrosPerMillion).toBe(
+      (gptSnapshot.economics.inputMicrosPerMillion * 5n) / 4n,
+    );
 
     const claude = parseDirectProviderConfiguration(JSON.stringify({
       vendor: "anthropic", protocol: "messages", model: "claude-opus-5",
