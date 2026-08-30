@@ -6,6 +6,13 @@ import { canonicalJson, computeContentHash } from "@terminus/context-ir";
 export const TERMINUS_MINIMAL_PROFILE_ID = "terminus-minimal" as const;
 export const TERMINUS_MINIMAL_PROFILE_VERSION = "1" as const;
 /**
+ * The opt-in product arm. It differs from the permanent minimal control arm
+ * only by admitting bounded delegation; routing, memory, and workflows stay
+ * disabled until their independent promotion gates pass.
+ */
+export const TERMINUS_ADAPTIVE_PROFILE_ID = "terminus-adaptive" as const;
+export const TERMINUS_ADAPTIVE_PROFILE_VERSION = "1" as const;
+/**
  * The always-on coding surface. Every id here is declared to the provider,
  * accepted by the dispatch guard, and executable.
  *
@@ -48,6 +55,24 @@ export interface TerminusMinimalProfile {
   readonly profileHash: ContentHash;
 }
 
+export interface TerminusAdaptiveProfile {
+  readonly profileId: typeof TERMINUS_ADAPTIVE_PROFILE_ID;
+  readonly version: typeof TERMINUS_ADAPTIVE_PROFILE_VERSION;
+  readonly providerId: string;
+  readonly modelKey: string;
+  readonly toolIds: readonly string[];
+  readonly routerEnabled: false;
+  readonly memoryEnabled: false;
+  readonly workflowEnabled: false;
+  readonly subagentsEnabled: true;
+  /** Hash of the safe provider/profile configuration, never the credential. */
+  readonly configurationHash: ContentHash;
+  readonly profileHash: ContentHash;
+}
+
+export type TerminusExecutionProfile = TerminusMinimalProfile | TerminusAdaptiveProfile;
+export type TerminusProfileMode = "minimal" | "adaptive";
+
 export const terminusMinimalProfileSchema = z.object({
   profileId: z.literal(TERMINUS_MINIMAL_PROFILE_ID),
   version: z.literal(TERMINUS_MINIMAL_PROFILE_VERSION),
@@ -67,6 +92,20 @@ export const terminusMinimalProfileSchema = z.object({
   profileHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
 });
 
+export const terminusAdaptiveProfileSchema = z.object({
+  profileId: z.literal(TERMINUS_ADAPTIVE_PROFILE_ID),
+  version: z.literal(TERMINUS_ADAPTIVE_PROFILE_VERSION),
+  providerId: z.string().min(1),
+  modelKey: z.string().min(1),
+  toolIds: z.array(z.enum(TERMINUS_DECLARABLE_TOOL_IDS)),
+  routerEnabled: z.literal(false),
+  memoryEnabled: z.literal(false),
+  workflowEnabled: z.literal(false),
+  subagentsEnabled: z.literal(true),
+  configurationHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  profileHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+});
+
 export interface TerminusMinimalProfileInput {
   readonly providerId: string;
   readonly modelKey: string;
@@ -78,6 +117,10 @@ export interface TerminusMinimalProfileInput {
    * workspace set while attempt records retain the exact per-request schema.
    */
   readonly toolIds?: readonly string[] | undefined;
+}
+
+export interface TerminusExecutionProfileInput extends TerminusMinimalProfileInput {
+  readonly mode: TerminusProfileMode;
 }
 
 /**
@@ -123,6 +166,56 @@ export function createTerminusMinimalProfile(
   return validateTerminusMinimalProfile(profile);
 }
 
+/** Create the opt-in delegation arm without enabling unrelated experiments. */
+export function createTerminusAdaptiveProfile(
+  input: TerminusMinimalProfileInput,
+): TerminusAdaptiveProfile {
+  const minimal = createTerminusMinimalProfile(input);
+  const base = {
+    profileId: TERMINUS_ADAPTIVE_PROFILE_ID,
+    version: TERMINUS_ADAPTIVE_PROFILE_VERSION,
+    providerId: minimal.providerId,
+    modelKey: minimal.modelKey,
+    toolIds: minimal.toolIds,
+    routerEnabled: false as const,
+    memoryEnabled: false as const,
+    workflowEnabled: false as const,
+    subagentsEnabled: true as const,
+    configurationHash: minimal.configurationHash,
+  };
+  return validateTerminusAdaptiveProfile({
+    ...base,
+    profileHash: computeContentHash(canonicalJson(base)),
+  });
+}
+
+/**
+ * Promotion-gated profile selection. Missing configuration stays on the
+ * permanent minimal control arm; misspellings fail instead of changing mode.
+ */
+export function resolveTerminusProfileMode(raw: string | null | undefined): TerminusProfileMode {
+  const value = raw?.trim() ?? "";
+  if (value === "" || value === "minimal") return "minimal";
+  if (value === "adaptive") return "adaptive";
+  throw new Error(
+    `TERMINUS_HARNESS_PROFILE must be 'minimal' or 'adaptive', received '${value}'`,
+  );
+}
+
+export function createTerminusExecutionProfile(
+  input: TerminusExecutionProfileInput,
+): TerminusExecutionProfile {
+  const profileInput: TerminusMinimalProfileInput = {
+    providerId: input.providerId,
+    modelKey: input.modelKey,
+    ...(input.configuration === undefined ? {} : { configuration: input.configuration }),
+    ...(input.toolIds === undefined ? {} : { toolIds: input.toolIds }),
+  };
+  return input.mode === "adaptive"
+    ? createTerminusAdaptiveProfile(profileInput)
+    : createTerminusMinimalProfile(profileInput);
+}
+
 export const EVIDENCE_BUNDLE_VERSION = "terminus.evidence-bundle.v1" as const;
 
 export type EvidenceTerminalOutcome =
@@ -140,7 +233,7 @@ export interface EvidenceIdentityInput {
   readonly contractVersion: number;
   readonly baseWorkspaceRevision: string;
   readonly finalWorkspaceRevision: string;
-  readonly profile: TerminusMinimalProfile;
+  readonly profile: TerminusExecutionProfile;
   readonly providerAttemptIds: readonly string[];
   readonly contextManifestIds: readonly string[];
   readonly requestArtifactHashes: readonly string[];
@@ -192,8 +285,19 @@ function assertSafeConfiguration(value: unknown, path = "configuration"): void {
   }
 }
 
-function profileHashInput(profile: Omit<TerminusMinimalProfile, "profileHash">): string {
-  return canonicalJson(profile);
+function profileHashInput(profile: TerminusExecutionProfile): string {
+  return canonicalJson({
+    profileId: profile.profileId,
+    version: profile.version,
+    providerId: profile.providerId,
+    modelKey: profile.modelKey,
+    toolIds: profile.toolIds,
+    routerEnabled: profile.routerEnabled,
+    memoryEnabled: profile.memoryEnabled,
+    workflowEnabled: profile.workflowEnabled,
+    subagentsEnabled: profile.subagentsEnabled,
+    configurationHash: profile.configurationHash,
+  });
 }
 
 /** Validate both the shape and the content-derived profile identity. */
@@ -201,22 +305,29 @@ export function validateTerminusMinimalProfile(
   profile: TerminusMinimalProfile,
 ): TerminusMinimalProfile {
   const parsed = terminusMinimalProfileSchema.parse(profile) as unknown as TerminusMinimalProfile;
-  const expected = computeContentHash(profileHashInput({
-    profileId: parsed.profileId,
-    version: parsed.version,
-    providerId: parsed.providerId,
-    modelKey: parsed.modelKey,
-    toolIds: parsed.toolIds,
-    routerEnabled: parsed.routerEnabled,
-    memoryEnabled: parsed.memoryEnabled,
-    workflowEnabled: parsed.workflowEnabled,
-    subagentsEnabled: parsed.subagentsEnabled,
-    configurationHash: parsed.configurationHash,
-  }));
+  const expected = computeContentHash(profileHashInput(parsed));
   if (parsed.profileHash !== expected) {
     throw new Error("terminus-minimal profile hash does not match its configuration");
   }
   return parsed;
+}
+
+export function validateTerminusAdaptiveProfile(profile: unknown): TerminusAdaptiveProfile {
+  const parsed = terminusAdaptiveProfileSchema.parse(profile) as unknown as TerminusAdaptiveProfile;
+  const expected = computeContentHash(profileHashInput(parsed));
+  if (parsed.profileHash !== expected) {
+    throw new Error("terminus-adaptive profile hash does not match its configuration");
+  }
+  return parsed;
+}
+
+export function validateTerminusExecutionProfile(profile: unknown): TerminusExecutionProfile {
+  if (typeof profile !== "object" || profile === null || !("profileId" in profile)) {
+    throw new Error("Terminus execution profile is missing its profile id");
+  }
+  return profile.profileId === TERMINUS_ADAPTIVE_PROFILE_ID
+    ? validateTerminusAdaptiveProfile(profile)
+    : validateTerminusMinimalProfile(profile as TerminusMinimalProfile);
 }
 
 /**
@@ -224,7 +335,7 @@ export function validateTerminusMinimalProfile(
  * records references and hashes only. It never embeds model output or secrets.
  */
 export function buildEvidenceIdentity(input: EvidenceIdentityInput): EvidenceIdentity {
-  const profile = validateTerminusMinimalProfile(input.profile);
+  const profile = validateTerminusExecutionProfile(input.profile);
   const identity = {
     schema_version: EVIDENCE_BUNDLE_VERSION,
     task_id: input.taskId,

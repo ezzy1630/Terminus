@@ -1,11 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { STANDALONE_ALWAYS_ON_TOOL_IDS } from "../agent-tools.js";
 import {
+  TERMINUS_ADAPTIVE_PROFILE_ID,
   TERMINUS_DECLARABLE_TOOL_IDS,
   TERMINUS_MINIMAL_TOOL_IDS,
   buildEvidenceIdentity,
+  createTerminusAdaptiveProfile,
+  createTerminusExecutionProfile,
   createTerminusMinimalProfile,
+  resolveTerminusProfileMode,
+  terminusAdaptiveProfileSchema,
   terminusMinimalProfileSchema,
+  validateTerminusExecutionProfile,
   validateTerminusMinimalProfile,
 } from "./minimal-profile.js";
 
@@ -67,6 +73,42 @@ describe("terminus-minimal profile", () => {
     expect(() => validateTerminusMinimalProfile({ ...profile, providerId: "other" })).toThrow("profile hash");
   });
 
+  test("keeps adaptive delegation distinct from the permanent minimal control arm", () => {
+    const minimal = createTerminusExecutionProfile({
+      mode: "minimal",
+      providerId: "openai",
+      modelKey: "gpt-5.6-terra",
+    });
+    const adaptive = createTerminusExecutionProfile({
+      mode: "adaptive",
+      providerId: "openai",
+      modelKey: "gpt-5.6-terra",
+    });
+
+    expect(minimal.profileId).toBe("terminus-minimal");
+    expect(minimal.subagentsEnabled).toBe(false);
+    expect(adaptive.profileId).toBe(TERMINUS_ADAPTIVE_PROFILE_ID);
+    expect(adaptive.subagentsEnabled).toBe(true);
+    expect(adaptive.routerEnabled).toBe(false);
+    expect(adaptive.memoryEnabled).toBe(false);
+    expect(adaptive.workflowEnabled).toBe(false);
+    expect(adaptive.profileHash).not.toBe(minimal.profileHash);
+    expect(terminusAdaptiveProfileSchema.safeParse(adaptive).success).toBe(true);
+    expect(validateTerminusExecutionProfile(adaptive)).toEqual(adaptive);
+  });
+
+  test("requires an explicit adaptive profile until its promotion gate passes", () => {
+    expect(resolveTerminusProfileMode(undefined)).toBe("minimal");
+    expect(resolveTerminusProfileMode(null)).toBe("minimal");
+    expect(resolveTerminusProfileMode("")).toBe("minimal");
+    expect(resolveTerminusProfileMode("minimal")).toBe("minimal");
+    expect(resolveTerminusProfileMode("adaptive")).toBe("adaptive");
+    expect(() => resolveTerminusProfileMode("full")).toThrow("TERMINUS_HARNESS_PROFILE");
+
+    const adaptive = createTerminusAdaptiveProfile({ providerId: "local", modelKey: "local/test" });
+    expect(() => validateTerminusExecutionProfile({ ...adaptive, subagentsEnabled: false })).toThrow();
+  });
+
   test("evidence identity is order-independent for references and sensitive to outcome", () => {
     const profile = createTerminusMinimalProfile({ providerId: "local", modelKey: "local/test" });
     const base = {
@@ -94,5 +136,10 @@ describe("terminus-minimal profile", () => {
     expect(first.identityHash).toBe(reordered.identityHash);
     expect(first.identityHash).not.toBe(blocked.identityHash);
     expect(() => buildEvidenceIdentity({ ...base, profile: { ...profile, modelKey: "other/model" } })).toThrow("profile hash");
+
+    const adaptive = createTerminusAdaptiveProfile({ providerId: "local", modelKey: "local/test" });
+    const adaptiveIdentity = buildEvidenceIdentity({ ...base, profile: adaptive });
+    expect(adaptiveIdentity.profileHash).toBe(adaptive.profileHash);
+    expect(adaptiveIdentity.identityHash).not.toBe(first.identityHash);
   });
 });

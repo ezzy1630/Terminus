@@ -370,10 +370,11 @@ import {
 } from "./agent/coding-turn-engine.js";
 import {
   buildEvidenceIdentity,
-  createTerminusMinimalProfile,
+  createTerminusExecutionProfile,
+  resolveTerminusProfileMode,
   TERMINUS_MINIMAL_TOOL_IDS,
   type EvidenceTerminalOutcome,
-  type TerminusMinimalProfile,
+  type TerminusExecutionProfile,
 } from "./agent/minimal-profile.js";
 import {
   classifyLoopError,
@@ -12005,7 +12006,7 @@ interface EvidenceBundlePersistenceInput {
   readonly contractVersion: number;
   readonly baseWorkspaceRevision: string;
   readonly finalWorkspaceRevision: string;
-  readonly profile: TerminusMinimalProfile;
+  readonly profile: TerminusExecutionProfile;
   readonly providerAttemptIds: readonly string[];
   readonly contextManifestIds: readonly string[];
   readonly requestArtifactHashes: readonly string[];
@@ -15021,7 +15022,7 @@ async function agentLoop(turnId: string): Promise<void> {
   const existingController = activeTurnAbortControllers.get(turnId);
   const abortController = existingController ?? new AbortController();
   activeTurnAbortControllers.set(turnId, abortController);
-  let turnProfile: TerminusMinimalProfile | null = null;
+  let turnProfile: TerminusExecutionProfile | null = null;
   let turnBaseWorkspaceRevision = "unresolved";
   let latestHypothesisId: string | null = null;
   let turnContextBudgetJson: string | null = null;
@@ -15632,7 +15633,8 @@ async function agentLoop(turnId: string): Promise<void> {
         : capability;
       return workspaceToolSchemas.some((schema) => schema.id === toolId);
     });
-    const selectedProfile = createTerminusMinimalProfile({
+    const selectedProfile = createTerminusExecutionProfile({
+      mode: resolveTerminusProfileMode(process.env.TERMINUS_HARNESS_PROFILE),
       providerId: selectedProvider.providerId,
       modelKey: String(selectedModel.modelKey),
       // The profile records the bounded union; each provider attempt records
