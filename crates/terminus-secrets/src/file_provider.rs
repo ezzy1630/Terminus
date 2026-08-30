@@ -302,7 +302,9 @@ impl WritableSecretProvider for FileSecretProvider {
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Err(SecretError::UnknownCapability(uri.to_string()))
+                // Deletion is an idempotent cleanup operation. An absent
+                // account is already in the requested terminal state.
+                Ok(())
             }
             Err(error) => Err(SecretError::ProviderUnavailable(format!(
                 "cannot remove credential for {uri}: {error}"
@@ -477,5 +479,16 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(entries, vec!["zen".to_string()]);
+    }
+
+    #[test]
+    fn delete_of_absent_credential_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        let provider =
+            FileSecretProvider::open(root.path().join("secrets"), SecretNamespace::Gateway)
+                .unwrap();
+
+        provider.delete(GATEWAY_URI).unwrap();
+        provider.delete(GATEWAY_URI).unwrap();
     }
 }

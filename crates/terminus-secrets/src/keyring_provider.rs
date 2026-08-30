@@ -82,9 +82,7 @@ impl WritableSecretProvider for KeyringSecretProvider {
 
     fn delete(&self, uri: &str) -> Result<(), SecretError> {
         let account = self.account_for(uri)?;
-        self.entry(&account)?
-            .delete_credential()
-            .map_err(map_keyring_error)
+        map_keyring_delete_result(self.entry(&account)?.delete_credential())
     }
 }
 
@@ -96,6 +94,13 @@ impl KeyringSecretProvider {
 
 fn map_keyring_error(error: keyring::Error) -> SecretError {
     SecretError::ProviderUnavailable(error.to_string())
+}
+
+fn map_keyring_delete_result(result: Result<(), keyring::Error>) -> Result<(), SecretError> {
+    match result {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(map_keyring_error(error)),
+    }
 }
 
 fn map_keyring_lookup_error(error: keyring::Error, uri: &str) -> SecretError {
@@ -127,6 +132,18 @@ mod tests {
         // Neither provider admits the other's namespace.
         assert!(gateway.account_for(&uri).is_err());
         assert!(accounts.account_for("secret://opencode/zen").is_err());
+    }
+
+    #[test]
+    fn delete_treats_absence_as_success_but_preserves_backend_failures() {
+        assert!(map_keyring_delete_result(Err(keyring::Error::NoEntry)).is_ok());
+        let backend_error = keyring::Error::PlatformFailure(Box::new(std::io::Error::other(
+            "keychain unavailable",
+        )));
+        assert!(matches!(
+            map_keyring_delete_result(Err(backend_error)),
+            Err(SecretError::ProviderUnavailable(_))
+        ));
     }
 
     #[test]

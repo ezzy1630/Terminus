@@ -13,6 +13,9 @@ import {
   providerAccountWorkspaceAccess,
   providerAccountSecretUri,
   providerAccountWire,
+  recoverLegacyProviderAccountCredential,
+  legacyProviderAccountSecretUri,
+  settleProviderAccountSecretCleanup,
   resolveTurnProvider,
   uuidV7,
   zenAccountCredentialUri,
@@ -379,6 +382,120 @@ describe("gateway row migration", () => {
       baseUrl: "https://opencode.ai/zen/go/v1",
     });
     expect(zenAccountCredentialUri(row)).toBe("secret://opencode/go");
+  });
+});
+
+describe("pre-saga provider-account secret recovery", () => {
+  const legacyId = "0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b";
+  const legacyUri = providerAccountSecretUri(legacyId);
+
+  test("derives only the old deterministic account URI", () => {
+    expect(legacyProviderAccountSecretUri(legacyId)).toBe(legacyUri);
+    expect(legacyProviderAccountSecretUri("account-1")).toBeNull();
+  });
+
+  test("probes and deletes present legacy material", async () => {
+    const inspected: string[] = [];
+    const revoked: string[] = [];
+    await expect(recoverLegacyProviderAccountCredential({
+      accountId: legacyId,
+      inspect: async (uri) => {
+        inspected.push(uri);
+        return "present";
+      },
+      revoke: async (uri) => {
+        revoked.push(uri);
+        return true;
+      },
+    })).resolves.toBe(true);
+    expect(inspected).toEqual([legacyUri]);
+    expect(revoked).toEqual([legacyUri]);
+  });
+
+  test("treats an absent legacy item as settled without deleting", async () => {
+    const revoked: string[] = [];
+    await expect(recoverLegacyProviderAccountCredential({
+      accountId: legacyId,
+      inspect: async () => "missing",
+      revoke: async (uri) => {
+        revoked.push(uri);
+        return true;
+      },
+    })).resolves.toBe(true);
+    expect(revoked).toEqual([]);
+  });
+
+  test("keeps cleanup pending when the backend is unavailable", async () => {
+    const revoked: string[] = [];
+    await expect(recoverLegacyProviderAccountCredential({
+      accountId: legacyId,
+      inspect: async () => "unavailable",
+      revoke: async (uri) => {
+        revoked.push(uri);
+        return true;
+      },
+    })).resolves.toBe(false);
+    expect(revoked).toEqual([]);
+  });
+
+  test("import_pending before Store is recoverable through idempotent cleanup", async () => {
+    const events: string[] = [];
+    const pending = account({
+      id: legacyId,
+      credentialUri: providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7c"),
+      secretState: "import_pending",
+      secretOperationId: "import-operation",
+    });
+    const settled = await settleProviderAccountSecretCleanup({
+      account: pending,
+      markRevokePending: async (row) => {
+        events.push(`mark:${row.secretState}`);
+        return { ...row, secretState: "revoke_pending" };
+      },
+      revokeCredential: async (uri, row) => {
+        events.push(`delete:${row.secretState}:${uri}`);
+        return true;
+      },
+      finalize: async (row) => {
+        events.push(`finalize:${row.secretState}`);
+        return { ...row, credentialUri: "", secretState: "none" };
+      },
+    });
+
+    expect(events).toEqual([
+      "mark:import_pending",
+      `delete:revoke_pending:${pending.credentialUri}`,
+      "finalize:revoke_pending",
+    ]);
+    expect(settled).toMatchObject({ credentialUri: "", secretState: "none" });
+  });
+
+  test("revoke_pending after Delete settles at the DB finalize boundary", async () => {
+    const events: string[] = [];
+    const pending = account({
+      credentialUri: providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7c"),
+      secretState: "revoke_pending",
+      secretOperationId: "revoke-operation",
+    });
+    const settled = await settleProviderAccountSecretCleanup({
+      account: pending,
+      markRevokePending: async () => {
+        events.push("unexpected-mark");
+        return null;
+      },
+      revokeCredential: async (_uri, row) => {
+        events.push(`delete:${row.secretState}`);
+        // The prior process may have deleted the item; absence is success.
+        return true;
+      },
+      finalize: async (row) => {
+        events.push(`finalize:${row.secretState}`);
+        return { ...row, credentialUri: "", secretState: "none" };
+      },
+    });
+
+    expect(events).toEqual(["delete:revoke_pending", "finalize:revoke_pending"]);
+    expect(settled).toMatchObject({ credentialUri: "", secretState: "none" });
   });
 });
 

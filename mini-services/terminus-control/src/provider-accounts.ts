@@ -299,6 +299,62 @@ export function providerAccountSecretUri(accountId: string): string {
   return `secret://provider-account/${accountId}`;
 }
 
+const LEGACY_PROVIDER_ACCOUNT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * URI used by the pre-saga importer, whose destination was the account id.
+ * This is a one-release migration boundary: current imports use a fresh
+ * UUIDv7 URI recorded before Store. Recovery may probe only this exact URI
+ * when the row has no recorded credential; it never enumerates a keyring.
+ */
+export function legacyProviderAccountSecretUri(accountId: string): string | null {
+  return LEGACY_PROVIDER_ACCOUNT_ID.test(accountId) ? providerAccountSecretUri(accountId) : null;
+}
+
+export async function recoverLegacyProviderAccountCredential(input: {
+  readonly accountId: string;
+  readonly inspect: (credentialUri: string) => Promise<"present" | "missing" | "unavailable">;
+  readonly revoke: (credentialUri: string) => Promise<boolean>;
+}): Promise<boolean> {
+  const credentialUri = legacyProviderAccountSecretUri(input.accountId);
+  if (credentialUri === null) return true;
+  const presence = await input.inspect(credentialUri);
+  if (presence === "missing") return true;
+  if (presence === "unavailable") return false;
+  return input.revoke(credentialUri);
+}
+
+/**
+ * Finish a durable credential cleanup operation after a process restart.
+ * `markRevokePending` and `finalize` are CAS operations owned by the caller;
+ * keeping the effect between them makes both crash windows replayable.
+ */
+export async function settleProviderAccountSecretCleanup(input: {
+  readonly account: ProviderAccountRecord;
+  readonly markRevokePending: (
+    account: ProviderAccountRecord,
+  ) => Promise<ProviderAccountRecord | null>;
+  readonly revokeCredential: (
+    credentialUri: string,
+    account: ProviderAccountRecord,
+  ) => Promise<boolean>;
+  readonly finalize: (account: ProviderAccountRecord) => Promise<ProviderAccountRecord | null>;
+}): Promise<ProviderAccountRecord> {
+  let pending = input.account;
+  if (pending.secretState !== "revoke_pending") {
+    const claimed = await input.markRevokePending(pending);
+    if (claimed === null) return pending;
+    pending = claimed;
+  }
+  if (
+    pending.credentialUri !== ""
+    && !await input.revokeCredential(pending.credentialUri, pending)
+  ) {
+    return pending;
+  }
+  return await input.finalize(pending) ?? pending;
+}
+
 // ────────────────────────── models.dev decoding ──────────────────────────────
 
 export interface ModelsDevModelRecord {

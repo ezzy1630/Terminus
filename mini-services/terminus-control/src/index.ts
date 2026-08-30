@@ -127,6 +127,8 @@ import {
   providerAccountProviderId,
   providerAccountSecuritySnapshot,
   providerAccountSecretUri,
+  recoverLegacyProviderAccountCredential,
+  settleProviderAccountSecretCleanup,
   providerAccountWorkspaceAccess,
   providerAccountWire,
   resolveTurnProvider,
@@ -13830,6 +13832,42 @@ async function markProviderAccountImportForCleanup(
 
 const PROVIDER_ACCOUNT_SECRET_URI = /^secret:\/\/provider-account\/[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+async function inspectProviderCredential(
+  credentialUri: string,
+): Promise<"present" | "missing" | "unavailable"> {
+  const inspected = await requireKernelUds().secrets.Inspect({
+    context: await kernelMaintenanceContext(),
+    capabilityUri: credentialUri,
+  });
+  if (inspected.capabilityUri !== credentialUri) {
+    throw new Error("kernel returned secret inspection for a different capability");
+  }
+  switch (inspected.presence) {
+    case SecretPresenceProto.SECRET_PRESENCE_PRESENT:
+      return "present";
+    case SecretPresenceProto.SECRET_PRESENCE_MISSING:
+      return "missing";
+    case SecretPresenceProto.SECRET_PRESENCE_UNAVAILABLE:
+    case SecretPresenceProto.SECRET_PRESENCE_UNSPECIFIED:
+    case SecretPresenceProto.UNRECOGNIZED:
+      return "unavailable";
+  }
+}
+
+async function deleteProviderCredentialUri(
+  credentialUri: string,
+  operationId: string,
+): Promise<boolean> {
+  const deleted = await requireKernelUds().secrets.Delete({
+    context: {
+      ...await kernelMaintenanceContext(),
+      idempotencyKey: `provider-account-cleanup:${operationId}:${credentialUri}`,
+    },
+    capabilityUri: credentialUri,
+  });
+  return !deleted.stored && deleted.capabilityUri === credentialUri;
+}
+
 async function deleteOwnedProviderCredential(account: ProviderAccountRecord): Promise<boolean> {
   if (account.credentialUri === "") return true;
   // A legacy row may point at the original tool-owned store. Sever that stale
@@ -13837,14 +13875,7 @@ async function deleteOwnedProviderCredential(account: ProviderAccountRecord): Pr
   // import into its provider-account namespace.
   if (!PROVIDER_ACCOUNT_SECRET_URI.test(account.credentialUri)) return true;
   try {
-    const deleted = await requireKernelUds().secrets.Delete({
-      context: {
-        ...await kernelMaintenanceContext(),
-        idempotencyKey: `provider-account-cleanup:${account.secretOperationId}:${account.credentialUri}`,
-      },
-      capabilityUri: account.credentialUri,
-    });
-    return !deleted.stored && deleted.capabilityUri === account.credentialUri;
+    return await deleteProviderCredentialUri(account.credentialUri, account.secretOperationId);
   } catch (error: unknown) {
     console.warn(`[terminus-control] provider credential cleanup remains pending: ${String(error)}`);
     return false;
@@ -13854,42 +13885,42 @@ async function deleteOwnedProviderCredential(account: ProviderAccountRecord): Pr
 async function settleProviderAccountCleanup(
   initial: ProviderAccountRecord,
 ): Promise<ProviderAccountRecord> {
-  let pending = initial;
-  if (pending.secretState !== "revoke_pending") {
-    const claimed = await reconcileProviderAccountRecord(providerAccountUpsertFromRecord(pending, {
+  const codex = initial.source === "codex-chatgpt" || initial.renderProfile === "chatgpt_codex";
+  return settleProviderAccountSecretCleanup({
+    account: initial,
+    markRevokePending: async (pending) => reconcileProviderAccountRecord(providerAccountUpsertFromRecord(pending, {
       secretState: "revoke_pending",
       secretOperationId: pending.secretOperationId || uuidV7(),
       status: "error",
       statusDetail: "Credential cleanup is pending; routing is disabled.",
       metadataJson: canonicalMetadataForAccount(pending.source, pending.metadataJson),
-    }), providerAccountSecuritySnapshot(pending));
-    if (claimed === null) return pending;
-    pending = claimed;
-  }
-  if (!await deleteOwnedProviderCredential(pending)) return pending;
-  const codex = pending.source === "codex-chatgpt" || pending.renderProfile === "chatgpt_codex";
-  const cleared = await reconcileProviderAccountRecord(providerAccountUpsertFromRecord(pending, {
-    credentialUri: "",
-    credentialFingerprint: "",
-    approvedBaseUrl: "",
-    approvedCatalogDigest: "",
-    secretState: "none",
-    secretOperationId: "",
-    status: codex ? "unsupported" : "disconnected",
-    statusDetail: codex
-      ? "ChatGPT subscriptions require the separate Codex App Server lane."
-      : "Credential cleanup completed; connect again to approve the current credential and destination.",
-    metadataJson: canonicalMetadataForAccount(pending.source, pending.metadataJson),
-    ...(codex ? {
-      fingerprint: "",
-      baseUrl: "",
-      catalogDigest: "",
-      host: "",
-      connectorId: "",
-      renderProfile: "openai_responses",
-    } : {}),
-  }), providerAccountSecuritySnapshot(pending));
-  return cleared ?? pending;
+    }), providerAccountSecuritySnapshot(pending)),
+    revokeCredential: (credentialUri, pending) => deleteOwnedProviderCredential({
+      ...pending,
+      credentialUri,
+    }),
+    finalize: async (pending) => reconcileProviderAccountRecord(providerAccountUpsertFromRecord(pending, {
+      credentialUri: "",
+      credentialFingerprint: "",
+      approvedBaseUrl: "",
+      approvedCatalogDigest: "",
+      secretState: "none",
+      secretOperationId: "",
+      status: codex ? "unsupported" : "disconnected",
+      statusDetail: codex
+        ? "ChatGPT subscriptions require the separate Codex App Server lane."
+        : "Credential cleanup completed; connect again to approve the current credential and destination.",
+      metadataJson: canonicalMetadataForAccount(pending.source, pending.metadataJson),
+      ...(codex ? {
+        fingerprint: "",
+        baseUrl: "",
+        catalogDigest: "",
+        host: "",
+        connectorId: "",
+        renderProfile: "openai_responses",
+      } : {}),
+    }), providerAccountSecuritySnapshot(pending)),
+  });
 }
 
 /** Recover durable import/delete operations and scrub pre-hardening residue. */
@@ -13900,6 +13931,23 @@ async function recoverProviderAccountSecretState(): Promise<void> {
     const legacyCopiedCredential = row.secretState === "none"
       && row.credentialUri !== ""
       && (codex || row.source.startsWith("opencode:"));
+    const legacyOrphan = row.secretState === "none"
+      && row.credentialUri === ""
+      && (codex || row.source.startsWith("opencode:"));
+    if (legacyOrphan) {
+      try {
+        const recovered = await recoverLegacyProviderAccountCredential({
+          accountId: row.id,
+          inspect: inspectProviderCredential,
+          revoke: (credentialUri) => deleteProviderCredentialUri(credentialUri, row.id),
+        });
+        if (!recovered) {
+          console.warn(`[terminus-control] legacy provider credential cleanup remains pending for ${row.id}`);
+        }
+      } catch (error: unknown) {
+        console.warn(`[terminus-control] legacy provider credential cleanup remains pending for ${row.id}: ${String(error)}`);
+      }
+    }
     if (
       row.secretState === "import_pending"
       || row.secretState === "revoke_pending"
