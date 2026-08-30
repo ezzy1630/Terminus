@@ -1,8 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import {
   authorizesWorkspaceDevelopment,
+  configuredTokenMayAuthorize,
   WHOLE_WORKSPACE_SCOPE_GLOB,
 } from "./kernel-policy-profiles.js";
+
+describe("configured kernel token policy gate", () => {
+  test("allows only the curated default policy shortcut", () => {
+    expect(configuredTokenMayAuthorize(undefined)).toBe(true);
+    expect(configuredTokenMayAuthorize(["secure-local-default"])).toBe(true);
+    expect(configuredTokenMayAuthorize(["workspace-development"])).toBe(false);
+    expect(configuredTokenMayAuthorize(["secure-local-default", "workspace-development"])).toBe(false);
+  });
+});
 
 describe("workspace development capability scope", () => {
   test("requires explicit whole-workspace read and write authority", () => {

@@ -904,7 +904,11 @@ describe("shell-mode gating", () => {
           sandboxProfileId: string;
         }) => {
           started = true;
-          expect(request.intent.policyProfileId).toBe("workspace-development");
+          // Native standalone exec stays on the curated command policy. The
+          // signed broad-policy binding is reserved for a future isolated
+          // execution path and must never be an implicit development-mode
+          // promotion.
+          expect(request.intent.policyProfileId).toBe("secure-local-default");
           expect(request.sandboxProfileId).toBe("secure-local-default");
           return {
             subscribe: (observer: { complete: () => void }) => {
@@ -964,9 +968,10 @@ describe("R3 background exec and exec_poll", () => {
         },
       },
       jobs: {
-        Start: (request: { command: { program: string } }) => {
+        Start: (request: { command: { program: string }; intent: { policyProfileId: string } }) => {
           jobStarted = true;
           expect(request.command.program).toBe("sleep");
+          expect(request.intent.policyProfileId).toBe("secure-local-default");
           return { jobId: "job-123", processId: "proc-9", startedAt: undefined };
         },
       },

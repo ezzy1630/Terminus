@@ -34,7 +34,6 @@ import {
 } from "./kernel-request-context.js";
 import {
   SECURE_LOCAL_SANDBOX_PROFILE_ID,
-  WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID,
 } from "./kernel-policy-profiles.js";
 
 /**
@@ -2359,7 +2358,6 @@ export async function executeStandaloneTool(
             intent: toolIntent(
               input.contractHash,
               "execute_local",
-              WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID,
             ),
             command: {
               program: shell !== undefined ? "" : assertProgram(input.call.arguments.program),
@@ -2403,7 +2401,6 @@ export async function executeStandaloneTool(
           intent: toolIntent(
             input.contractHash,
             "execute_local",
-            WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID,
           ),
           command: {
             program: shell !== undefined ? "" : assertProgram(input.call.arguments.program),

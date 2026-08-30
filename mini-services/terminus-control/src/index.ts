@@ -57,6 +57,7 @@ import {
 import { createKernelUdsClients, type KernelUdsClients } from "./kernel-uds.js";
 import {
   authorizesWorkspaceDevelopment,
+  configuredTokenMayAuthorize,
   WHOLE_WORKSPACE_SCOPE_GLOB,
   WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID,
 } from "./kernel-policy-profiles.js";
@@ -1634,7 +1635,15 @@ async function kernelTaskContext(scope: KernelTaskCapabilityScope): Promise<Requ
   }
 
   let capabilityToken: string;
-  if (DEV_MODE && CONFIGURED_KERNEL_CAP_TOKEN.length > 0) {
+  // A configured development token is an explicit local bootstrap shortcut,
+  // not a signed authorization for a non-default policy. Force every
+  // non-default request through the broker so the token carries the policy
+  // binding (and fails closed when that policy is unavailable).
+  if (
+    DEV_MODE
+    && CONFIGURED_KERNEL_CAP_TOKEN.length > 0
+    && configuredTokenMayAuthorize(scope.policyProfileIds)
+  ) {
     capabilityToken = CONFIGURED_KERNEL_CAP_TOKEN;
   } else {
     await initializeKernelControlCapabilities();
@@ -15926,9 +15935,6 @@ async function settleStandaloneProviderTool(
       input.turnId,
       [operationClass],
       workspacePaths,
-      call.toolId === "exec"
-        ? [WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID]
-        : undefined,
     );
   } catch (error: unknown) {
     const explanation = error instanceof Error ? error.message : String(error);
