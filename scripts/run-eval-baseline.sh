@@ -22,14 +22,14 @@ bun run scripts/verify-release-source.ts
 commit="$(git rev-parse HEAD)"
 generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-echo "[eval-baseline] running fixture suite (deterministic scripted harness)"
+echo "[eval-baseline] running smoke suite (deterministic fixtures)"
 SMOKE_LOG="$(mktemp -t terminus-eval-smoke-log.XXXXXX)"
-just eval-fixture-smoke >"$SMOKE_LOG" 2>&1 || {
-  echo "[eval-baseline] FAIL: just eval-fixture-smoke failed; see $SMOKE_LOG" >&2
+just eval-smoke >"$SMOKE_LOG" 2>&1 || {
+  echo "[eval-baseline] FAIL: just eval-smoke failed; see $SMOKE_LOG" >&2
   exit 1
 }
 
-# NOTE: justfile's eval-fixture-smoke runs from python/, so its relative --output-dir
+# NOTE: justfile's eval-smoke runs from python/, so its relative --output-dir
 # resolves to python/evals/results/smoke (not forge_evals/evals/...).
 RESULTS_DIR="$ROOT/python/evals/results/smoke"
 [[ -d "$RESULTS_DIR" ]] || {

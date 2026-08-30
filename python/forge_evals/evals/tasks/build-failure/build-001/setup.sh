@@ -43,10 +43,3 @@ def test_main_returns_success_without_arguments() -> None:
 def test_main_returns_failure_for_fail_flag() -> None:
     assert main(["--fail"]) == 1
 PY
-cat > justfile <<'JUST'
-verify-import:
-    python3 -c 'import src.main'
-
-test:
-    python3 -c 'from src.main import main; assert main([]) == 0; assert main(["--fail"]) == 1'
-JUST

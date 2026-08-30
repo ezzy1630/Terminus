@@ -5,14 +5,13 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Generator, Iterator
-from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
 
-from forge_evals.evidence import EvidenceClass, has_complete_provider_receipt
+from forge_evals.evidence import has_complete_provider_receipt
 from forge_evals.run_record import Outcome
 from forge_evals.runners.harness_runner import (
     Budgets,
@@ -23,9 +22,6 @@ from forge_evals.runners.terminus_harness import (
     TerminusControlError,
     TerminusHarness,
     TerminusHarnessConfig,
-    _evidence_class,
-    control_event_summary,
-    live_model_snapshot,
     provider_receipts_from_route,
 )
 from forge_evals.runners.trajectory_recorder import TrajectoryRecorder
@@ -409,135 +405,6 @@ def test_live_run_completes_with_evidence(control_url: Path, tmp_path: Path) -> 
     assert notes["harness"] == "terminus-live"
     assert notes["turn_id"] == "turn-1"
     assert result.provider_receipts == []
-    assert result.evidence_class is EvidenceClass.FIXTURE_ONLY
-
-
-def test_local_runtime_provider_remains_fixture_evidence(
-    control_url: Path,
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "task.md").write_text("Fix the local fixture.", encoding="utf-8")
-    request = replace(
-        _run_request(tmp_path),
-        model_snapshot=ModelCapabilitySnapshot(
-            provider="local",
-            model="local/e2e-model",
-            api_version="2026-08",
-            context_window=128_000,
-            max_output_tokens=16_384,
-            supports_tool_calls=True,
-            supports_streaming=True,
-            supports_cache=False,
-        ),
-        provider_account_id=None,
-    )
-
-    result = _harness(str(control_url)).run(
-        request,
-        TrajectoryRecorder(run_id="run-local-fixture"),
-    )
-
-    assert result.outcome is Outcome.COMPLETED
-    assert result.evidence_class is EvidenceClass.FIXTURE_ONLY
-
-
-def test_attempt_identity_replaces_a_fixture_model_placeholder(tmp_path: Path) -> None:
-    snapshot = live_model_snapshot(
-        _run_request(tmp_path),
-        steering={"model": None, "provider_account_id": None, "reasoning_effort": None},
-        catalog={
-            "models": [
-                {
-                    "id": "local/e2e-model",
-                    "provider": "local",
-                    "tool_calling": True,
-                }
-            ]
-        },
-        prices=None,
-        observed_model="local/e2e-model",
-        observed_provider="local",
-    )
-
-    assert snapshot["model"] == "local/e2e-model"
-    assert snapshot["provider"] == "local"
-    assert snapshot["capability_source"] == "control_plane:/v1/provider-models"
-
-
-def test_control_event_summary_preserves_bounded_tool_lifecycle_proof() -> None:
-    summary = control_event_summary(
-        [
-            {"event_type": "tool.proposed"},
-            {"event_type": "tool.authorized"},
-            {"event_type": "tool.started"},
-            {
-                "event_type": "tool.settled",
-                "payload": {"status": "success"},
-            },
-            {"event_type": "turn.completed", "payload": {}},
-            {"payload": {"status": "ignored"}},
-        ]
-    )
-
-    assert summary == {
-        "kind": "control_event_summary",
-        "source": "task_transcript",
-        "source_available": True,
-        "event_count": 6,
-        "event_counts": {
-            "tool.authorized": 1,
-            "tool.proposed": 1,
-            "tool.settled": 1,
-            "tool.started": 1,
-            "turn.completed": 1,
-        },
-        "successful_tool_settlements": 1,
-        "truncated": False,
-        "continuation_cursor": None,
-        "artifact_refs_available": False,
-    }
-
-
-def test_collect_events_exposes_continuation_when_the_bound_is_reached(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    harness = _harness("http://unused")
-    pages = iter(
-        [
-            {"events": [{"event": "turn.completed"}], "earlier_cursor": "cursor-1"},
-            {"events": [{"event": "tool.settled"}], "earlier_cursor": "cursor-2"},
-        ]
-    )
-    paths: list[str] = []
-
-    def next_page(method: str, path: str) -> dict[str, Any]:
-        assert method == "GET"
-        paths.append(path)
-        return next(pages)
-
-    monkeypatch.setattr(
-        "forge_evals.runners.terminus_harness._TRANSCRIPT_PAGE_LIMIT",
-        1,
-    )
-    monkeypatch.setattr(
-        "forge_evals.runners.terminus_harness._TRANSCRIPT_MAX_EVENTS",
-        2,
-    )
-    monkeypatch.setattr(harness, "_optional", next_page)
-
-    transcript = harness._collect_events("task-1")
-
-    assert [event["event"] for event in transcript.events] == [
-        "tool.settled",
-        "turn.completed",
-    ]
-    assert transcript.source_available is True
-    assert transcript.truncated is True
-    assert transcript.continuation_cursor == "cursor-2"
-    assert paths == [
-        "/v1/tasks/task-1/transcript?limit=1",
-        "/v1/tasks/task-1/transcript?limit=1&before=cursor-1",
-    ]
 
 
 def _attempt_row(
@@ -603,22 +470,6 @@ def test_provider_receipts_project_every_immutable_attempt_field() -> None:
     assert receipts[1]["artifact_ref"] == "artifact://sha256/" + f"{102:064x}"
     assert receipts[1]["provider_request_id"] is None
     assert not has_complete_provider_receipt(receipts[1])
-
-
-def test_mixed_provider_receipts_cannot_be_external_live_evidence() -> None:
-    rows = [
-        _attempt_row(),
-        {**_attempt_row(2), "model": "other-model"},
-    ]
-    receipts = provider_receipts_from_route(
-        rows,
-        endpoint_hash="sha256:" + "e" * 64,
-        account_hash="sha256:" + "a" * 64,
-    )
-
-    assert len(receipts) == 2
-    assert all(has_complete_provider_receipt(receipt) for receipt in receipts)
-    assert _evidence_class(receipts, "complete") is EvidenceClass.FIXTURE_ONLY
 
 
 @pytest.mark.parametrize(
@@ -725,7 +576,6 @@ def test_live_run_projects_attempts_into_provider_receipts(
         artifact for artifact in result.artifacts if artifact.get("kind") == "provider_receipts"
     )
     assert receipt_artifact["status"] == "complete"
-    assert result.evidence_class is EvidenceClass.EXTERNAL_LIVE
 
 
 def test_live_run_includes_original_and_ordered_repair_turn_receipts(

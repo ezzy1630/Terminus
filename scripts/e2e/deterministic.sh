@@ -4,14 +4,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SCENARIO="${TERMINUS_E2E_SCENARIO:-lifecycle}"
-case "$SCENARIO" in
-  lifecycle|runtime-eval-smoke) ;;
-  *)
-    echo "[e2e] unsupported scenario: $SCENARIO" >&2
-    exit 2
-    ;;
-esac
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/terminus-e2e.XXXXXX")"
 KERNEL_PID=""
 CONTROL_PID=""
@@ -106,48 +98,17 @@ if (( terminus_large_fixture_bytes <= 3 * 1024 * 1024 )); then
 fi
 export TERMINUS_E2E_PROVIDER_RESPONSE_TEXT="Terminus provider fixture received local/e2e-model through kernel job input."
 provider_runtime="$(command -v bun)"
-provider_args_json="$TERMINUS_E2E_WORKSPACE_ROOT/terminus-provider-fixture.ts"
-if [[ "$SCENARIO" == "runtime-eval-smoke" ]]; then
-  provider_bundle="$TMP_DIR/terminus-provider-fixture.cjs"
-  bun build "$ROOT/scripts/e2e/provider-stdio-fixture.ts" \
-    --target=bun \
-    --format=cjs \
-    --minify \
-    --outfile "$provider_bundle" >/dev/null
-  provider_args_json="$(
-    python3 -c '
-import base64
-import pathlib
-import sys
-
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-if source.startswith("#!"):
-    source = source.split("\n", 1)[1]
-encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
-print(
-    "const f=eval(Buffer.from(\""
-    + encoded
-    + "\",\"base64\").toString(\"utf8\"));"
-      "f({},require,{exports:{}},\"fixture.js\",\".\")"
-)
-' "$provider_bundle"
-  )"
-  if (( ${#provider_args_json} > 16384 )); then
-    echo "[eval-runtime-smoke] provider fixture exceeded the command argument limit" >&2
-    exit 1
-  fi
-fi
 export TERMINUS_LOCAL_PROVIDER_COMMAND_JSON="$(
   python3 -c '
 import json, sys
 print(json.dumps({
     "program": sys.argv[1],
-    "args": ["-e", sys.argv[2]] if sys.argv[3] == "runtime-eval-smoke" else [sys.argv[2]],
+    "args": [sys.argv[2]],
     "model": "local/e2e-model",
     "timeout_seconds": 10,
     "tools_enabled": True,
 }, separators=(",", ":")))
-' "$provider_runtime" "$provider_args_json" "$SCENARIO"
+' "$provider_runtime" "$TERMINUS_E2E_WORKSPACE_ROOT/terminus-provider-fixture.ts"
 )"
 # The kernel's isolated data root is the execution workspace used by this
 # harness. Give it a real immutable VCS baseline so verification can bind its
@@ -280,33 +241,6 @@ start_control() {
 }
 
 start_control
-
-if [[ "$SCENARIO" == "runtime-eval-smoke" ]]; then
-  echo "[eval-runtime-smoke] running build-001 through provider -> control -> kernel"
-  eval_results="$TMP_DIR/runtime-eval-results"
-  eval_workspace="$TMP_DIR/runtime-eval-workspace"
-  harness_commit="$(git -C "$ROOT" rev-parse HEAD)"
-  (
-    cd "$ROOT/python"
-    TERMINUS_CONTROL_URL="http://127.0.0.1:$CONTROL_PORT" \
-    TERMINUS_CONTROL_TOKEN="$TERMINUS_CONTROL_TOKEN" \
-      uv run terminus-eval run \
-        --suite terminus-internal \
-        --task build-failure/build-001 \
-        --task-dir "$ROOT/python/forge_evals/evals/tasks/build-failure/build-001" \
-        --harness terminus-live \
-        --harness-commit "$harness_commit" \
-        --provider local \
-        --max-steps 6 \
-        --seeds 1 \
-        --workspace "$eval_workspace" \
-        --output-dir "$eval_results" \
-        --format json
-  )
-  bun run "$ROOT/scripts/e2e/assert-runtime-eval-smoke.ts" "$eval_results"
-  echo "[eval-runtime-smoke] PASS"
-  exit 0
-fi
 
 echo "[e2e] proving the durable control-writer fence"
 second_control_log="$TMP_DIR/control-fenced.log"

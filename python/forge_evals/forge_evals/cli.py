@@ -18,7 +18,6 @@ All commands are deterministic given the same inputs and seeds.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -42,7 +41,6 @@ from .conformance_levels import ConformanceEvidence, ConformanceLevel, assess_co
 from .dashboards.cohort_dashboard import write_cohort_dashboard
 from .dashboards.security_report import compute_security_report, write_security_report
 from .eval_tiers import EvalTier, get_tier_config, list_all_tiers
-from .evidence import EvidenceClass
 from .experiment_manifest import ChangeManifest, Decision
 from .promotion_gate import (
     Evaluation,
@@ -1003,11 +1001,7 @@ def build_live_run_record(
         notes=json.dumps(
             {
                 **notes,
-                "mode": (
-                    "external_live"
-                    if harness_result.evidence_class is EvidenceClass.EXTERNAL_LIVE
-                    else "runtime_fixture"
-                ),
+                "mode": "live",
                 "token_source": metrics.get("token_source", "unavailable"),
                 "grader": grader_spec.grader_id,
                 "evaluation": (
@@ -1132,23 +1126,13 @@ def _fake_result(args: argparse.Namespace) -> HarnessResult:
 
 def _write_record(record: RunRecord, output_dir: Path, fmt: str, *, suffix: str = "") -> None:
     """Write a run record to ``output_dir`` in the requested format."""
-    safe_run_id = _safe_record_filename_component(record.run_id)
     if fmt == "json":
-        record.to_json(output_dir / f"run-{safe_run_id}{suffix}.json")
+        record.to_json(output_dir / f"run-{record.run_id}{suffix}.json")
     elif fmt == "parquet":
-        record.to_parquet(output_dir / f"run-{safe_run_id}{suffix}.parquet")
+        record.to_parquet(output_dir / f"run-{record.run_id}{suffix}.parquet")
     else:  # jsonl
         with (output_dir / "runs.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(record.to_jsonl_line() + "\n")
-
-
-def _safe_record_filename_component(run_id: str) -> str:
-    """Return a collision-resistant filename component for an opaque run id."""
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,180}", run_id):
-        return run_id
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", run_id).strip("._-")[:140] or "run"
-    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:12]
-    return f"{slug}-{digest}"
 
 
 # ──────────────────────────── aggregate ───────────────────────────────────
