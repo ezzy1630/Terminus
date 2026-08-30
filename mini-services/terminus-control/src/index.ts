@@ -8308,12 +8308,10 @@ const routes: Route[] = [
     try {
       await lane.open();
       const current = lane.status();
-      const durable = await persistCodexLaneState(session, {
-        thread_id: persisted?.thread_id ?? null,
-        job_id: current.job_id,
-        state: current.state,
-      });
-      sendJson(res, 200, codexStatusWire(current, durable));
+      // GET is observational. Job/thread state is persisted only by the
+      // idempotent thread/turn/stop mutations, so a status read cannot race a
+      // session metadata update and overwrite unrelated session fields.
+      sendJson(res, 200, codexStatusWire(current, persisted));
     } catch (error: unknown) {
       sendJson(res, 200, codexStatusWire({
         ...lane.status(),
