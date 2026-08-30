@@ -329,10 +329,27 @@ fn push_rule_exact(sb: &mut String, verb: &str, operations: &str, path: &str) {
     ));
 }
 
-/// Depth of a path in components; used to order allowances least-specific
-/// first so a nested rule is the LAST match.
+/// Depth of a Seatbelt path in POSIX components; used to order allowances
+/// least-specific first so a nested rule is the LAST match. This must not use
+/// the build host's path parser because the generated policy always targets
+/// macOS, including when its unit tests compile on Windows.
 fn path_depth(path: &str) -> usize {
-    Path::new(path).components().count()
+    path.split('/')
+        .filter(|component| !component.is_empty())
+        .count()
+}
+
+fn seatbelt_path_is_within(path: &Path, parent: &Path) -> bool {
+    let path = path.to_string_lossy();
+    let parent = parent.to_string_lossy();
+    let parent = parent.trim_end_matches('/');
+    if parent.is_empty() {
+        return path.starts_with('/');
+    }
+    path == parent
+        || path
+            .strip_prefix(parent)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// The invoking user's home directory, or `None` when `HOME` is unset.
@@ -431,14 +448,19 @@ fn darwin_user_cache_dir() -> Option<&'static Path> {
     .as_deref()
 }
 
-/// Translate a profile filesystem rule path into a host path.
+/// Translate a profile filesystem rule path into a macOS Seatbelt path.
 fn map_rule_path(rule_path: &str, workspace_root: Option<&Path>) -> Option<String> {
     if let Some(rest) = rule_path.strip_prefix("workspace://") {
         let root = workspace_root?;
         if rest.is_empty() {
             Some(root.display().to_string())
         } else {
-            Some(root.join(rest).display().to_string())
+            let root = root.to_string_lossy();
+            Some(format!(
+                "{}/{}",
+                root.trim_end_matches('/'),
+                rest.trim_start_matches('/')
+            ))
         }
     } else if rule_path.starts_with('/') {
         Some(rule_path.to_string())
@@ -456,6 +478,14 @@ fn map_rule_path(rule_path: &str, workspace_root: Option<&Path>) -> Option<Strin
 pub fn generate_seatbelt_profile(
     profile: &SandboxProfile,
     workspace_root: Option<&Path>,
+) -> Result<String, SandboxError> {
+    generate_seatbelt_profile_with_temp_dir(profile, workspace_root, darwin_user_temp_dir())
+}
+
+fn generate_seatbelt_profile_with_temp_dir(
+    profile: &SandboxProfile,
+    workspace_root: Option<&Path>,
+    user_temp_dir: Option<&Path>,
 ) -> Result<String, SandboxError> {
     // Security refusal first: ambient authority never generates a profile.
     if matches!(
@@ -563,7 +593,7 @@ pub fn generate_seatbelt_profile(
             &cache.display().to_string(),
         );
     }
-    if let Some(temp) = darwin_user_temp_dir() {
+    if let Some(temp) = user_temp_dir {
         // The darwin per-user temp directory, i.e. what
         // `confstr(_CS_DARWIN_USER_TEMP_DIR)` returns. Two things need it:
         // `xcrun` caches its tool lookup here by absolute confstr path and
@@ -588,7 +618,7 @@ pub fn generate_seatbelt_profile(
         // unresolvable path as "outside" would be fail-open.
         let workspace_is_inside_temp = workspace_root.is_some_and(|root| {
             let resolved = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-            resolved.starts_with(temp) || root.starts_with(temp)
+            seatbelt_path_is_within(&resolved, temp) || seatbelt_path_is_within(root, temp)
         });
         if workspace_is_inside_temp {
             sb.push_str(&format!(
@@ -1143,29 +1173,40 @@ mod phase4_tests {
 
     #[test]
     fn a_workspace_inside_the_darwin_temp_dir_forfeits_the_blanket_temp_grant() {
-        let temp = match darwin_user_temp_dir() {
-            Some(temp) => temp,
-            None => return,
-        };
+        let temp = Path::new("/private/var/folders/zz/terminus/T");
         let blanket = format!(
             "(allow file-read* file-write* (subpath \"{}\"))",
             temp.display()
         );
         // Ordinary workspace: the grant is present, so bare `mktemp` works.
-        let outside = generate_seatbelt_profile(
+        let outside = generate_seatbelt_profile_with_temp_dir(
             &SandboxProfile::default_restrictive(),
             Some(Path::new("/private/tmp/ws-root")),
+            Some(temp),
         )
         .unwrap();
         assert!(
             outside.contains(&blanket),
             "an ordinary workspace should get the temp-dir grant"
         );
+        let sibling = generate_seatbelt_profile_with_temp_dir(
+            &SandboxProfile::default_restrictive(),
+            Some(Path::new(
+                "/private/var/folders/zz/terminus/T-sibling/ws-root",
+            )),
+            Some(temp),
+        )
+        .unwrap();
+        assert!(
+            sibling.contains(&blanket),
+            "a path with the temp-dir prefix is not inside the temp dir"
+        );
         // Workspace under the temp dir: the grant would make the workspace's
         // own parent writable, so it is withheld and only `xcrun_db` remains.
-        let inside = generate_seatbelt_profile(
+        let inside = generate_seatbelt_profile_with_temp_dir(
             &SandboxProfile::default_restrictive(),
-            Some(&temp.join("ws-root")),
+            Some(Path::new("/private/var/folders/zz/terminus/T/ws-root")),
+            Some(temp),
         )
         .unwrap();
         assert!(
