@@ -345,6 +345,37 @@ def _add_compare_cmd(sub: argparse._SubParsersAction[Any]) -> None:
         metavar="HARNESS=ACCOUNT_ID",
     )
     p.add_argument(
+        "--harness-provider-endpoint",
+        action="append",
+        default=[],
+        metavar="HARNESS=ENDPOINT",
+        help="Provider endpoint identity for each harness; raw values are hashed in evidence.",
+    )
+    p.add_argument(
+        "--harness-artifact",
+        action="append",
+        default=[],
+        metavar="HARNESS=PATH",
+        help="Exact executable or runtime artifact used by each strict campaign harness.",
+    )
+    p.add_argument(
+        "--harness-artifact-digest",
+        action="append",
+        default=[],
+        metavar="HARNESS=SHA256",
+        help="Expected sha256 digest for each strict campaign harness artifact.",
+    )
+    p.add_argument(
+        "--isolation-attestation",
+        default=None,
+        help="Externally produced isolation attestation JSON required by --strict-evidence.",
+    )
+    p.add_argument(
+        "--strict-evidence",
+        action="store_true",
+        help="Require executable digests, provider bindings, and an external isolation attestation.",
+    )
+    p.add_argument(
         "--provider-alias",
         action="append",
         default=[],
@@ -397,6 +428,39 @@ def _campaign_hash(value: object) -> str:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _isolation_attestation(path_value: str | None) -> tuple[bool, str | None]:
+    """Validate the immutable assertion supplied by an external sandbox runner."""
+    if path_value is None:
+        return False, None
+    path = Path(path_value).expanduser().resolve()
+    raw = path.read_bytes()
+    decoded: Any = json.loads(raw)
+    if not isinstance(decoded, dict):
+        raise ValueError("isolation attestation must be a JSON object")
+    if decoded.get("schema") != "terminus.external-isolation-attestation.v1":
+        raise ValueError("isolation attestation has an unsupported schema")
+    verifier = decoded.get("verifier")
+    if not isinstance(verifier, str) or not verifier.strip() or verifier in {"self", "terminus-eval"}:
+        raise ValueError("isolation attestation requires an external verifier identity")
+    if decoded.get("verified") is not True:
+        raise ValueError("isolation attestation is not verified")
+    if decoded.get("isolation_kind") not in {"container", "microvm", "remote_executor"}:
+        raise ValueError("isolation attestation has no admitted isolation kind")
+    for field in ("runner_digest", "policy_hash"):
+        value = decoded.get(field)
+        if not isinstance(value, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+            raise ValueError(f"isolation attestation {field} is not an exact digest")
+    signature_ref = decoded.get("signature_artifact_ref")
+    if (
+        not isinstance(signature_ref, str)
+        or re.fullmatch(r"artifact://sha256/[0-9a-f]{64}", signature_ref) is None
+    ):
+        raise ValueError("isolation attestation has no signature artifact reference")
+    import hashlib
+
+    return True, "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
 def _cmd_compare(args: argparse.Namespace) -> int:
     from .runners import (
         CrossHarnessPlan,
@@ -423,6 +487,36 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     unknown_accounts = set(accounts) - set(harness_ids)
     if unknown_accounts:
         raise ValueError(f"provider accounts name unknown harnesses: {sorted(unknown_accounts)}")
+    endpoints = _parse_assignments(args.harness_provider_endpoint, name="harness provider endpoint")
+    artifacts = _parse_assignments(args.harness_artifact, name="harness artifact")
+    artifact_digests = _parse_assignments(
+        args.harness_artifact_digest,
+        name="harness artifact digest",
+    )
+    for label, values in (
+        ("provider endpoints", endpoints),
+        ("artifacts", artifacts),
+        ("artifact digests", artifact_digests),
+    ):
+        unknown = set(values) - set(harness_ids)
+        if unknown:
+            raise ValueError(f"{label} name unknown harnesses: {sorted(unknown)}")
+    isolation_verified, isolation_attestation_hash = _isolation_attestation(
+        args.isolation_attestation
+    )
+    if args.strict_evidence:
+        for label, values in (
+            ("provider accounts", accounts),
+            ("provider endpoints", endpoints),
+            ("artifacts", artifacts),
+            ("artifact digests", artifact_digests),
+        ):
+            if set(values) != set(harness_ids):
+                raise ValueError(f"strict evidence requires {label} for every harness")
+        if not isolation_verified:
+            raise ValueError("strict evidence requires --isolation-attestation")
+    elif args.isolation_attestation is not None:
+        raise ValueError("--isolation-attestation requires --strict-evidence")
     aliases = _parse_aliases(args.provider_alias)
     unknown_aliases = set(aliases) - set(harness_ids)
     if unknown_aliases:
@@ -458,7 +552,14 @@ def _cmd_compare(args: argparse.Namespace) -> int:
             provider_aliases=aliases.get(harness_id, frozenset()),
             pin_verified=True,
             provider_account_id=accounts.get(harness_id),
+            provider_endpoint=endpoints.get(harness_id),
             reasoning_effort=args.effort,
+            artifact_path=(
+                Path(artifacts[harness_id]).expanduser().resolve()
+                if harness_id in artifacts
+                else None
+            ),
+            artifact_digest=artifact_digests.get(harness_id),
         )
         for harness_id in harness_ids
     ]
@@ -497,10 +598,12 @@ def _cmd_compare(args: argparse.Namespace) -> int:
             }
         ],
         output_dir=output_dir,
-        require_exact_pins=True,
+        require_exact_pins=args.strict_evidence,
         tool_schema_hash=_campaign_hash(
             {"semantic_capabilities": ["read", "write", "edit", "execute"]}
         ),
+        isolation_verified=isolation_verified,
+        isolation_attestation_hash=isolation_attestation_hash,
     )
     result = CrossHarnessRunner().run(plan)
     reports: list[dict[str, Any]] = []
@@ -528,6 +631,8 @@ def _cmd_compare(args: argparse.Namespace) -> int:
         "tasks": [args.task],
         "seeds": seeds,
         "record_count": len(result.records),
+        "evidence_mode": "strict" if args.strict_evidence else "local_diagnostic",
+        "isolation_attestation_hash": isolation_attestation_hash,
         "eligible": all(bool(item["eligible"]) for item in reports),
         "superiority_demonstrated": all(
             bool(item["eligible"]) and bool(item["significance_passed"]) for item in reports

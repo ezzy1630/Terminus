@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
+from forge_evals.cli import _isolation_attestation
 from forge_evals.evidence import EvidenceClass, has_complete_provider_receipt
 from forge_evals.identity import EvaluationIdentity
 from forge_evals.run_record import Outcome, RunRecord
@@ -190,6 +192,50 @@ def test_release_campaign_rejects_unverified_or_inexact_harness_pins(tmp_path: P
 
     with pytest.raises(ValueError, match="verified exact pin"):
         CrossHarnessRunner().run(strict)
+
+
+def test_external_isolation_attestation_is_schema_bound_and_immutable(tmp_path: Path) -> None:
+    attestation = tmp_path / "isolation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "schema": "terminus.external-isolation-attestation.v1",
+                "verifier": "container-runner.example",
+                "verified": True,
+                "isolation_kind": "container",
+                "runner_digest": "sha256:" + "a" * 64,
+                "policy_hash": "sha256:" + "b" * 64,
+                "signature_artifact_ref": "artifact://sha256/" + "c" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    verified, digest = _isolation_attestation(str(attestation))
+
+    assert verified
+    assert isinstance(digest, str) and digest.startswith("sha256:")
+
+
+def test_isolation_attestation_rejects_self_assertion(tmp_path: Path) -> None:
+    attestation = tmp_path / "isolation.json"
+    attestation.write_text(
+        json.dumps(
+            {
+                "schema": "terminus.external-isolation-attestation.v1",
+                "verifier": "self",
+                "verified": True,
+                "isolation_kind": "container",
+                "runner_digest": "sha256:" + "a" * 64,
+                "policy_hash": "sha256:" + "b" * 64,
+                "signature_artifact_ref": "artifact://sha256/" + "c" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="external verifier"):
+        _isolation_attestation(str(attestation))
 
 
 def test_legacy_identity_decodes_as_incomplete_and_routing_is_hashed() -> None:

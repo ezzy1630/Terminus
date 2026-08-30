@@ -104,6 +104,7 @@ class CrossHarnessPlan:
     # A parent-directory move is not a sandbox.  Strict/release campaigns
     # remain blocked until an external verifier supplies this attestation.
     isolation_verified: bool = False
+    isolation_attestation_hash: str | None = None
 
     @property
     def total_runs(self) -> int:
@@ -403,6 +404,7 @@ def _campaign_manifest(
         "rng_seed": plan.rng_seed,
         "require_exact_pins": plan.require_exact_pins,
         "isolation_verified": plan.isolation_verified,
+        "isolation_attestation_hash": plan.isolation_attestation_hash,
         "tool_schema_hash": plan.tool_schema_hash,
         "experiment_assignments": list(plan.experiment_assignments),
         "tasks": [
@@ -571,6 +573,11 @@ def _validate_plan(plan: CrossHarnessPlan) -> None:
                 "strict campaign requires verified external sandbox isolation; "
                 "path separation is insufficient"
             )
+        if (
+            plan.isolation_attestation_hash is None
+            or _EXACT_DIGEST.fullmatch(plan.isolation_attestation_hash) is None
+        ):
+            raise ValueError("strict campaign has no immutable isolation attestation")
 
 
 def _factory_artifact_path(factory: Harness) -> Path | None:
