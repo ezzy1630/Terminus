@@ -78,12 +78,13 @@ describe("Inspector relevance", () => {
       />,
     );
 
+    await userEvent.setup().click(screen.getByRole("tab", { name: "Run" }));
     for (const name of [/Subagents, 1 working/, "Verification, 1/1"]) {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
     }
-    for (const name of ["Environment", "Activity", "Approvals"]) {
-      expect(screen.getByRole("heading", { name })).toBeInTheDocument();
-    }
+    for (const name of ["Activity", "Approvals"]) expect(screen.getByRole("heading", { name })).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("tab", { name: "Context" }));
+    expect(screen.getByRole("heading", { name: "Environment" })).toBeInTheDocument();
     // The Changes row carries the +/- counts parsed off the proposed patch and
     // is the panel's only route into the review surface.
     const changes = screen.getByRole("button", { name: "Open patch review" });

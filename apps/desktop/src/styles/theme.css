@@ -204,7 +204,10 @@
   --semantic-info: #79a6f6;
   --semantic-addition: var(--semantic-success);
   --semantic-deletion: var(--semantic-error);
-  --action-primary: var(--accent);
+  /* Filled actions use a darker blue so white labels clear AA on macOS
+     light and dark surfaces. The brighter system accent remains available
+     for focus rings, links, and lightweight status marks. */
+  --action-primary: #0066CC;
   --color-success: var(--semantic-success);
   --color-error: var(--semantic-error);
   --color-warning: var(--semantic-warning);
@@ -285,7 +288,7 @@
     --semantic-error: #c93e38;
     --semantic-warning: #8a6200;
     --semantic-info: #2868b2;
-    --action-primary: var(--accent);
+    --action-primary: #0066CC;
     --focus-color: var(--accent);
   --composer-focus-border: color-mix(in srgb, var(--text-tertiary) 40%, var(--border-strong));
     --elevation-sm: 0 1px 2px rgb(35 35 30 / 7%);
@@ -335,7 +338,7 @@
   --semantic-error: #c93e38;
   --semantic-warning: #8a6200;
   --semantic-info: #2868b2;
-  --action-primary: var(--accent);
+  --action-primary: #0066CC;
   --focus-color: var(--accent);
   --composer-focus-border: color-mix(in srgb, var(--text-tertiary) 40%, var(--border-strong));
   --elevation-sm: 0 1px 2px rgb(35 35 30 / 7%);

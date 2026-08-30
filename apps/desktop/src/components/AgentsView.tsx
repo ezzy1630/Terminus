@@ -216,7 +216,7 @@ export function AgentsView(): JSX.Element {
   return (
     <section className="flex h-full min-w-0 flex-col overflow-hidden bg-canvas text-primary" aria-labelledby="agents-title">
       <header className="ui-view-header">
-        <h1 id="agents-title" className="ui-page-title">Agents</h1>
+        <h1 id="agents-title" className="ui-page-title">Agent directory</h1>
         <label className="relative ml-auto w-44">
           <Search size={13} aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-tertiary" />
           <span className="sr-only">Search agents</span>

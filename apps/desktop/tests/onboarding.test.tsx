@@ -34,6 +34,10 @@ const task: Task = {
 describe("Onboarding production flow", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    window.__terminusModelInventory = {
+      providers: [{ id: "mock", label: "Mock provider" }],
+      models: [{ id: "mock-model", provider: "mock", slug: "mock-model", label: "Mock model" }],
+    };
     useTerminusStore.setState({
       sessions: [],
       tasksBySession: {},
@@ -73,6 +77,7 @@ describe("Onboarding production flow", () => {
 
   afterEach(() => {
     cleanup();
+    delete window.__terminusModelInventory;
     vi.restoreAllMocks();
     useTerminusStore.getState()._attachStream(null);
   });
@@ -81,7 +86,7 @@ describe("Onboarding production flow", () => {
     render(<Onboarding onComplete={vi.fn()} pickDirectory={async () => null} />);
 
     expect(screen.getByRole("dialog", { name: "Open your first project" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Not now" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Skip setup" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Skip onboarding" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open project" })).toBeInTheDocument();
   });
@@ -165,6 +170,7 @@ describe("Onboarding production flow", () => {
       thread_id: task.thread_id,
       task_id: task.id,
       user_input: "Audit the desktop UI.",
+      model: "mock-model",
     }, { idempotencyKey: expect.stringMatching(/^onboarding:/) });
     expect(vi.mocked(api.startTask).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(api.startTurn).mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,

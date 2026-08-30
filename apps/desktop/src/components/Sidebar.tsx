@@ -53,6 +53,7 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   Bell,
   ChevronDown,
   ChevronRight,
@@ -64,6 +65,7 @@ import {
   Settings,
   SquarePen,
   Terminal,
+  UsersRound,
 } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/cn";
@@ -352,7 +354,7 @@ function SidebarImpl({
               className="flex h-7 min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 text-left hover:bg-hover"
             >
               <span className="ui-page-title min-w-0 truncate text-primary">
-                Terminus
+                {sessions.find((session) => session.id === selectedSessionId)?.title ?? "Terminus"}
               </span>
               <ChevronDown size={12} strokeWidth={2} className="shrink-0 text-tertiary" aria-hidden />
             </Button>
@@ -397,6 +399,20 @@ function SidebarImpl({
           active={activeDestination === "board"}
           onClick={() => onNavigateRef.current?.("board")}
           tooltip="Board — every task, by stage"
+        />
+        <NavRow
+          icon={<Activity size={14} strokeWidth={1.7} aria-hidden />}
+          label="Activity"
+          active={activityVisible}
+          onClick={() => setActivityVisible(true)}
+          tooltip="Activity — recent and attention-needed work"
+        />
+        <NavRow
+          icon={<UsersRound size={14} strokeWidth={1.7} aria-hidden />}
+          label="Agents"
+          active={activeDestination === "agents"}
+          onClick={() => onNavigateRef.current?.("agents")}
+          tooltip="Agent directory"
         />
       </nav>
 
@@ -721,7 +737,9 @@ function SidebarImpl({
         >
           <Terminal size={12} strokeWidth={1.8} />
         </span>
-        <span className="ui-body min-w-0 flex-1 truncate text-secondary">Terminus</span>
+        <span className="ui-body min-w-0 flex-1 truncate text-secondary">
+          {sessions.find((session) => session.id === selectedSessionId)?.title ?? "Terminus"}
+        </span>
         <IconButton
           label="Settings"
           icon={<Settings size={14} strokeWidth={1.7} aria-hidden />}
@@ -730,9 +748,9 @@ function SidebarImpl({
           data-tooltip="Settings  ⌘,"
           className="h-6 w-6 shrink-0 rounded-md text-tertiary hover:bg-hover hover:text-primary"
         />
-        {/* One 6px dot instead of a word. It is a button in every state
-            because a manual reconcile is useful whether or not the control
-            plane is currently answering. */}
+        {/* Keep health textual. A dot is easy to miss and cannot communicate
+            the difference between a service that is starting and one that is
+            offline. */}
         <Button
           variant="bare"
           type="button"
@@ -743,7 +761,7 @@ function SidebarImpl({
               ? "Retry connection"
               : "Terminus is starting. Refresh"}
           data-tooltip={healthReady ? "Ready" : healthStatus === "offline" ? "Offline — retry" : "Starting…"}
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md hover:bg-hover"
+          className="ui-meta flex h-6 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-secondary hover:bg-hover hover:text-primary"
         >
           <span
             className={cn(
@@ -752,6 +770,7 @@ function SidebarImpl({
             )}
             aria-hidden
           />
+          <span>{healthReady ? "Ready" : healthStatus === "offline" ? "Offline" : "Starting"}</span>
         </Button>
       </div>
     </div>

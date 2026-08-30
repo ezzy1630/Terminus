@@ -3,7 +3,7 @@
  *
  * Per SPEC §8: focused Codex-style start screen. When a project is
  * selected (or when "New Task" is clicked), show:
- *   - A contextual heading such as "What should we build in <project>?"
+ *   - A compact contextual heading such as "New task in <project>"
  *   - The main composer (focuses immediately)
  *   - Only actionable project context
  *   - No dashboard, no statistics, no wall of recent activity
@@ -139,23 +139,17 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
 
   return (
     <div className={cn("flex h-full w-full flex-col overflow-hidden bg-canvas", className)}>
-      {/* Center the prompt in the usable surface. The composer is independently
-          docked below, so starting a task never moves the input. */}
-      <main className="scrollable flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-8 py-10">
+      {/* Keep the start surface calm and immediately actionable. The composer
+          remains docked so it does not move when the first turn starts. */}
+      <main className="scrollable flex min-h-0 flex-1 flex-col overflow-y-auto px-8 py-10">
         <h1
           id="new-task-heading"
-          /* Named explicitly because the project name inside it is a menu
-             trigger, and Radix labels that trigger "Switch project" — an
-             accessible name on a descendant *replaces* its text when the
-             heading's name is computed from contents, so the heading would
-             otherwise announce as "What should we build in Switch project?".
-             The label is character-for-character the visible sentence. */
-          {...(projectName === null ? {} : { "aria-label": `What should we build in ${projectName}?` })}
-          className="ui-display-title max-w-[36ch] text-balance text-center text-primary"
+          {...(projectName === null ? {} : { "aria-label": `New task in ${projectName}` })}
+          className="ui-page-title mx-auto mt-[clamp(24px,10vh,96px)] w-full max-w-[720px] text-primary"
         >
-          {projectName === null ? "What should we build?" : (
+          {projectName === null ? "New task" : (
             <>
-              {"What should we build in "}
+              {"New task in "}
               {/* The project name is the switcher, as it is in Codex — the one
                   place the answer to "in what?" is also the way to change it.
                   It carries no `aria-label`. An accessible name on a
@@ -169,7 +163,7 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
                   carried by the dotted underline and the tooltip. */}
               <ProjectMenu
                 label="Switch project"
-                align="center"
+                align="start"
                 {...(onOpenProject ? { onOpenProject } : {})}
                 trigger={(
                   <Button
@@ -183,10 +177,12 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
                   </Button>
                 )}
               />
-              {"?"}
             </>
           )}
         </h1>
+        <p className="ui-body mx-auto mt-1.5 w-full max-w-[720px] text-secondary">
+          Describe the outcome. Terminus will plan the work and show each step.
+        </p>
       </main>
 
       {/* Docked with the same padding as the chat view's composer (App.tsx),

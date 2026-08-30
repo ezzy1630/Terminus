@@ -361,6 +361,7 @@ export function App(): JSX.Element {
   const stopTask = useTerminusStore((s) => s.stopTask);
   const setDraft = useTerminusStore((s) => s.setDraft);
   const selectedTask = useSelectedTask();
+  const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const selectedSessionTasks = useSelectedSessionTasks();
   // The stored status says ACTIVE for as long as a task exists. What the shell
   // reports is what the run is actually doing.
@@ -619,9 +620,10 @@ export function App(): JSX.Element {
     const objective = activeDestination === "chat"
       ? selectedTask?.contract?.objective?.trim()
       : undefined;
-    const title = objective ? `${objective} — Terminus` : "Terminus";
+    const project = selectedSession?.title ?? "Terminus";
+    const title = objective ? `${objective} — ${project}` : project;
     void window.terminusDesktop?.setWindowTitle(title);
-  }, [activeDestination, selectedTask?.contract?.objective]);
+  }, [activeDestination, selectedSession?.title, selectedTask?.contract?.objective]);
 
   // Initial data load.
   useEffect(() => {
@@ -885,7 +887,7 @@ export function App(): JSX.Element {
         inspectorVisible={SURFACES_WITH_INSPECTOR.has(activeDestination) && inspectorVisible && durableTaskId !== null && !changesOpen}
         backgroundInert={overlay !== null}
         center={activeDestination === "task_details" ? (
-          <span className="ui-label text-secondary">Task</span>
+          <span className="ui-label text-secondary">{selectedSession?.title ?? "Task"}</span>
         ) : activeDestination === "chat" && selectedTask ? (
           <span className="flex min-w-0 items-center gap-2 text-primary">
             <FolderClosed size={14} className="shrink-0 text-tertiary" aria-hidden />
@@ -893,7 +895,10 @@ export function App(): JSX.Element {
                 made the bar read as a web page header. The run's state is not
                 repeated here — the sidebar row and the composer both show it,
                 and a third copy in the title bar was the one that never moved. */}
-            <span className="truncate text-base font-semibold">{selectedTask.contract?.objective ?? selectedTask.id}</span>
+            <span className="min-w-0 truncate text-base font-semibold">
+              <span className="mr-1.5 text-secondary">{selectedSession?.title ?? "Task"} /</span>
+              {selectedTask.contract?.objective ?? selectedTask.id}
+            </span>
             <Menu
               label="Task actions"
               align="start"

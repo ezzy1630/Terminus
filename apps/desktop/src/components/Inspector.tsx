@@ -56,6 +56,7 @@ import {
   useTerminusStore,
 } from "../hooks/use-terminus";
 import { deriveProjectTitle, projectUriToPath } from "../lib/projects";
+import { budgetMetrics } from "../lib/task-budget";
 import { deriveSubagentActivity, deriveVerificationActivity, extractUnifiedDiffs } from "../lib/task-surface";
 import { StatusIndicator } from "./StatusIndicator";
 import { MaterialQuestionCard } from "./MaterialQuestionCard";
@@ -517,6 +518,8 @@ interface InspectorProps {
   onShowChanges?: () => void;
 }
 
+type InspectorTab = "run" | "context" | "proof";
+
 /**
  * Plain-language names for the event stream's lifecycle frames. Anything not
  * listed falls back to the raw event name with separators softened, so a new
@@ -659,6 +662,7 @@ function InspectorImpl({
   );
   const eventDerivedStateComplete = eventHistory === null;
   const [copied, setCopied] = useState<"path" | "id" | null>(null);
+  const [activeTab, setActiveTab] = useState<InspectorTab>("context");
 
   const approvals = approvalResource.approvals;
 
@@ -730,17 +734,50 @@ function InspectorImpl({
         </p>
       ) : null}
 
+      <nav className="flex h-9 shrink-0 items-center gap-1 border-b border-subtle px-2" role="tablist" aria-label="Task inspector views">
+        {([
+          ["run", "Run", "Lifecycle, delegation, and effects"],
+          ["context", "Context", "Routing, access, budgets, and cache"],
+          ["proof", "Proof", "Criteria, evidence, and artifacts"],
+        ] as const).map(([value, label, description]) => (
+          <Button
+            key={value}
+            variant="bare"
+            role="tab"
+            aria-selected={activeTab === value}
+            title={description}
+            onClick={() => setActiveTab(value)}
+            className={cn(
+              "ui-meta h-7 rounded-md px-2 text-secondary hover:bg-hover hover:text-primary",
+              activeTab === value && "bg-selected font-medium text-primary",
+            )}
+          >
+            {label}
+          </Button>
+        ))}
+      </nav>
+
       {/* An unanswered question outranks everything else this panel can say
           about the task: it is the one thing here that is waiting on the
           reader. Renders nothing when there is none. */}
-      <MaterialQuestionCard taskId={task.id} />
+      {activeTab === "run" ? <MaterialQuestionCard taskId={task.id} /> : null}
+
+      {activeTab === "run" ? (
+        <InspectorGroup title="Run">
+          <InspectorRow icon={<Workflow size={ICON_SIZE} />} label="Lifecycle" value={statusKind} />
+          <InspectorRow icon={<Terminal size={ICON_SIZE} />} label="Events" value={`${events.length} recorded`} />
+          {subagents.length > 0 ? (
+            <InspectorRow icon={<UsersRound size={ICON_SIZE} />} label="Delegation" value={`${subagents.length} tracked`} />
+          ) : null}
+        </InspectorGroup>
+      ) : null}
 
       {/*
         Environment — the Codex card, minus the rows Terminus has no data or
         endpoint for. `Changes` is the only one that can act, and it opens the
         same review surface ⌘D does.
       */}
-      {hasEnvironmentRows ? (
+      {activeTab === "context" && hasEnvironmentRows ? (
         <InspectorGroup title="Environment">
           {changes !== null ? (
             <InspectorRow
@@ -784,7 +821,7 @@ function InspectorImpl({
         Risk class and contract version are required fields the decoder
         rejects when absent, so these are measurements, not stand-ins.
       */}
-      <InspectorGroup title="Context">
+      {activeTab === "context" ? <InspectorGroup title="Context">
         {session?.default_model ? (
           <InspectorRow
             icon={<Cpu size={ICON_SIZE} />}
@@ -806,6 +843,22 @@ function InspectorImpl({
         ) : null}
         <InspectorRow icon={<Workflow size={ICON_SIZE} />} label="Risk" value={task.risk_class} />
         <InspectorRow icon={<BadgeCheck size={ICON_SIZE} />} label="Contract" value={`v${task.active_contract_version}`} />
+        {task.budget_ledger ? budgetMetrics(task.budget_ledger).map((metric) => (
+          <InspectorRow
+            key={metric.id}
+            icon={<Gauge size={ICON_SIZE} />}
+            label={metric.label}
+            value={metric.detail ? `${metric.value} · ${metric.detail}` : metric.value}
+          />
+        )) : null}
+        {task.budget_ledger && /^\d+$/.test(task.budget_ledger.cached_input_tokens) ? (
+          <InspectorRow
+            icon={<Boxes size={ICON_SIZE} />}
+            label="Cached input"
+            value={`${task.budget_ledger.cached_input_tokens} tokens`}
+            title="Raw cached input token count reported by the control plane"
+          />
+        ) : null}
         {/* The id is what a bug report needs and what nothing else on screen
             shows in full, so the row hands over the whole thing. */}
         <InspectorRow
@@ -818,10 +871,10 @@ function InspectorImpl({
         />
         <SandboxSection profileId={permissionProfileId} />
         <TaskV2Section taskId={task.id} />
-      </InspectorGroup>
+      </InspectorGroup> : null}
 
       {/* Activity — the recent run, plus the two derived lists worth keeping. */}
-      {recentEvents.length > 0 || subagents.length > 0 || verification.length > 0 ? (
+      {activeTab === "run" && (recentEvents.length > 0 || subagents.length > 0 || verification.length > 0) ? (
         <InspectorGroup title="Activity">
           {subagents.length > 0 ? (
             <InspectorDisclosure
@@ -877,10 +930,40 @@ function InspectorImpl({
         </InspectorGroup>
       ) : null}
 
-      <ArtifactsSection taskId={task.id} />
+      {activeTab === "proof" ? (
+        <div id="inspector-panel-proof" role="tabpanel" aria-label="Task proof">
+          {changes !== null ? (
+            <InspectorGroup title="Review">
+              <InspectorRow
+                icon={<FileDiff size={ICON_SIZE} />}
+                label="Open changes"
+                value={`${changes.stats.files} file${changes.stats.files === 1 ? "" : "s"}`}
+                ariaLabel="Open changes review"
+                onClick={onShowChanges}
+              />
+            </InspectorGroup>
+          ) : null}
+          <ArtifactsSection taskId={task.id} />
+          {verification.length > 0 ? (
+            <InspectorGroup title="Evidence">
+              <ul>
+                {verification.map((check) => (
+                  <li key={check.id}>
+                    <InspectorRow
+                      icon={<Workflow size={ICON_SIZE} />}
+                      label={check.detail}
+                      value={check.state === "passed" ? "Passed" : check.state === "failed" ? "Failed" : "Pending"}
+                    />
+                  </li>
+                ))}
+              </ul>
+            </InspectorGroup>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* Approvals — the one group that is always open, because it blocks. */}
-      {approvals.length > 0 ? (
+      {activeTab === "run" && approvals.length > 0 ? (
         <InspectorGroup title="Approvals">
           <ul>
             {approvals.map((approval) => (
