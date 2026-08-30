@@ -847,8 +847,8 @@ export const STABLE_WORLD_STATE_SECTIONS: ReadonlySet<string> = new Set([
  * duplicate a message the model already receives. Emitting them costs tokens
  * and teaches the model to reach for capabilities that will be refused.
  *
- * - `memory`: no memory tool, no writer, no reader (`@terminus/memory` has
- *   zero production imports); the section only ever says "disabled".
+ * - `memory`: durable semantic memory remains disabled until its gate passes.
+ *   Deterministic task state uses the separate live `working_memory` section.
  * - `tool_capabilities`: the tool schemas on the request are the declaration.
  * - `request`: the user's turn input is already delivered as the
  *   `user_message` episode, which now renders with `role: user`.
@@ -874,6 +874,7 @@ const WORLD_STATE_SECTION_ORDER: readonly string[] = [
   "task",
   "workspace",
   "environment",
+  "working_memory",
   "changes",
   "last_command",
   "verification",

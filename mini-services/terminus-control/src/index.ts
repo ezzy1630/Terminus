@@ -231,6 +231,7 @@ import {
   type Micros,
   type ModelKey,
   type Rfc3339Timestamp,
+  type Task as DomainTask,
   type TokenCount,
   type VerificationPlan,
 } from "@terminus/domain";
@@ -249,6 +250,8 @@ import {
   riskSchema,
   workerLeaseSchema,
   taskAttemptSchema,
+  taskPhaseSchema,
+  taskStatusSchema,
   budgetConsumptionSchema,
   taskContractV2Schema,
   taskV2Schema,
@@ -373,6 +376,20 @@ import {
   type CodexAppServerTurnInput,
 } from "./codex-app-server.js";
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
+import {
+  buildWorkingMemoryContextSection,
+  renderCheckpointSummary,
+  type WorkingMemoryContextSection,
+} from "./agent/working-memory-context.js";
+import type {
+  WorkingMemoryBlocker,
+  WorkingMemoryCriterion,
+  WorkingMemoryDecision,
+  WorkingMemoryDiagnostic,
+  WorkingMemoryFailedApproach,
+  WorkingMemoryFileChange,
+  WorkingMemoryJobRef,
+} from "@terminus/memory";
 import {
   CodingTurnEngine,
   TRUNCATION_CONTINUATION_LIMIT,
@@ -12872,7 +12889,7 @@ async function loadValidatedCheckpoint(input: {
     episodeRange: sequenceState.data.episodeRange,
     artifactHash,
     canonicalStateHash: artifactHash,
-    summary: "Durable checkpoint validated from its immutable canonical artifact.",
+    summary: renderCheckpointSummary(content.data),
     effectState: content.data.effectState,
     approvalState: content.data.approvalState,
     createdAt: input.row.createdAt.toISOString() as Rfc3339Timestamp,
@@ -15898,6 +15915,341 @@ async function seedObservedSourcesFromEpisodes(
   return tracker.seed(entries);
 }
 
+interface LiveWorkingMemoryInput {
+  readonly task: {
+    readonly id: string;
+    readonly sessionId: string;
+    readonly threadId: string;
+    readonly status: string;
+    readonly phase: string;
+    readonly verificationPlanId: string | null;
+    readonly createdAt: Date;
+    readonly completedAt: Date | null;
+    readonly terminalReasonJson: string | null;
+  };
+  readonly contract: TaskContract;
+  readonly contractContentHash: string;
+  readonly criteriaRows: readonly {
+    readonly criterionId: string;
+    readonly statement: string;
+    readonly required: boolean;
+    readonly status: string;
+  }[];
+  readonly observedAt: Rfc3339Timestamp;
+  readonly currentChanges: readonly {
+    readonly path: string;
+    readonly operation: string;
+    readonly newSha256: string | null;
+  }[];
+  readonly failingTests: readonly string[];
+  readonly diagnostics: readonly { readonly path: string; readonly message: string }[];
+  readonly verificationFailures: readonly string[];
+  readonly worldStateDigest: string;
+}
+
+function workingMemoryCriterionStatus(status: string): WorkingMemoryCriterion["status"] {
+  const normalized = status.toLowerCase();
+  if (["satisfied", "passed", "verified", "pass"].includes(normalized)) return "PASS";
+  if (["unsatisfied", "failed", "fail", "error"].includes(normalized)) return "FAIL";
+  if (["pending", "not_run", "not-run"].includes(normalized)) return "NOT_RUN";
+  return "UNKNOWN";
+}
+
+function workingMemoryChangeKind(operation: string): WorkingMemoryFileChange["changeKind"] {
+  const normalized = operation.toLowerCase();
+  if (normalized.includes("create") || normalized === "add") return "created";
+  if (normalized.includes("delete") || normalized === "remove") return "deleted";
+  return "modified";
+}
+
+function workingMemoryBlockerKind(status: string): WorkingMemoryBlocker["kind"] | null {
+  if (status === "NEEDS_USER_DECISION") return "awaiting_user";
+  if (status === "POLICY_DENIED") return "policy_denied";
+  if (status === "BUDGET_EXHAUSTED") return "budget_exhausted";
+  if (status === "BLOCKED" || status === "FAILED_VERIFICATION") return "other";
+  return null;
+}
+
+/**
+ * Project the current task from authoritative operational records.
+ *
+ * This is working memory, not durable semantic memory: no model-generated
+ * claim is stored, retrieved, or promoted. The output is rebuilt before each
+ * provider attempt and is bounded by `buildWorkingMemoryContextSection`.
+ */
+async function loadLiveWorkingMemory(input: LiveWorkingMemoryInput): Promise<{
+  readonly section: WorkingMemoryContextSection;
+  readonly sourceVersions: Readonly<Record<string, string>>;
+}> {
+  const [failureRows, jobRows, budgetRows, approvalRows, writeToolCalls] = await Promise.all([
+    db.operationObservation.findMany({
+      where: {
+        turn: { taskId: input.task.id },
+        OR: [
+          { status: { notIn: ["success", "partial"] } },
+          { repeatedFailure: true },
+          { oscillating: true },
+          { failureClass: { not: null } },
+        ],
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    }),
+    db.job.findMany({
+      where: { taskId: input.task.id },
+      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+      select: {
+        id: true,
+        state: true,
+        resolvedExecutable: true,
+        cwdUri: true,
+        startedAt: true,
+        settledAt: true,
+      },
+    }),
+    db.turnBudgetLedger.findMany({
+      where: { turn: { taskId: input.task.id } },
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      select: { id: true, costMicros: true, updatedAt: true },
+    }),
+    db.approval.findMany({
+      where: { taskId: input.task.id },
+      orderBy: [{ requestedAt: "desc" }, { id: "desc" }],
+      select: {
+        id: true,
+        status: true,
+        requestedAt: true,
+        resolvedAt: true,
+        useCount: true,
+        operationHash: true,
+      },
+    }),
+    db.toolCall.findMany({
+      where: {
+        turn: { taskId: input.task.id },
+        toolId: { in: ["patch", "write"] },
+        state: "SETTLED",
+      },
+      orderBy: [{ settledAt: "desc" }, { id: "desc" }],
+      select: { id: true, settledAt: true },
+    }),
+  ]);
+
+  const writeToolSettledAt = new Map(
+    writeToolCalls.map((toolCall) => [toolCall.id, toolCall.settledAt] as const),
+  );
+  const sourceRows = writeToolCalls.length === 0
+    ? []
+    : await db.episode.findMany({
+        where: {
+          kind: "tool_result",
+          toolCallId: { in: writeToolCalls.map((toolCall) => toolCall.id) },
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        select: { toolCallId: true, sourceVersionsJson: true, createdAt: true },
+      });
+
+  const decisions: WorkingMemoryDecision[] = [...arpV2.decisions.values()]
+    .filter((decision) => decision.taskId === input.task.id)
+    .sort((left, right) => right.recordedAt.localeCompare(left.recordedAt))
+    .map((decision) => ({
+      id: decision.id as Uuid7,
+      kind: /(^|[:/])user($|[:/])/i.test(decision.provenance)
+        ? "user_decision"
+        : "model_decision",
+      summary: decision.statement,
+      decidedAt: decision.recordedAt,
+      decidedBy: null,
+    }));
+
+  const failedApproaches: WorkingMemoryFailedApproach[] = failureRows.map((failure) => {
+    const evidence = contentHashSchema.safeParse(failure.resultHash);
+    return {
+      id: failure.id as Uuid7,
+      summary: failure.objectiveStep ?? `${failure.toolId} returned ${failure.status}`,
+      reason: failure.failureClass ?? failure.progressReason,
+      attemptedAt: failure.createdAt.toISOString() as Rfc3339Timestamp,
+      evidenceRefs: evidence.success ? [evidence.data] : [],
+    };
+  });
+
+  const modifiedFilesByPath = new Map<string, WorkingMemoryFileChange>();
+  for (const row of sourceRows) {
+    const parsed = safeParse<Record<string, unknown> | null>(row.sourceVersionsJson, null);
+    const sources = parsed?.sources;
+    if (typeof sources !== "object" || sources === null || Array.isArray(sources)) continue;
+    for (const [path, version] of Object.entries(sources)) {
+      if (typeof version !== "string" || modifiedFilesByPath.has(path)) continue;
+      modifiedFilesByPath.set(path, {
+        path,
+        changeKind: "modified",
+        sourceVersion: version,
+        observedAt: (writeToolSettledAt.get(row.toolCallId ?? "") ?? row.createdAt)
+          .toISOString() as Rfc3339Timestamp,
+      });
+    }
+  }
+  for (const change of input.currentChanges) {
+    modifiedFilesByPath.set(change.path, {
+      path: change.path,
+      changeKind: workingMemoryChangeKind(change.operation),
+      sourceVersion: change.newSha256,
+      observedAt: input.observedAt,
+    });
+  }
+  const modifiedFiles = [...modifiedFilesByPath.values()]
+    .sort((left, right) => right.observedAt.localeCompare(left.observedAt) || left.path.localeCompare(right.path));
+
+  const diagnosticErrors: WorkingMemoryDiagnostic[] = [
+    ...input.diagnostics.map((diagnostic) => ({
+      path: diagnostic.path,
+      message: diagnostic.message,
+      severity: "error" as const,
+      observedAt: input.observedAt,
+    })),
+    ...input.verificationFailures.map((failure) => ({
+      path: "<verification>",
+      message: failure,
+      severity: "error" as const,
+      observedAt: input.observedAt,
+    })),
+  ];
+
+  const activeJobStates = new Set(["STARTING", "RUNNING", "STOPPING", "KILLING", "REATTACHED"]);
+  const runningJobs: WorkingMemoryJobRef[] = jobRows
+    .filter((job) => job.startedAt !== null && activeJobStates.has(job.state))
+    .map((job) => ({
+      jobId: job.id as Uuid7,
+      label: `${job.state}: ${job.resolvedExecutable ?? "process"} (${job.cwdUri})`,
+      startedAt: job.startedAt?.toISOString() as Rfc3339Timestamp,
+    }));
+
+  const observedAtMs = Date.parse(input.observedAt);
+  const computeSeconds = jobRows.reduce((total, job) => {
+    if (job.startedAt === null) return total;
+    const endMs = job.settledAt?.getTime() ?? observedAtMs;
+    return total + Math.max(0, Math.floor((endMs - job.startedAt.getTime()) / 1_000));
+  }, 0);
+  const consumedApprovals = approvalRows.reduce((total, approval) => total + approval.useCount, 0);
+  const modelMicros = budgetRows.reduce((total, ledger) => total + ledger.costMicros, 0n) as Micros;
+
+  const blockers: WorkingMemoryBlocker[] = [
+    ...[...arpV2.questions.values()]
+      .filter((question) => question.taskId === input.task.id && question.status === "PENDING")
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .map((question) => ({
+        id: question.id as Uuid7,
+        kind: "awaiting_user" as const,
+        summary: question.prompt,
+        raisedAt: question.createdAt,
+      })),
+    ...approvalRows
+      .filter((approval) => approval.status === "pending")
+      .map((approval) => ({
+        id: approval.id as Uuid7,
+        kind: "awaiting_user" as const,
+        summary: `Approval is required for operation ${approval.operationHash}.`,
+        raisedAt: approval.requestedAt.toISOString() as Rfc3339Timestamp,
+      })),
+  ];
+  const taskBlockerKind = workingMemoryBlockerKind(input.task.status);
+  if (taskBlockerKind !== null) {
+    blockers.push({
+      id: input.task.id as Uuid7,
+      kind: taskBlockerKind,
+      summary: input.task.terminalReasonJson === null
+        ? `Task is ${input.task.status}.`
+        : checkpointFailureDescription(input.task.terminalReasonJson, input.task.status),
+      raisedAt: input.observedAt,
+    });
+  }
+
+  const criterionStatuses = new Map<string, WorkingMemoryCriterion>(
+    input.criteriaRows.map((criterion) => [
+      criterion.criterionId,
+      {
+        id: criterion.criterionId,
+        statement: criterion.statement,
+        required: criterion.required,
+        status: workingMemoryCriterionStatus(criterion.status),
+        lastObservedAt: null,
+        evidence: [],
+      },
+    ]),
+  );
+  const task: DomainTask = {
+    id: input.task.id as Uuid7,
+    sessionId: input.task.sessionId as Uuid7,
+    threadId: input.task.threadId as Uuid7,
+    contract: input.contract,
+    status: taskStatusSchema.parse(input.task.status),
+    phase: taskPhaseSchema.parse(input.task.phase),
+    scopeLedgerId: null,
+    verificationPlanId: input.task.verificationPlanId as Uuid7 | null,
+    createdAt: input.task.createdAt.toISOString() as Rfc3339Timestamp,
+    completedAt: input.task.completedAt === null
+      ? null
+      : input.task.completedAt.toISOString() as Rfc3339Timestamp,
+  };
+
+  const sourceVersions = {
+    [`task://${input.task.id}`]: input.contractContentHash,
+    [`working-memory://${input.task.id}/criteria`]: computeContentHash(canonicalJson(input.criteriaRows)),
+    [`working-memory://${input.task.id}/decisions`]: computeContentHash(canonicalJson(decisions)),
+    [`working-memory://${input.task.id}/failures`]: computeContentHash(canonicalJson(failedApproaches)),
+    [`working-memory://${input.task.id}/files`]: computeContentHash(canonicalJson(modifiedFiles)),
+    [`working-memory://${input.task.id}/diagnostics`]: computeContentHash(canonicalJson({
+      digest: input.worldStateDigest,
+      verificationFailures: input.verificationFailures,
+    })),
+    [`working-memory://${input.task.id}/jobs`]: computeContentHash(canonicalJson(jobRows.map((job) => ({
+      id: job.id,
+      state: job.state,
+      resolvedExecutable: job.resolvedExecutable,
+      cwdUri: job.cwdUri,
+      startedAt: job.startedAt?.toISOString() ?? null,
+      settledAt: job.settledAt?.toISOString() ?? null,
+    })))),
+    [`working-memory://${input.task.id}/budget`]: computeContentHash(canonicalJson({
+      ledgers: budgetRows.map((ledger) => ({
+        id: ledger.id,
+        costMicros: ledger.costMicros,
+        updatedAt: ledger.updatedAt.toISOString(),
+      })),
+      computeSeconds,
+      consumedApprovals,
+    })),
+    [`working-memory://${input.task.id}/blockers`]: computeContentHash(canonicalJson(blockers)),
+  };
+  const section = await buildWorkingMemoryContextSection({
+    task,
+    capturedAt: input.observedAt,
+    criterionStatuses,
+    decisions,
+    failedApproaches,
+    modifiedFiles,
+    diagnosticState: {
+      failingTests: [...input.failingTests, ...input.verificationFailures],
+      errors: diagnosticErrors,
+      warnings: [],
+      observedAt: input.observedAt,
+    },
+    runningJobs,
+    budgetConsumption: {
+      modelMicros,
+      modelMicrosLimit: input.contract.budget.modelMicros,
+      computeSeconds,
+      computeSecondsLimit: input.contract.budget.computeSeconds,
+      wallClockSeconds: Math.max(0, Math.floor((observedAtMs - input.task.createdAt.getTime()) / 1_000)),
+      wallClockSecondsLimit: input.contract.budget.wallClockSeconds,
+      humanApprovals: consumedApprovals,
+      humanApprovalsLimit: input.contract.budget.humanApprovals,
+    },
+    blockers,
+    sourceVersions,
+  });
+  return { section, sourceVersions };
+}
+
 async function persistSettledToolResult(input: {
   readonly input: StandaloneToolSettlementInput;
   /** A parsed call, or the identity of a rejected one. */
@@ -17054,6 +17406,20 @@ async function agentLoop(turnId: string): Promise<void> {
       latestDiagnostics = contextState.taskSnapshot.diagnostics.map(
         (diagnostic) => `${diagnostic.path}: ${diagnostic.message}`,
       );
+      const workingMemory = !workspaceActivated
+        ? null
+        : await loadLiveWorkingMemory({
+            task,
+            contract,
+            contractContentHash: contractRow.contentHash,
+            criteriaRows,
+            observedAt: worldState.observedAt,
+            currentChanges: contextState.signals.workspaceChanges,
+            failingTests: contextState.taskSnapshot.failingTests,
+            diagnostics: contextState.taskSnapshot.diagnostics,
+            verificationFailures: priorVerificationFailures,
+            worldStateDigest: contextState.worldStateDigest,
+          });
       const effectiveTaskSnapshot: TaskSnapshot = {
         ...taskSnapshot,
         contract: !workspaceActivated
@@ -17103,9 +17469,14 @@ async function agentLoop(turnId: string): Promise<void> {
           }
         : {
         ...worldState,
+        sourceVersions: {
+          ...worldState.sourceVersions,
+          ...(workingMemory?.sourceVersions ?? {}),
+        },
         sections: {
           ...worldState.sections,
           ...contextState.worldStateSections,
+          ...(workingMemory === null ? {} : { working_memory: workingMemory.section }),
           // No `tool_capabilities` section: the tool schemas attached to the
           // request are the declaration. Restating them in prose cost ~120
           // tokens a turn and went stale the moment the palette changed.

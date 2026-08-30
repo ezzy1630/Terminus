@@ -312,6 +312,10 @@ describe("Context Compiler", () => {
       candidateCount: expect.any(Number),
       selectedCount: expect.any(Number),
     });
+    expect(compiled.manifest.decisionRecord?.memory).toEqual({
+      enabled: false,
+      reason: "durable memory remains disabled until its precision/harm gate passes",
+    });
     expect(compiled.warnings.some((warning) => warning.startsWith("token calibration degraded:"))).toBe(true);
   });
 

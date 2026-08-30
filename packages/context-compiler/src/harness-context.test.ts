@@ -412,6 +412,7 @@ describe("world state is split by volatility", () => {
     request_phase: { phase: "implementation" },
     last_command: { command: "exec", exit_code: 0 },
     changes: { files: ["a.ts"] },
+    working_memory: { schema_version: "terminus.working-memory.v1", phase: "IMPLEMENT" },
     task: { id: TASK_ID, status: "ACTIVE", phase: "implementation" },
     // Suppressed:
     memory: { enabled: false, reason: "gate not promoted" },
@@ -455,6 +456,7 @@ describe("world state is split by volatility", () => {
     };
     expect(headings("# World state")).toEqual(["task", "workspace", "environment"]);
     expect(headings("# Latest observations")).toEqual([
+      "working_memory",
       "changes",
       "last_command",
       "verification",
