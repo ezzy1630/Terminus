@@ -120,27 +120,29 @@ export async function runCompactionRecallTool(input: {
     };
   }
 
+  const browseRequest = input.request;
+  const query = browseRequest.query ?? null;
   const recalled = await runCompactionRecall(input.store, {
     schemaVersion: COMPACTION_RECALL_VERSION,
     turnId: input.turnId,
     summaryHash: summary.summaryHash,
     episodeIds: [],
-    query: input.request.query ?? null,
-    maxEpisodes: input.request.limit,
-    continuation: input.request.continuation ?? null,
+    query,
+    maxEpisodes: browseRequest.limit,
+    continuation: browseRequest.continuation ?? null,
   });
   const perEpisodeChars = recalled.episodes.length === 0
-    ? input.request.max_chars
-    : Math.max(1, Math.floor(input.request.max_chars / recalled.episodes.length));
+    ? browseRequest.max_chars
+    : Math.max(1, Math.floor(browseRequest.max_chars / recalled.episodes.length));
   return {
     scope: { turn_id: input.turnId },
-    action: input.request.action,
+    action: browseRequest.action,
     summary_hash: summary.summaryHash,
-    query: input.request.query ?? null,
+    query,
     results: recalled.episodes.map((episode) => projectEpisode(
       episode,
       perEpisodeChars,
-      matchCenteredOffset(episode, input.request.query ?? null, perEpisodeChars),
+      matchCenteredOffset(episode, query, perEpisodeChars),
     )),
     continuation: recalled.continuation,
   };
@@ -157,7 +159,7 @@ function projectEpisode(
   const sourceUri = episode.contentArtifact;
   const artifactMatch = sourceUri?.match(IMMUTABLE_ARTIFACT_URI) ?? null;
   const sourceHex = artifactMatch?.[1];
-  if (sourceUri === null || sourceHex === undefined) {
+  if (sourceUri === null || sourceUri === undefined || sourceHex === undefined) {
     throw new CompactionRecallToolError(`compaction source ${episode.id} has no immutable artifact`);
   }
   const characters = Array.from(episode.contentJson);
@@ -171,7 +173,7 @@ function projectEpisode(
     sequence: episode.sequence,
     tool_call_id: episode.toolCallId,
     source_uri: sourceUri,
-    source_sha256: `sha256:${sourceHex.toLocaleLowerCase()}`,
+    source_sha256: `sha256:${sourceHex.toLowerCase()}`,
     content_excerpt: characters.slice(offsetChars, endChars).join(""),
     content_offset_chars: offsetChars,
     content_end_chars: endChars,

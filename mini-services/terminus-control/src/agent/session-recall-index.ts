@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite";
 import { SESSION_RECALL_SOURCE_MAX_CHARS } from "./session-recall.js";
 import { sessionRecallFtsQueryTerms } from "./session-recall-query.js";
 
@@ -35,16 +34,17 @@ export interface SessionRecallIndexSearch {
   readonly limit: number;
 }
 
-interface StateRow {
-  readonly turn_id: string;
-  readonly source_identity: string;
-  readonly complete: number;
-}
-
-interface HitRow {
-  readonly turn_id: string;
-  readonly turn_sequence: number | string;
-  readonly raw_score: number;
+export interface SessionRecallIndexRepository {
+  currentStates(turnIds: readonly string[]): ReadonlyMap<string, SessionRecallIndexState>;
+  upsertMany(documents: readonly SessionRecallIndexDocument[]): void;
+  search(input: {
+    readonly taskId: string;
+    readonly threadId: string;
+    readonly matchExpression: string;
+    readonly beforeSequence: number;
+    readonly fromSequenceInclusive: number;
+    readonly limit: number;
+  }): readonly SessionRecallIndexHit[];
 }
 
 /**
@@ -56,21 +56,11 @@ interface HitRow {
  * authority source.
  */
 export class SessionRecallFtsIndex {
-  constructor(private readonly database: Database) {}
+  constructor(private readonly repository: SessionRecallIndexRepository) {}
 
   currentStates(turnIds: readonly string[]): ReadonlyMap<string, SessionRecallIndexState> {
-    if (turnIds.length === 0) return new Map();
     if (turnIds.length > 50) throw new Error("session recall index state lookup exceeds 50 turns");
-    const placeholders = turnIds.map(() => "?").join(", ");
-    const rows = this.database.query(
-      `SELECT turn_id, source_identity, complete
-       FROM session_turn_fts_state
-       WHERE turn_id IN (${placeholders})`,
-    ).all(...turnIds) as StateRow[];
-    return new Map(rows.map((row) => [row.turn_id, {
-      sourceIdentity: row.source_identity,
-      complete: row.complete === 1,
-    }]));
+    return this.repository.currentStates(turnIds);
   }
 
   upsert(document: SessionRecallIndexDocument): void {
@@ -84,81 +74,21 @@ export class SessionRecallFtsIndex {
     if (new Set(documents.map((document) => document.turnId)).size !== documents.length) {
       throw new Error("session recall index batch contains duplicate turn ids");
     }
-    const deleteRow = this.database.query("DELETE FROM session_turn_fts WHERE turn_id = ?");
-    const insertRow = this.database.query(
-        `INSERT INTO session_turn_fts (
-           task_id, thread_id, turn_id, turn_sequence, completed_at, user_text, assistant_text
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      );
-    const upsertState = this.database.query(
-        `INSERT INTO session_turn_fts_state (
-           turn_id, task_id, thread_id, turn_sequence, source_identity, complete, indexed_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(turn_id) DO UPDATE SET
-           task_id = excluded.task_id,
-           thread_id = excluded.thread_id,
-           turn_sequence = excluded.turn_sequence,
-           source_identity = excluded.source_identity,
-           complete = excluded.complete,
-           indexed_at = excluded.indexed_at`,
-      );
-    const transaction = this.database.transaction((values: readonly SessionRecallIndexDocument[]) => {
-      const indexedAt = Date.now();
-      for (const value of values) {
-        deleteRow.run(value.turnId);
-        insertRow.run(
-          value.taskId,
-          value.threadId,
-          value.turnId,
-          value.sequence,
-          value.completedAt,
-          value.userText,
-          value.assistantText,
-        );
-        upsertState.run(
-          value.turnId,
-          value.taskId,
-          value.threadId,
-          value.sequence,
-          value.sourceIdentity,
-          value.complete ? 1 : 0,
-          indexedAt,
-        );
-      }
-    });
-    transaction.immediate(documents);
+    this.repository.upsertMany(documents);
   }
 
   search(input: SessionRecallIndexSearch): readonly SessionRecallIndexHit[] {
     assertSearch(input);
     const match = ftsMatchExpression(input.query);
     if (match === null) return [];
-    const rows = this.database.query(
-      `SELECT
-         turn_id,
-         turn_sequence,
-         bm25(session_turn_fts, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0) AS raw_score
-       FROM session_turn_fts
-       WHERE session_turn_fts MATCH ?
-         AND task_id = ?
-         AND thread_id = ?
-         AND CAST(turn_sequence AS INTEGER) >= ?
-         AND CAST(turn_sequence AS INTEGER) < ?
-       ORDER BY raw_score ASC, CAST(turn_sequence AS INTEGER) DESC
-       LIMIT ?`,
-    ).all(
-      match,
-      input.taskId,
-      input.threadId,
-      input.fromSequenceInclusive,
-      input.beforeSequence,
-      input.limit,
-    ) as HitRow[];
-    return rows.map((row) => ({
-      turnId: row.turn_id,
-      sequence: Number(row.turn_sequence),
-      rawScore: row.raw_score,
-    }));
+    return this.repository.search({
+      taskId: input.taskId,
+      threadId: input.threadId,
+      matchExpression: match,
+      fromSequenceInclusive: input.fromSequenceInclusive,
+      beforeSequence: input.beforeSequence,
+      limit: input.limit,
+    });
   }
 }
 

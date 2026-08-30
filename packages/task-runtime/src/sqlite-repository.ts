@@ -115,6 +115,174 @@ export class SqliteDatabaseAdapter implements SqliteDatabasePort {
   }
 }
 
+export interface SqliteSessionRecallDocument {
+  readonly turnId: string;
+  readonly taskId: string;
+  readonly threadId: string;
+  readonly sequence: number;
+  readonly completedAt: string | null;
+  readonly userText: string;
+  readonly assistantText: string;
+  readonly sourceIdentity: string;
+  readonly complete: boolean;
+}
+
+export interface SqliteSessionRecallState {
+  readonly sourceIdentity: string;
+  readonly complete: boolean;
+}
+
+export interface SqliteSessionRecallHit {
+  readonly turnId: string;
+  readonly sequence: number;
+  /** Raw FTS5 BM25 score. Lower is a stronger match. */
+  readonly rawScore: number;
+}
+
+export interface SqliteSessionRecallSearch {
+  readonly taskId: string;
+  readonly threadId: string;
+  /** A quoted FTS5 expression produced by the caller's bounded tokenizer. */
+  readonly matchExpression: string;
+  readonly beforeSequence: number;
+  readonly fromSequenceInclusive: number;
+  readonly limit: number;
+}
+
+/**
+ * Low-level FTS5 repository for task-scoped session recall.
+ *
+ * This repository is deliberately unaware of model-visible excerpts and
+ * artifact authority. It only discovers candidate turn ids; the control plane
+ * must hydrate and verify immutable sources before admitting a hit.
+ */
+export class SqliteSessionRecallIndexRepository {
+  constructor(private readonly database: SqliteDatabasePort) {}
+
+  currentStates(turnIds: readonly string[]): ReadonlyMap<string, SqliteSessionRecallState> {
+    if (turnIds.length === 0) return new Map();
+    if (turnIds.length > 50) {
+      throw new ValidationError("session recall index state lookup exceeds 50 turns");
+    }
+    const placeholders = turnIds.map(() => "?").join(", ");
+    const rows = this.database
+      .query(
+        `SELECT turn_id, source_identity, complete
+         FROM session_turn_fts_state
+         WHERE turn_id IN (${placeholders})`,
+      )
+      .all(...turnIds);
+    return new Map(rows.map((raw, index) => {
+      const identity = `session_turn_fts_state[${index}]`;
+      const row = readRow(raw, identity);
+      const complete = readInteger(row.complete, "complete", identity);
+      if (complete !== 0 && complete !== 1) {
+        throw new IntegrityError(`invalid complete in SQLite row for ${identity}`);
+      }
+      return [
+        readText(row.turn_id, "turn_id", identity),
+        {
+          sourceIdentity: readText(row.source_identity, "source_identity", identity),
+          complete: complete === 1,
+        },
+      ] as const;
+    }));
+  }
+
+  upsertMany(documents: readonly SqliteSessionRecallDocument[]): void {
+    if (documents.length === 0) return;
+    if (documents.length > 50) {
+      throw new ValidationError("session recall index batch exceeds 50 turns");
+    }
+    if (new Set(documents.map((document) => document.turnId)).size !== documents.length) {
+      throw new ValidationError("session recall index batch contains duplicate turn ids");
+    }
+    this.database.transaction((database) => {
+      const deleteRow = database.query("DELETE FROM session_turn_fts WHERE turn_id = ?");
+      const insertRow = database.query(
+        `INSERT INTO session_turn_fts (
+           task_id, thread_id, turn_id, turn_sequence, completed_at, user_text, assistant_text
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const upsertState = database.query(
+        `INSERT INTO session_turn_fts_state (
+           turn_id, task_id, thread_id, turn_sequence, source_identity, complete, indexed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(turn_id) DO UPDATE SET
+           task_id = excluded.task_id,
+           thread_id = excluded.thread_id,
+           turn_sequence = excluded.turn_sequence,
+           source_identity = excluded.source_identity,
+           complete = excluded.complete,
+           indexed_at = excluded.indexed_at`,
+      );
+      const indexedAt = Date.now();
+      for (const document of documents) {
+        deleteRow.run(document.turnId);
+        insertRow.run(
+          document.taskId,
+          document.threadId,
+          document.turnId,
+          document.sequence,
+          document.completedAt,
+          document.userText,
+          document.assistantText,
+        );
+        upsertState.run(
+          document.turnId,
+          document.taskId,
+          document.threadId,
+          document.sequence,
+          document.sourceIdentity,
+          document.complete ? 1 : 0,
+          indexedAt,
+        );
+      }
+    });
+  }
+
+  search(input: SqliteSessionRecallSearch): readonly SqliteSessionRecallHit[] {
+    if (input.matchExpression.trim().length === 0 || input.matchExpression.length > 1_024) {
+      throw new ValidationError("session recall index match expression is invalid");
+    }
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 50) {
+      throw new ValidationError("session recall index limit must be between 1 and 50");
+    }
+    const rows = this.database
+      .query(
+        `SELECT
+           turn_id,
+           turn_sequence,
+           bm25(session_turn_fts, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0) AS raw_score
+         FROM session_turn_fts
+         WHERE session_turn_fts MATCH ?
+           AND task_id = ?
+           AND thread_id = ?
+           AND CAST(turn_sequence AS INTEGER) >= ?
+           AND CAST(turn_sequence AS INTEGER) < ?
+         ORDER BY raw_score ASC, CAST(turn_sequence AS INTEGER) DESC
+         LIMIT ?`,
+      )
+      .all(
+        input.matchExpression,
+        input.taskId,
+        input.threadId,
+        input.fromSequenceInclusive,
+        input.beforeSequence,
+        input.limit,
+      );
+    return rows.map((raw, index) => {
+      const identity = `session_turn_fts[${index}]`;
+      const row = readRow(raw, identity);
+      return {
+        turnId: readText(row.turn_id, "turn_id", identity),
+        sequence: readInteger(row.turn_sequence, "turn_sequence", identity),
+        rawScore: readFiniteNumber(row.raw_score, "raw_score", identity),
+      };
+    });
+  }
+}
+
 interface Decoder {
   parse(value: unknown): unknown;
 }
@@ -393,6 +561,14 @@ function readInteger(value: unknown, column: string, identity: string): number {
     !Number.isSafeInteger(numberValue) ||
     numberValue < 0
   ) {
+    throw new IntegrityError(`invalid ${column} in SQLite row for ${identity}`);
+  }
+  return numberValue;
+}
+
+function readFiniteNumber(value: unknown, column: string, identity: string): number {
+  const numberValue = typeof value === "bigint" ? Number(value) : value;
+  if (typeof numberValue !== "number" || !Number.isFinite(numberValue)) {
     throw new IntegrityError(`invalid ${column} in SQLite row for ${identity}`);
   }
   return numberValue;

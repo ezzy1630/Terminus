@@ -49,6 +49,7 @@ import {
   DurableScopedDelegationService,
   SqliteDatabaseAdapter,
   SqliteDurableTaskRepository,
+  SqliteSessionRecallIndexRepository,
   globMatch,
   type ScopedDelegationKernelPort,
   type SqliteValue,
@@ -874,31 +875,32 @@ const db = new PrismaClient({
 });
 
 const scopedDelegationDatabase = new Database(sqliteDatabasePath(DATABASE_URL));
-const sessionRecallIndex = new SessionRecallFtsIndex(scopedDelegationDatabase);
-const scopedDelegationRepository = new SqliteDurableTaskRepository(
-  new SqliteDatabaseAdapter({
-    exec: (sql) => scopedDelegationDatabase.exec(sql),
-    query: (sql) => {
-      const statement = scopedDelegationDatabase.query(sql);
-      return {
-        get: (...parameters: SqliteValue[]) => statement.get(...parameters),
-        all: (...parameters: SqliteValue[]) => statement.all(...parameters),
-        run: (...parameters: SqliteValue[]) => ({ changes: statement.run(...parameters).changes }),
-      };
-    },
-    transaction: (operation) => {
-      scopedDelegationDatabase.exec("BEGIN IMMEDIATE");
-      try {
-        const result = operation();
-        scopedDelegationDatabase.exec("COMMIT");
-        return result;
-      } catch (error: unknown) {
-        scopedDelegationDatabase.exec("ROLLBACK");
-        throw error;
-      }
-    },
-  }),
+const controlSqliteDatabase = new SqliteDatabaseAdapter({
+  exec: (sql) => scopedDelegationDatabase.exec(sql),
+  query: (sql) => {
+    const statement = scopedDelegationDatabase.query(sql);
+    return {
+      get: (...parameters: SqliteValue[]) => statement.get(...parameters),
+      all: (...parameters: SqliteValue[]) => statement.all(...parameters),
+      run: (...parameters: SqliteValue[]) => ({ changes: statement.run(...parameters).changes }),
+    };
+  },
+  transaction: (operation) => {
+    scopedDelegationDatabase.exec("BEGIN IMMEDIATE");
+    try {
+      const result = operation();
+      scopedDelegationDatabase.exec("COMMIT");
+      return result;
+    } catch (error: unknown) {
+      scopedDelegationDatabase.exec("ROLLBACK");
+      throw error;
+    }
+  },
+});
+const sessionRecallIndex = new SessionRecallFtsIndex(
+  new SqliteSessionRecallIndexRepository(controlSqliteDatabase),
 );
+const scopedDelegationRepository = new SqliteDurableTaskRepository(controlSqliteDatabase);
 
 /**
  * A real kernel delegation adapter must provide identity-bound receipts. The
@@ -15698,13 +15700,15 @@ async function settleStandaloneProviderTool(
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         const elapsed = performance.now() - startedAt;
-        const result = errorResult(message, {
-          toolCallId,
-          traceId: input.turnId,
-          status: "error",
-          summary: `Compaction recall failed: ${message}`,
-          timing: { executionMs: elapsed, totalMs: elapsed },
-        });
+        const result = {
+          ...errorResult(message, {
+            toolCallId,
+            traceId: input.turnId,
+            status: "error",
+            summary: `Compaction recall failed: ${message}`,
+          }),
+          timing: { queuedMs: 0, executionMs: elapsed, totalMs: elapsed },
+        };
         return persistSettledToolResult({
           input,
           call,

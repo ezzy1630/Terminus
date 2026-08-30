@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import {
+  SqliteDatabaseAdapter,
+  SqliteSessionRecallIndexRepository,
+  type SqliteValue,
+} from "@terminus/task-runtime";
+import {
   SESSION_RECALL_SOURCE_MAX_CHARS,
 } from "./session-recall.js";
 import {
@@ -22,12 +27,38 @@ const MIGRATION = readFileSync(
   "utf8",
 );
 
+function recallIndex(database: Database): SessionRecallFtsIndex {
+  const port = new SqliteDatabaseAdapter({
+    exec: (sql) => database.exec(sql),
+    query: (sql) => {
+      const statement = database.query(sql);
+      return {
+        get: (...parameters: SqliteValue[]) => statement.get(...parameters),
+        all: (...parameters: SqliteValue[]) => statement.all(...parameters),
+        run: (...parameters: SqliteValue[]) => ({ changes: statement.run(...parameters).changes }),
+      };
+    },
+    transaction: (operation) => {
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const result = operation();
+        database.exec("COMMIT");
+        return result;
+      } catch (error: unknown) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    },
+  });
+  return new SessionRecallFtsIndex(new SqliteSessionRecallIndexRepository(port));
+}
+
 function fixture(): { readonly database: Database; readonly index: SessionRecallFtsIndex } {
   const database = new Database(":memory:");
   database.exec("PRAGMA foreign_keys = ON");
   database.exec("CREATE TABLE turns (id TEXT PRIMARY KEY) STRICT");
   database.exec(MIGRATION);
-  return { database, index: new SessionRecallFtsIndex(database) };
+  return { database, index: recallIndex(database) };
 }
 
 function document(overrides: Partial<SessionRecallIndexDocument> = {}): SessionRecallIndexDocument {
@@ -198,12 +229,12 @@ describe("session recall FTS5 index", () => {
       first.exec("CREATE TABLE turns (id TEXT PRIMARY KEY) STRICT");
       first.exec(MIGRATION);
       insertTurn(first, "turn-1");
-      new SessionRecallFtsIndex(first).upsert(document());
+      recallIndex(first).upsert(document());
       first.close();
 
       const reopened = new Database(path);
       try {
-        expect(new SessionRecallFtsIndex(reopened).search({
+        expect(recallIndex(reopened).search({
           taskId: "task-1",
           threadId: "thread-1",
           query: "profile cache",
