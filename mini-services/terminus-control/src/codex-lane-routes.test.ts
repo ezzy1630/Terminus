@@ -29,9 +29,13 @@ describe("external Codex control-plane contract", () => {
 
   test("keeps OpenCode connect consent and credential identity bounded", async () => {
     const source = await Bun.file(new URL("./index.ts", import.meta.url)).text();
-    expect(source).toContain("expected_fingerprint: z.string().min(1).max(512)");
+    expect(source).toContain("expected_fingerprint: z.string().regex(/^[0-9a-f]{64}$/)");
+    expect(source).toContain("expected_destination: z.string().url().max(2_048)");
+    expect(source).toContain("expected_catalog_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/)");
     expect(source).toContain("consent: z.literal(true)");
     expect(source).toContain("account.fingerprint !== parsed.data.expected_fingerprint");
+    expect(source).toContain("account.baseUrl !== parsed.data.expected_destination");
+    expect(source).toContain("account.catalogDigest !== parsed.data.expected_catalog_digest");
     expect(source).toContain("ChatGPT subscriptions require the separate Codex App Server lane");
   });
 });
