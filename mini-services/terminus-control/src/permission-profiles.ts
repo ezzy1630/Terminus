@@ -132,5 +132,25 @@ export function approvalActionFor(call: ParsedStandaloneToolCall): string {
       return `List ${call.arguments.pattern}`;
     case "exec_poll":
       return `Poll job ${call.arguments.background_id}`;
+    case "inspect":
+      return call.arguments.action === "symbol"
+        ? `Inspect symbol ${call.arguments.query}`
+        : "Inspect repository map";
+    case "recall": {
+      switch (call.arguments.action) {
+        case "browse":
+          return "Browse earlier turns";
+        case "search":
+          return `Search this task for ${call.arguments.query}`;
+        case "read":
+          return `Read turn ${call.arguments.turn_sequence}`;
+        case "compaction_browse":
+          return call.arguments.query === undefined
+            ? "Browse compacted turn context"
+            : `Search compacted turn context for ${call.arguments.query}`;
+        case "compaction_read":
+          return `Read compacted episode ${call.arguments.episode_id}`;
+      }
+    }
   }
 }

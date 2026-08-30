@@ -29,6 +29,25 @@ const write = parseStandaloneToolCall({
 });
 const exec = parseStandaloneToolCall({ toolCallId: "e", toolName: "exec", arguments: { program: "bun", args: ["test"] } });
 const fetch = parseStandaloneToolCall({ toolCallId: "f", toolName: "web_fetch", arguments: { url: "https://example.com/x" } });
+const inspect = parseStandaloneToolCall({
+  toolCallId: "i",
+  toolName: "inspect",
+  arguments: { action: "symbol", query: "RunRequest" },
+});
+const compactionBrowse = parseStandaloneToolCall({
+  toolCallId: "cb",
+  toolName: "recall",
+  arguments: { action: "compaction_browse", query: "failed verification" },
+});
+const compactionRead = parseStandaloneToolCall({
+  toolCallId: "cr",
+  toolName: "recall",
+  arguments: {
+    action: "compaction_read",
+    summary_hash: `sha256:${"a".repeat(64)}`,
+    episode_id: "episode-7",
+  },
+});
 
 describe("permission profiles", () => {
   test("the default is full access, and the legacy id means the same thing", () => {
@@ -80,5 +99,10 @@ describe("permission profiles", () => {
     expect(approvalActionFor(capability)).toBe("Activate workspace tools");
     expect(approvalReasonFor("ask", write)).toContain("editing a file");
     expect(approvalActionFor(fetch)).toBe("Fetch https://example.com/x");
+    expect(approvalActionFor(inspect)).toBe("Inspect symbol RunRequest");
+    expect(approvalActionFor(compactionBrowse)).toBe(
+      "Search compacted turn context for failed verification",
+    );
+    expect(approvalActionFor(compactionRead)).toBe("Read compacted episode episode-7");
   });
 });
