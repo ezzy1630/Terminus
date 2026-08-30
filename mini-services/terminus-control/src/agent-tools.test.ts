@@ -5,7 +5,9 @@ import {
   MIN_TOOL_CYCLES,
   STANDALONE_TOOL_SCHEMAS,
   STANDALONE_ALWAYS_ON_TOOL_IDS,
+  STANDALONE_ADAPTIVE_TOOL_IDS,
   selectInitialStandaloneToolSchemas,
+  selectStandaloneToolSchemas,
   EXEC_OUTPUT_MAX_BYTES,
   EXEC_OUTPUT_STREAM_FLOOR_BYTES,
   kernelPublicEnv,
@@ -40,7 +42,7 @@ import type { ToolResult } from "@terminus/aci";
 
 describe("standalone provider tools", () => {
   test("exposes the bounded kernel tool surface", () => {
-    expect(STANDALONE_TOOL_SCHEMAS.map((tool) => tool.id)).toEqual(["capability", "read", "patch", "write", "exec", "exec_poll", "web_fetch", "grep", "glob"]);
+    expect(STANDALONE_TOOL_SCHEMAS.map((tool) => tool.id)).toEqual(["capability", "read", "patch", "write", "exec", "exec_poll", "web_fetch", "grep", "glob", "recall"]);
     expect(selectInitialStandaloneToolSchemas(true).map((tool) => tool.id)).toEqual(["capability"]);
     expect(selectInitialStandaloneToolSchemas(false)).toEqual([]);
     // Every always-on tool has a schema, and every schema id is dispatchable.
@@ -48,6 +50,19 @@ describe("standalone provider tools", () => {
       expect(STANDALONE_TOOL_SCHEMAS.some((tool) => tool.id === toolId)).toBe(true);
     }
     expect(DEFAULT_MAX_TOOL_CYCLES).toBe(200);
+  });
+
+  test("keeps session recall exclusive to the opt-in adaptive profile", () => {
+    expect(STANDALONE_ADAPTIVE_TOOL_IDS).toEqual(["recall"]);
+    expect(selectStandaloneToolSchemas({ toolsEnabled: true, adaptiveToolsEnabled: false }).map((tool) => tool.id))
+      .not.toContain("recall");
+    expect(selectStandaloneToolSchemas({
+      toolsEnabled: true,
+      adaptiveToolsEnabled: false,
+      activatedCapabilities: ["standalone.recall"],
+    }).map((tool) => tool.id)).not.toContain("recall");
+    expect(selectStandaloneToolSchemas({ toolsEnabled: true, adaptiveToolsEnabled: true }).map((tool) => tool.id))
+      .toContain("recall");
   });
 
   test("tool-cycle budget resolution is bounded and fail-closed", () => {
@@ -85,7 +100,30 @@ describe("standalone provider tools", () => {
     });
     expect(toolEffectMetadata(call).effectType).toBe("READ_LOCAL");
     expect(providerToolCallTranscript(call).provider_call_id).toBe("provider-call-1");
+    const recall = parseStandaloneToolCall({
+      toolCallId: "recall-1",
+      toolName: "recall",
+      arguments: { action: "search", query: "profile hash", limit: 3 },
+    });
+    expect(recall.arguments).toEqual({
+      action: "search",
+      query: "profile hash",
+      limit: 3,
+      scan_limit: 30,
+      max_chars: 6_000,
+    });
+    expect(toolEffectMetadata(recall)).toMatchObject({
+      effectType: "READ_LOCAL",
+      resourceUri: "session://history",
+      sideEffectClass: "read",
+      externalNetwork: false,
+    });
     expect(() => parseStandaloneToolCall({ toolCallId: "x", toolName: "search", arguments: {} })).toThrow(/unknown standalone tool/);
+    expect(() => parseStandaloneToolCall({
+      toolCallId: "recall-bad",
+      toolName: "recall",
+      arguments: { action: "search", query: "", scan_limit: 500 },
+    })).toThrow(/invalid/);
     expect(() => parseStandaloneToolCall({ toolCallId: "x", toolName: "exec", arguments: { program: "sh; exit" } })).toThrow(/invalid/);
   });
 

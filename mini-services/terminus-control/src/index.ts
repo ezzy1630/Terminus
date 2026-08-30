@@ -394,6 +394,13 @@ import {
   type OperationObservation,
 } from "./agent/loop-contracts.js";
 import { CacheRatioMonitor } from "./agent/cache-telemetry.js";
+import {
+  runSessionRecall,
+  SESSION_RECALL_SOURCE_MAX_BYTES,
+  type SessionRecallResult,
+  type SessionRecallStore,
+  type SessionRecallTurn,
+} from "./agent/session-recall.js";
 import { ProviderTransportError, withProviderRetry } from "./providers/provider-retry.js";
 import { boundedStreamOutputReserve } from "./providers/provider-response-budget.js";
 import { createNativeDirectExecutor } from "./providers/native-direct-executor.js";
@@ -14795,6 +14802,8 @@ interface StandaloneToolSettlementInput {
   readonly callChunk: ProviderToolCallChunk;
   readonly providerAttemptId: string;
   readonly turnId: string;
+  readonly threadId: string;
+  readonly turnSequence: number;
   readonly taskId: string;
   readonly sessionId: string;
   readonly workspaceId: string;
@@ -15184,6 +15193,125 @@ async function workspaceRootPaths(workspaceId: string): Promise<readonly string[
   return unique;
 }
 
+type SessionRecallTurnRow = {
+  readonly id: string;
+  readonly taskId: string | null;
+  readonly threadId: string;
+  readonly sequence: number;
+  readonly completedAt: Date | null;
+  readonly initiatingInputArtifact: string | null;
+};
+
+async function projectSessionRecallTurns(
+  rows: readonly SessionRecallTurnRow[],
+): Promise<readonly SessionRecallTurn[]> {
+  if (rows.length === 0) return [];
+  const events = await db.semanticEvent.findMany({
+    where: {
+      eventType: "turn.completed",
+      aggregateType: "turn",
+      aggregateId: { in: rows.map((row) => row.id) },
+    },
+    orderBy: { occurredAt: "desc" },
+    select: { aggregateId: true, payloadJson: true, artifactRefsJson: true },
+  });
+  const completionByTurn = new Map<string, { readonly summary: string; readonly artifactUri: string | null }>();
+  for (const event of events) {
+    if (completionByTurn.has(event.aggregateId)) continue;
+    const payload = safeParse<Record<string, unknown>>(event.payloadJson, {});
+    const refs = safeParse<string[]>(event.artifactRefsJson, []);
+    completionByTurn.set(event.aggregateId, {
+      summary: typeof payload.summary === "string" ? payload.summary : "",
+      artifactUri: refs.find((uri) => artifactUriHash(uri) !== null) ?? null,
+    });
+  }
+  return rows.flatMap((row): readonly SessionRecallTurn[] => {
+    if (row.taskId === null) return [];
+    const completion = completionByTurn.get(row.id);
+    return [{
+      id: row.id,
+      taskId: row.taskId,
+      threadId: row.threadId,
+      sequence: row.sequence,
+      completedAt: row.completedAt?.toISOString() ?? null,
+      userArtifactUri: row.initiatingInputArtifact,
+      assistantArtifactUri: completion?.artifactUri ?? null,
+      assistantSummary: completion?.summary ?? "",
+    }];
+  });
+}
+
+function createSessionRecallStore(artifacts: ArtifactClient): SessionRecallStore {
+  return {
+    listCompletedTurns: async ({ taskId, threadId, beforeSequence, limit }) => {
+      const rows = await db.turn.findMany({
+        where: {
+          taskId,
+          threadId,
+          state: "COMPLETED",
+          sequence: { lt: beforeSequence },
+        },
+        orderBy: { sequence: "desc" },
+        take: limit,
+        select: {
+          id: true,
+          taskId: true,
+          threadId: true,
+          sequence: true,
+          completedAt: true,
+          initiatingInputArtifact: true,
+        },
+      });
+      return projectSessionRecallTurns(rows);
+    },
+    findCompletedTurn: async ({ taskId, threadId, sequence }) => {
+      const row = await db.turn.findFirst({
+        where: { taskId, threadId, state: "COMPLETED", sequence },
+        select: {
+          id: true,
+          taskId: true,
+          threadId: true,
+          sequence: true,
+          completedAt: true,
+          initiatingInputArtifact: true,
+        },
+      });
+      if (row === null) return null;
+      return (await projectSessionRecallTurns([row]))[0] ?? null;
+    },
+    readArtifactText: async (uri) => {
+      const hash = artifactUriHash(uri);
+      if (hash === null) throw new Error(`session recall source is not a content-addressed artifact: ${uri}`);
+      const metadata = await artifacts.metadata(hash as ContentHash);
+      if (metadata.bytes > BigInt(SESSION_RECALL_SOURCE_MAX_BYTES)) {
+        throw new Error(`session recall source exceeds the ${SESSION_RECALL_SOURCE_MAX_BYTES}-byte read bound`);
+      }
+      const bytes = await artifacts.get(hash as ContentHash);
+      return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    },
+  };
+}
+
+function sessionRecallSourceVersions(result: SessionRecallResult): Readonly<Record<string, string>> {
+  const versions: Record<string, string> = {};
+  for (const entry of result.results) {
+    for (const uri of [entry.user_source_uri, entry.assistant_source_uri]) {
+      const hash = artifactUriHash(uri);
+      if (uri !== null && hash !== null) versions[uri] = hash;
+    }
+  }
+  return versions;
+}
+
+function sessionRecallSummary(result: SessionRecallResult): string {
+  const noun = result.results.length === 1 ? "turn" : "turns";
+  const scanned = result.action === "search" ? ` after scanning ${result.scanned_turns}` : "";
+  const continuation = result.next_before_sequence === null
+    ? ""
+    : `; continue before turn ${result.next_before_sequence}`;
+  return `Recalled ${result.results.length} completed ${noun}${scanned} in this task/thread${continuation}`;
+}
+
 async function settleStandaloneProviderTool(
   input: StandaloneToolSettlementInput,
 ): Promise<EngineToolSettlement> {
@@ -15262,6 +15390,71 @@ async function settleStandaloneProviderTool(
       traceId: input.turnId,
       summary: "Workspace context and coding tools activated for this turn",
     });
+    return persistSettledToolResult({
+      input,
+      call,
+      toolCallId,
+      callTranscriptArtifactUri: callTranscriptArtifact.uri,
+      sideEffectId: null,
+      result,
+      workspaceRevisionBefore,
+      workspaceRevisionAfter: workspaceRevisionBefore,
+      ...operationContext,
+    });
+  }
+
+  // Adaptive session recall reads only immutable artifacts belonging to
+  // earlier COMPLETED turns in this exact task/thread. The artifact client
+  // still crosses the kernel boundary, but this query creates no workspace
+  // side effect, approval, or durable semantic memory claim.
+  if (call.toolId === "recall") {
+    const startedAt = performance.now();
+    const recalled = await runSessionRecall({
+      taskId: input.taskId,
+      threadId: input.threadId,
+      currentTurnSequence: input.turnSequence,
+      request: call.arguments,
+      store: createSessionRecallStore(input.artifactClient),
+    });
+    const elapsed = performance.now() - startedAt;
+    const base = okResult(recalled, {
+      toolCallId,
+      traceId: input.turnId,
+      summary: sessionRecallSummary(recalled),
+      sourceVersions: sessionRecallSourceVersions(recalled),
+      timing: { executionMs: elapsed, totalMs: elapsed },
+      diagnostics: recalled.warnings.map((warning) => ({
+        severity: "warning" as const,
+        code: "SESSION_RECALL_SOURCE_UNAVAILABLE",
+        message: warning,
+        path: null,
+        range: null,
+      })),
+    });
+    const pageContinuation = recalled.next_before_sequence === null
+      ? null
+      : `recall ${recalled.action} with before_sequence ${recalled.next_before_sequence}`;
+    const sourceContinuation = recalled.results.flatMap((entry) => [
+      entry.user_truncated ? entry.user_source_uri : null,
+      entry.assistant_truncated ? entry.assistant_source_uri : null,
+    ]).find((uri): uri is string => uri !== null) ?? null;
+    const continuation = pageContinuation ?? sourceContinuation;
+    const contentTruncated = sourceContinuation !== null;
+    const result: ToolResult<unknown> = {
+      ...base,
+      status: recalled.warnings.length > 0 ? "partial" : "success",
+      truncation: continuation === null
+        ? base.truncation
+        : {
+            occurred: true,
+            reason: pageContinuation !== null
+              ? "older completed turns remain outside this bounded recall page"
+              : contentTruncated
+                ? "recalled turn text was excerpted within the requested character budget; exact source URIs are included"
+                : "session recall output was bounded",
+            continuation,
+          },
+    };
     return persistSettledToolResult({
       input,
       call,
@@ -15639,6 +15832,12 @@ function toolArgumentsExcerpt(call: ParsedStandaloneToolCall): string {
         return `${call.arguments.pattern} in ${call.arguments.path}`;
       case "glob":
         return call.arguments.pattern;
+      case "recall":
+        return call.arguments.action === "search"
+          ? `${call.arguments.action}: ${call.arguments.query}`
+          : call.arguments.action === "read"
+            ? `${call.arguments.action}: turn ${call.arguments.turn_sequence}`
+            : call.arguments.action;
     }
   })();
   const codePoints = Array.from(excerpt);
@@ -16433,9 +16632,11 @@ async function agentLoop(turnId: string): Promise<void> {
         .map((value) => value.trim())
         .filter((value) => value.length > 0),
     )];
+    const harnessProfileMode = resolveTerminusProfileMode(process.env.TERMINUS_HARNESS_PROFILE);
     const workspaceToolSchemas = selectStandaloneToolSchemas({
       toolsEnabled: toolsEnabledForTurn,
       activatedCapabilities: requestedToolCapabilities,
+      adaptiveToolsEnabled: harnessProfileMode === "adaptive",
     });
     const initialToolSchemas = selectInitialStandaloneToolSchemas(toolsEnabledForTurn);
     const profileToolSchemas = [...initialToolSchemas, ...workspaceToolSchemas];
@@ -16449,7 +16650,7 @@ async function agentLoop(turnId: string): Promise<void> {
       return workspaceToolSchemas.some((schema) => schema.id === toolId);
     });
     const selectedProfile = createTerminusExecutionProfile({
-      mode: resolveTerminusProfileMode(process.env.TERMINUS_HARNESS_PROFILE),
+      mode: harnessProfileMode,
       providerId: selectedProvider.providerId,
       modelKey: String(selectedModel.modelKey),
       // The profile records the bounded union; each provider attempt records
@@ -16548,6 +16749,8 @@ async function agentLoop(turnId: string): Promise<void> {
         callChunk: toolInput.call,
         providerAttemptId: toolInput.providerAttemptId,
         turnId: toolInput.turnId,
+        threadId: turn.threadId,
+        turnSequence: turn.sequence,
         taskId: toolInput.taskId,
         sessionId: toolInput.sessionId,
         workspaceId: toolInput.workspaceId,

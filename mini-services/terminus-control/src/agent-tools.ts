@@ -338,6 +338,33 @@ export const standaloneGlobInputSchema = z.object({
   max_results: z.number().int().min(1).max(1_000).default(200),
 }).strict();
 
+/**
+ * Exact, bounded recall of completed turns in the current task/thread.
+ * This is session history, not durable semantic memory: it never crosses the
+ * current task, writes a memory claim, or injects content automatically.
+ */
+export const standaloneRecallInputSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("browse"),
+    before_sequence: z.number().int().min(1).optional(),
+    limit: z.number().int().min(1).max(10).default(5),
+    max_chars: z.number().int().min(512).max(16_000).default(6_000),
+  }).strict(),
+  z.object({
+    action: z.literal("search"),
+    query: z.string().trim().min(1).max(256),
+    before_sequence: z.number().int().min(1).optional(),
+    limit: z.number().int().min(1).max(10).default(5),
+    scan_limit: z.number().int().min(1).max(50).default(30),
+    max_chars: z.number().int().min(512).max(16_000).default(6_000),
+  }).strict(),
+  z.object({
+    action: z.literal("read"),
+    turn_sequence: z.number().int().min(1),
+    max_chars: z.number().int().min(512).max(16_000).default(6_000),
+  }).strict(),
+]);
+
 export type StandaloneReadInput = z.infer<typeof standaloneReadInputSchema>;
 export type StandaloneCapabilityInput = z.infer<typeof standaloneCapabilityInputSchema>;
 export type StandaloneWriteInput = z.infer<typeof standaloneWriteInputSchema>;
@@ -345,6 +372,7 @@ export type StandalonePatchInput = z.infer<typeof standalonePatchInputSchema>;
 export type StandaloneExecInput = z.infer<typeof standaloneExecInputSchema>;
 export type StandaloneGrepInput = z.infer<typeof standaloneGrepInputSchema>;
 export type StandaloneGlobInput = z.infer<typeof standaloneGlobInputSchema>;
+export type StandaloneRecallInput = z.infer<typeof standaloneRecallInputSchema>;
 
 /**
  * The workspace-relative form of a model-supplied path.
@@ -440,7 +468,8 @@ export type ParsedStandaloneToolCall =
   | { readonly providerCallId: string; readonly toolId: "exec_poll"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneExecPollInput }
   | { readonly providerCallId: string; readonly toolId: "web_fetch"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneWebFetchInput }
   | { readonly providerCallId: string; readonly toolId: "grep"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneGrepInput }
-  | { readonly providerCallId: string; readonly toolId: "glob"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneGlobInput };
+  | { readonly providerCallId: string; readonly toolId: "glob"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneGlobInput }
+  | { readonly providerCallId: string; readonly toolId: "recall"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneRecallInput };
 
 export type StandaloneWebFetchInput = z.infer<typeof standaloneWebFetchInputSchema>;
 export type StandaloneExecPollInput = z.infer<typeof standaloneExecPollInputSchema>;
@@ -709,6 +738,57 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
     defaultTimeoutMs: 30_000,
     policyTags: ["workspace", "read-only", "search", "standalone"],
   },
+  {
+    id: "recall",
+    version: "standalone-v1",
+    summary: "Browse, search, or read exact completed turns from this task and thread. Results come from immutable user/assistant artifacts with source URIs and explicit continuation. This does not access other tasks, infer durable memories, or change the prompt automatically.",
+    inputSchema: {
+      oneOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["action"],
+          properties: {
+            action: { const: "browse" },
+            before_sequence: { type: "integer", minimum: 1 },
+            limit: { type: "integer", minimum: 1, maximum: 10, default: 5 },
+            max_chars: { type: "integer", minimum: 512, maximum: 16_000, default: 6_000 },
+          },
+        },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["action", "query"],
+          properties: {
+            action: { const: "search" },
+            query: { type: "string", minLength: 1, maxLength: 256 },
+            before_sequence: { type: "integer", minimum: 1 },
+            limit: { type: "integer", minimum: 1, maximum: 10, default: 5 },
+            scan_limit: { type: "integer", minimum: 1, maximum: 50, default: 30 },
+            max_chars: { type: "integer", minimum: 512, maximum: 16_000, default: 6_000 },
+          },
+        },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["action", "turn_sequence"],
+          properties: {
+            action: { const: "read" },
+            turn_sequence: { type: "integer", minimum: 1 },
+            max_chars: { type: "integer", minimum: 512, maximum: 16_000, default: 6_000 },
+          },
+        },
+      ],
+    },
+    resultSchema,
+    sideEffectClass: "read",
+    requiredCapabilities: [],
+    trustLevel: "builtin",
+    maximumModelResultBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+    maximumArtifactBytes: 0,
+    defaultTimeoutMs: 30_000,
+    policyTags: ["session", "read-only", "exact-source", "adaptive", "standalone"],
+  },
 ] as const;
 
 /** The bounded coding set is always available when provider tool use is on. */
@@ -724,6 +804,9 @@ export const STANDALONE_ALWAYS_ON_TOOL_IDS = [
 
 /** Network access is discoverable and must be explicitly activated. */
 export const STANDALONE_DISCOVERABLE_TOOL_IDS = ["web_fetch"] as const;
+
+/** Exact session recall is opt-in with the adaptive execution profile. */
+export const STANDALONE_ADAPTIVE_TOOL_IDS = ["recall"] as const;
 
 /** The only tool exposed before the model decides workspace access is needed. */
 export const STANDALONE_INITIAL_TOOL_IDS = ["capability"] as const;
@@ -779,12 +862,16 @@ export const STANDALONE_TOOL_CAPABILITY_CARDS: readonly CapabilityCard[] =
 export function selectStandaloneToolSchemas(input: {
   readonly toolsEnabled: boolean;
   readonly activatedCapabilities?: readonly string[] | undefined;
+  readonly adaptiveToolsEnabled?: boolean | undefined;
 }): readonly ProviderToolSchema[] {
   if (!input.toolsEnabled) return [];
   const activated = new Set(input.activatedCapabilities ?? []);
   const alwaysOn = new Set<string>(STANDALONE_ALWAYS_ON_TOOL_IDS);
+  const adaptive = new Set<string>(STANDALONE_ADAPTIVE_TOOL_IDS);
   return STANDALONE_TOOL_SCHEMAS.filter((schema) =>
-    alwaysOn.has(schema.id) || activated.has(`standalone.${schema.id}`),
+    alwaysOn.has(schema.id)
+      || (input.adaptiveToolsEnabled === true && adaptive.has(schema.id))
+      || (!adaptive.has(schema.id) && activated.has(`standalone.${schema.id}`)),
   );
 }
 
@@ -838,6 +925,7 @@ const STANDALONE_TOOL_IDS_FOR_MODEL = [
   ...STANDALONE_INITIAL_TOOL_IDS,
   ...STANDALONE_ALWAYS_ON_TOOL_IDS,
   ...STANDALONE_DISCOVERABLE_TOOL_IDS,
+  ...STANDALONE_ADAPTIVE_TOOL_IDS,
 ] as const;
 
 export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStandaloneToolCall {
@@ -865,6 +953,8 @@ export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStan
       return { providerCallId: call.toolCallId, toolId: "grep", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneGrepInputSchema) };
     case "glob":
       return { providerCallId: call.toolCallId, toolId: "glob", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneGlobInputSchema) };
+    case "recall":
+      return { providerCallId: call.toolCallId, toolId: "recall", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneRecallInputSchema) };
     default:
       throw new InvalidToolCallError({
         toolName: call.toolName,
@@ -1263,6 +1353,21 @@ export function toolEffectMetadata(call: ParsedStandaloneToolCall): StandaloneTo
         expectedLatencyMs: 30_000,
         expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
       };
+    case "recall":
+      return {
+        effectType: "READ_LOCAL",
+        resourceUri: "session://history",
+        reversibility: "none",
+        sideEffectClass: "read",
+        workspaceSnapshot: null,
+        externalNetwork: false,
+        processAffinity: null,
+        consistency: "workspace_snapshot",
+        rateLimitGroup: null,
+        cacheable: true,
+        expectedLatencyMs: 30_000,
+        expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+      };
   }
 }
 
@@ -1447,6 +1552,8 @@ export async function executeStandaloneTool(
   switch (input.call.toolId) {
     case "capability":
       throw new Error("capability activation must settle in the control plane");
+    case "recall":
+      throw new Error("session recall must settle in the control plane");
     case "read": {
       const requestedStartLine = input.call.arguments.offset_line;
       const requestedEndLine = Math.min(

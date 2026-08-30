@@ -7,11 +7,12 @@ export const TERMINUS_MINIMAL_PROFILE_ID = "terminus-minimal" as const;
 export const TERMINUS_MINIMAL_PROFILE_VERSION = "1" as const;
 /**
  * The opt-in product arm. It differs from the permanent minimal control arm
- * only by admitting bounded delegation; routing, memory, and workflows stay
- * disabled until their independent promotion gates pass.
+ * by admitting bounded delegation and exact same-task session recall;
+ * routing, durable semantic memory, and workflows stay disabled until their
+ * independent promotion gates pass.
  */
 export const TERMINUS_ADAPTIVE_PROFILE_ID = "terminus-adaptive" as const;
-export const TERMINUS_ADAPTIVE_PROFILE_VERSION = "1" as const;
+export const TERMINUS_ADAPTIVE_PROFILE_VERSION = "2" as const;
 /**
  * The always-on coding surface. Every id here is declared to the provider,
  * accepted by the dispatch guard, and executable.
@@ -33,11 +34,18 @@ export const TERMINUS_MINIMAL_TOOL_IDS = [
   "glob",
 ] as const;
 
+/** The opt-in adaptive surface. Minimal remains the permanent control arm. */
+export const TERMINUS_ADAPTIVE_TOOL_IDS = [
+  ...TERMINUS_MINIMAL_TOOL_IDS,
+  "recall",
+] as const;
+
 /** Tools a profile may declare: always-on plus the activatable ones. */
 export const TERMINUS_DECLARABLE_TOOL_IDS = [
   "capability",
   ...TERMINUS_MINIMAL_TOOL_IDS,
   "web_fetch",
+  "recall",
 ] as const;
 
 export interface TerminusMinimalProfile {
@@ -166,11 +174,15 @@ export function createTerminusMinimalProfile(
   return validateTerminusMinimalProfile(profile);
 }
 
-/** Create the opt-in delegation arm without enabling unrelated experiments. */
+/** Create the opt-in adaptive arm without enabling durable memory. */
 export function createTerminusAdaptiveProfile(
   input: TerminusMinimalProfileInput,
 ): TerminusAdaptiveProfile {
-  const minimal = createTerminusMinimalProfile(input);
+  const adaptiveInput: TerminusMinimalProfileInput = {
+    ...input,
+    toolIds: input.toolIds ?? TERMINUS_ADAPTIVE_TOOL_IDS,
+  };
+  const minimal = createTerminusMinimalProfile(adaptiveInput);
   const base = {
     profileId: TERMINUS_ADAPTIVE_PROFILE_ID,
     version: TERMINUS_ADAPTIVE_PROFILE_VERSION,

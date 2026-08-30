@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { STANDALONE_ALWAYS_ON_TOOL_IDS } from "../agent-tools.js";
 import {
   TERMINUS_ADAPTIVE_PROFILE_ID,
+  TERMINUS_ADAPTIVE_TOOL_IDS,
   TERMINUS_DECLARABLE_TOOL_IDS,
   TERMINUS_MINIMAL_TOOL_IDS,
   buildEvidenceIdentity,
@@ -39,6 +40,8 @@ describe("terminus-minimal profile", () => {
     expect([...TERMINUS_MINIMAL_TOOL_IDS].sort()).toEqual([...STANDALONE_ALWAYS_ON_TOOL_IDS].sort());
     expect(TERMINUS_DECLARABLE_TOOL_IDS).toContain("capability");
     expect(TERMINUS_DECLARABLE_TOOL_IDS).toContain("web_fetch");
+    expect(TERMINUS_DECLARABLE_TOOL_IDS).toContain("recall");
+    expect(TERMINUS_MINIMAL_TOOL_IDS).not.toContain("recall" as never);
   });
 
   test("an activated tool widens the declared set; direct replies may declare none; unknown tools are refused", () => {
@@ -92,6 +95,7 @@ describe("terminus-minimal profile", () => {
     expect(adaptive.routerEnabled).toBe(false);
     expect(adaptive.memoryEnabled).toBe(false);
     expect(adaptive.workflowEnabled).toBe(false);
+    expect(adaptive.toolIds).toEqual([...TERMINUS_ADAPTIVE_TOOL_IDS].sort());
     expect(adaptive.profileHash).not.toBe(minimal.profileHash);
     expect(terminusAdaptiveProfileSchema.safeParse(adaptive).success).toBe(true);
     expect(validateTerminusExecutionProfile(adaptive)).toEqual(adaptive);
