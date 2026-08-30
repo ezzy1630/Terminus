@@ -16,5 +16,6 @@ The build is broken: `src/main.py` references `sys.exit` but does not `import sy
 - `expected-properties.yaml` — post-run expected property invariants.
 - `policy.yaml` — policy rule overrides for this task.
 
-This is a *synthetic* minimal task package (audit A3 fix #5). It is
-self-contained and can be graded without a real agent loop.
+This is a deterministic local fixture. `setup.sh` creates a small Python
+repository with an import-time defect; the grader imports the module and runs
+its behavior tests. The private regression test is staged only while grading.

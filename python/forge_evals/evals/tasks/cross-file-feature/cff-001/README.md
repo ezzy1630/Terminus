@@ -18,5 +18,6 @@ The function signature change must be backward-compatible (default value preserv
         - `expected-properties.yaml` — post-run expected property invariants.
         - `policy.yaml` — policy rule overrides for this task.
 
-        This is a *synthetic* minimal task package (audit A3 fix #5). It is
-        self-contained and can be graded without a real agent loop.
+This is a deterministic local fixture. `setup.sh` creates a small Python
+repository with one API signature and three callers to update. The grader
+records real calls and runs private behavior checks.

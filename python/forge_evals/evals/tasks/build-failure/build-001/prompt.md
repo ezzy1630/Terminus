@@ -1,14 +1,14 @@
-# Fix missing import causing compile error
+# Fix missing import causing an import-time build failure
 
 Task ID: `build-001`
 
-The build is broken: `src/main.py` references `sys.exit` but does not `import sys`. Add the missing import. The build must succeed with `python -c 'import src.main'`.
+The build is broken: `src/main.py` references `sys.exit` but does not `import sys`. Add the missing import. The build must succeed with `python -c 'import src.main'` and `pytest -q`.
 
 
 ## Acceptance criteria
 
-The grader checks that the changes described above have been applied.
-See `grader/run.py` for the exact checks.
+The grader imports the module and executes the behavior tests. It does not
+accept a comment or a matching string as a fix.
 
 ## Out of scope
 
