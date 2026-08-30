@@ -5709,16 +5709,16 @@ mod tests {
             grant_id: "grant-1".to_string(),
             task_id: "task-1".to_string(),
             effect_id: "eff-1".to_string(),
-            connector_id: "chatgpt-codex".to_string(),
+            connector_id: "openai-responses".to_string(),
             method: "POST".to_string(),
-            path: "/backend-api/codex/responses".to_string(),
-            destination: "https://chatgpt.com:443".to_string(),
+            path: "/v1/responses".to_string(),
+            destination: "https://api.openai.com:443".to_string(),
         };
         let frame = identity.head_frame(&terminus_connector::ResponseHead {
             status_code: 429,
             content_type: Some("text/event-stream".to_string()),
             headers: vec![
-                ("x-codex-turn-state".to_string(), "shard-7".to_string()),
+                ("request-id".to_string(), "request-7".to_string()),
                 ("retry-after".to_string(), "12".to_string()),
             ],
         });
@@ -5726,13 +5726,13 @@ mod tests {
         assert_eq!(frame.status_code, Some(429));
         assert_eq!(frame.response_sha256, None);
         assert_eq!(frame.response_redactions, 0);
-        assert_eq!(frame.connector_id, "chatgpt-codex");
+        assert_eq!(frame.connector_id, "openai-responses");
         let names = frame
             .response_headers
             .iter()
             .map(|header| header.name.clone())
             .collect::<Vec<_>>();
-        assert!(names.contains(&"x-codex-turn-state".to_string()));
+        assert!(names.contains(&"request-id".to_string()));
         assert!(names.contains(&"retry-after".to_string()));
     }
 }
