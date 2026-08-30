@@ -28,6 +28,17 @@ describe("Models.dev catalog snapshot & universal parser", () => {
     const ollama = catalog.providers.get("ollama")!;
     expect(ollama.models.has("llama3.3:70b")).toBe(true);
     expect(ollama.models.get("llama3.3:70b")?.inputCost).toBe(0);
+
+    const openCode = catalog.providers.get("opencode")!;
+    const freeBenchmarkModel = openCode.models.get("mimo-v2.5-free");
+    expect(freeBenchmarkModel).toMatchObject({
+      toolCalling: true,
+      reasoning: true,
+      contextTokens: 200_000,
+      outputTokens: 32_000,
+      inputCost: 0,
+      outputCost: 0,
+    });
   });
 
   test("computes deterministic SHA-256 digest of offline catalog snapshot", () => {

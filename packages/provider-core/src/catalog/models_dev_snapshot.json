@@ -389,6 +389,25 @@
           "cache_read": 0
         }
       },
+      "mimo-v2.5-free": {
+        "id": "mimo-v2.5-free",
+        "name": "MiMo V2.5 Free",
+        "tool_call": true,
+        "reasoning": true,
+        "modalities": {
+          "input": ["text", "image", "audio", "video"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 200000,
+          "output": 32000
+        },
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cache_read": 0
+        }
+      },
       "paid-responses": {
         "id": "paid-responses",
         "name": "Paid Responses",
