@@ -3,7 +3,7 @@
  *
  * Per SPEC §8: focused Codex-style start screen. When a project is
  * selected (or when "New Task" is clicked), show:
- *   - A contextual heading such as "What should we build in <project>?"
+ *   - A focused task prompt
  *   - The main composer (focuses immediately)
  *   - Only actionable project context
  *   - No dashboard, no statistics, no wall of recent activity
@@ -31,9 +31,7 @@ import { api } from "../lib/api";
 import { WORKSPACE_TASK_SCOPE } from "../lib/task-scope";
 import { useTerminusStore } from "../hooks/use-terminus";
 import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-logical-mutation";
-import { Button } from "../ui/Button";
 import { Composer, type TurnRouting } from "./Composer";
-import { ProjectMenu } from "./ProjectMenu";
 import type { Session } from "../types";
 
 interface NewTaskScreenProps {
@@ -135,57 +133,13 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
     }
   }, [session, recordStartedTurn, refreshTasks, selectTask, taskMutation]);
 
-  const projectName = session?.title ?? null;
-
   return (
     <div className={cn("flex h-full w-full flex-col overflow-hidden bg-canvas", className)}>
       {/* Center the prompt in the usable surface. The composer is independently
           docked below, so starting a task never moves the input. */}
       <main className="scrollable flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-8 py-10">
-        <h1
-          id="new-task-heading"
-          /* Named explicitly because the project name inside it is a menu
-             trigger, and Radix labels that trigger "Switch project" — an
-             accessible name on a descendant *replaces* its text when the
-             heading's name is computed from contents, so the heading would
-             otherwise announce as "What should we build in Switch project?".
-             The label is character-for-character the visible sentence. */
-          {...(projectName === null ? {} : { "aria-label": `What should we build in ${projectName}?` })}
-          className="ui-display-title max-w-[36ch] text-balance text-center text-primary"
-        >
-          {projectName === null ? "What should we build?" : (
-            <>
-              {"What should we build in "}
-              {/* The project name is the switcher, as it is in Codex — the one
-                  place the answer to "in what?" is also the way to change it.
-                  It carries no `aria-label`. An accessible name on a
-                  descendant *replaces* that descendant's text when the
-                  heading's own name is computed from its contents, so
-                  labelling this button rewrote the heading as "What should we
-                  build in Project: Terminus. Switch project?". Its name is
-                  therefore its text, which also keeps it distinct from the
-                  composer's "Change project" chip — two buttons answering to
-                  one name would make either unaddressable. The affordance is
-                  carried by the dotted underline and the tooltip. */}
-              <ProjectMenu
-                label="Switch project"
-                align="center"
-                {...(onOpenProject ? { onOpenProject } : {})}
-                trigger={(
-                  <Button
-                    type="button"
-                    variant="bare"
-                    data-tooltip="Switch project"
-                    className="rounded underline decoration-dotted decoration-[1.5px] underline-offset-[7px]"
-                    style={{ textDecorationColor: "var(--text-tertiary)" }}
-                  >
-                    {projectName}
-                  </Button>
-                )}
-              />
-              {"?"}
-            </>
-          )}
+        <h1 id="new-task-heading" className="ui-display-title max-w-[24ch] text-balance text-center text-primary">
+          What should Terminus do?
         </h1>
       </main>
 

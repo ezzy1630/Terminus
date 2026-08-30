@@ -326,7 +326,7 @@ describe("the first-launch notice", () => {
       account({ id: "a", source: "opencode:baseten" }),
       account({ id: "b", source: "opencode:cerebras" }),
       account({ id: "c", source: "codex-chatgpt" }),
-    ])).toBe("Connected 3 providers — 2 from OpenCode and your ChatGPT login.");
+    ])).toBe("Connected 3 providers: 2 from OpenCode and your ChatGPT login.");
   });
 
   /**
@@ -341,7 +341,7 @@ describe("the first-launch notice", () => {
       account({ id: "zen", source: "zen" }),
       // An unsupported credential is listed in Settings but was not connected.
       account({ id: "unsupported", source: "opencode:vendor-x", status: "unsupported" }),
-    ])).toBe("Connected 8 providers — 6 from OpenCode, your ChatGPT login and OpenCode Zen.");
+    ])).toBe("Connected 8 providers: 6 from OpenCode, your ChatGPT login and OpenCode Zen.");
   });
 
   test("does not repeat the figure when one store accounts for everything", () => {
@@ -376,7 +376,7 @@ describe("the first-launch notice", () => {
     const view = render(<ProviderAccountsNotice />);
 
     expect(await screen.findByTestId("provider-accounts-notice"))
-      .toHaveTextContent("Connected 2 providers — 1 from OpenCode and your ChatGPT login.");
+      .toHaveTextContent("Connected 2 providers: 1 from OpenCode and your ChatGPT login.");
 
     await user.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByTestId("provider-accounts-notice")).not.toBeInTheDocument();

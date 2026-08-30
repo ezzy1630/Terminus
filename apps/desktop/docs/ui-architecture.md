@@ -12,25 +12,23 @@ keeps task selection independent from navigation:
 ```text
 new_task                         → NewTaskScreen
 chat + selected task             → Conversation + Composer
-chat + Changes                   → ResizableReviewLayout
-board                            → canonical task board/list
-agents                           → directory + operator detail tabs
-task_details                     → Overview | Evidence | Usage
-activity                         → Activity | Changes | Replay
+chat + Changes                   → Conversation + ReviewPane split
+board                            → canonical task board/list + shared inspector
 ```
 
-The sidebar exposes product destinations, not subsystem pages. Organization,
-department, operator, room, and capability data are joined inside one Agents
-workspace. Task-scoped cockpit projections live inside two tabbed destinations.
-Their resources preserve loading, empty, stale, and error states.
+The sidebar has two explicit modes. Projects owns project and task navigation;
+Activity owns the attention queue and recent work. Agents is intentionally not
+a destination because the current control plane does not expose a complete,
+actionable agent workspace.
 
 The Board projects canonical ARP v2 tasks. An interactive record carries a
 server-resolved conversation context backed by the same-ID v1 Task row. The
 task-title button uses native button semantics, so click, Return, and Space
-open that exact conversation. Preview and admitted transitions live in the
-task's accessible actions menu.
-Non-interactive operational records may remain unassigned and open in Task
-details. No client title-matches or fabricates conversation history.
+open that exact conversation. Show context and admitted transitions live in
+the task's accessible actions menu.
+Non-interactive operational records may remain unassigned and open their
+context in the shared inspector. No client title-matches or fabricates
+conversation history.
 
 The shell has a 40px native title bar, a 224px default resizable sidebar,
 primary surface, and resizable docked inspector, hidden by default and
@@ -98,12 +96,10 @@ protects the client from duplicate requests but does not replace server-side
 idempotency or durable control-plane recovery.
 
 Grouped product pages use `useCockpitResource` for one abortable request per
-scope. Agents also admits a bounded, versioned seven-day local topology
-snapshot so a valid last-known directory can remain visible offline. A refresh
-failure keeps the last decoded snapshot marked stale; malformed cache and an
-empty decoded collection remain distinct from a failed request. `useTaskV2` provides the same
-identity-scoped loading, stale, error, and reconnect behavior for canonical
-ARP v2 tasks.
+scope. A refresh failure keeps the last decoded snapshot marked stale;
+malformed cache and an empty decoded collection remain distinct from a failed
+request. `useTaskV2` provides the same identity-scoped loading, stale, error,
+and reconnect behavior for canonical ARP v2 tasks.
 
 ## API and effect boundary
 

@@ -311,7 +311,7 @@ describe("ResizableReviewLayout", () => {
   });
 
   test("preserves review state and focus across the compact threshold", () => {
-    setViewport(1099, 900);
+    setViewport(839, 900);
     render(
       <ResizableReviewLayout
         conversation={<textarea aria-label="Conversation draft" defaultValue="conversation" />}
@@ -323,12 +323,12 @@ describe("ResizableReviewLayout", () => {
     fireEvent.change(reviewDraft, { target: { value: "Keep this unsent note" } });
     reviewDraft.focus();
 
-    act(() => setViewport(1101, 900));
+    act(() => setViewport(841, 900));
     expect(screen.getByTestId("review-split")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Inline review draft" })).toHaveValue("Keep this unsent note");
     expect(document.activeElement).toBe(reviewDraft);
 
-    act(() => setViewport(1099, 900));
+    act(() => setViewport(839, 900));
     expect(screen.getByTestId("review-tabs")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Inline review draft" })).toBe(reviewDraft);
     expect(reviewDraft).toHaveValue("Keep this unsent note");

@@ -6,14 +6,15 @@ The Board is a desktop projection of canonical V2 task state. It is not a second
 
 - Click, press Return, or press Space on a task title to open an interactive
   task's exact conversation.
-- Use the task actions menu to preview the task without leaving the Board.
-- The same menu exposes details and admitted task actions with roving keyboard
-  focus.
+- Use Show context in the task actions menu to inspect a task without leaving
+  the Board.
+- The same menu exposes admitted task actions with roving keyboard focus.
 
 Interactive tasks require a real session and thread. The control plane stores
 the V1 and V2 projections under one task ID and exposes their conversation
 context in the V2 snapshot. Operational records without a conversation remain
-unassigned and open in Task details; the client never invents a thread.
+unassigned and open in the shared inspector; the client never invents a
+thread.
 
 ## Columns
 
@@ -49,12 +50,12 @@ The first slice does not invent data the current V2 API does not expose:
 - Mission names are derived from stable mission IDs because there is no mission-list read endpoint.
 - Ready work is ordered by attention and last canonical update because there is no priority mutation contract.
 - Cards do not claim an agent, provider, child-agent graph, or attempt progress because those observables are not part of the task snapshot.
-- View details opens the grouped Task details surface: Overview, Evidence, and Usage.
+- Show context opens the same inspector used by an active conversation.
 - Structured interventions remain proposal-only until their kernel executor is available. The board uses admitted task transitions instead.
 
 ## Verification
 
 Focused behavior is covered by `apps/desktop/tests/mission-board.test.tsx`,
 including status projection, evidence-gated Done, attention derivation,
-responsive layout, filtered-empty copy, native row controls, action-menu
-preview, drag transition concurrency, and live reconciliation.
+responsive layout, filtered-empty copy, native row controls, shared task
+context, drag transition concurrency, and live reconciliation.
