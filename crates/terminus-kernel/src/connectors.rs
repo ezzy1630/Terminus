@@ -330,13 +330,12 @@ mod tests {
             }
         }
         // The credential-free public paths gain nothing from them.
-        for id in ["web-fetch"] {
-            let descriptor = descriptor_for(id);
-            assert!(
-                descriptor.allowed_request_headers.is_empty(),
-                "{id} must not widen its caller-header allowlist"
-            );
-        }
+        let id = "web-fetch";
+        let descriptor = descriptor_for(id);
+        assert!(
+            descriptor.allowed_request_headers.is_empty(),
+            "{id} must not widen its caller-header allowlist"
+        );
     }
 
     #[test]
