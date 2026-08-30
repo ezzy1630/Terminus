@@ -36,7 +36,7 @@ use crate::error::KernelAssemblyError;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use terminus_artifacts::ArtifactStore;
@@ -2564,15 +2564,8 @@ impl ProcessService {
         };
         #[cfg(unix)]
         let mut egress_broker: Option<ActiveEgressBroker> = None;
-        let mut sandbox_command = command.clone();
-        sandbox_command.cwd.relative_path = resolved_cwd.host.host_path.display().to_string();
-        // Build the sandbox wrapper from the effective spawn, not the
-        // caller's original command. Policy constraints may have removed
-        // disallowed environment variables from `spawn.env`; passing the
-        // original `public_env` here would reintroduce those values through
-        // bwrap's `--setenv` arguments while the outer process remains
-        // correctly filtered.
-        sandbox_command.public_env = spawn.env.clone();
+        let mut sandbox_command =
+            command_for_sandbox_wrapper(&command, &resolved_cwd.host.host_path, &spawn);
         let sandbox_wrapper = if matches!(
             profile.network,
             terminus_sandbox::NetworkAccess::ProxyRequired
@@ -2867,6 +2860,23 @@ impl ProcessService {
     }
 }
 
+/// Build the command consumed by a sandbox backend from the effective spawn.
+///
+/// Policy constraints are applied to `spawn` before this point. Copying the
+/// caller's original environment into a wrapper would bypass those
+/// constraints because Linux serializes `CommandSpec::public_env` as bwrap
+/// `--setenv` arguments.
+fn command_for_sandbox_wrapper(
+    command: &CommandSpec,
+    resolved_cwd: &Path,
+    spawn: &terminus_process::NormalizedSpawn,
+) -> CommandSpec {
+    let mut sandbox_command = command.clone();
+    sandbox_command.cwd.relative_path = resolved_cwd.display().to_string();
+    sandbox_command.public_env = spawn.env.clone();
+    sandbox_command
+}
+
 fn authorize_process_task(request_task_id: &str, owner_task_id: &str) -> KernelResult<()> {
     if request_task_id == "*" || request_task_id == owner_task_id {
         return Ok(());
@@ -2881,8 +2891,15 @@ fn authorize_process_task(request_task_id: &str, owner_task_id: &str) -> KernelR
 
 #[cfg(test)]
 mod process_authorization_tests {
-    use super::authorize_process_task;
-    use terminus_kernel_protocol::ErrorCode;
+    use super::{
+        authorize_process_task, command_for_sandbox_wrapper, materialize_workspace_profile,
+        resolve_sandbox_profile, ProcessService,
+    };
+    use std::path::Path;
+    use terminus_kernel_protocol::{CommandSpec, ErrorCode, WorkspacePath};
+    use terminus_policy::Constraint;
+    use terminus_process::NormalizedSpawn;
+    use terminus_sandbox_linux::LinuxSandboxBackend;
 
     #[test]
     fn process_control_rejects_cross_task_owner() {
@@ -2890,6 +2907,59 @@ mod process_authorization_tests {
         assert!(authorize_process_task("*", "task-a").is_ok());
         let error = authorize_process_task("task-b", "task-a").unwrap_err();
         assert_eq!(error.code(), ErrorCode::PermissionDenied);
+    }
+
+    #[test]
+    fn sandbox_wrapper_serializes_only_the_constrained_environment() {
+        let command = CommandSpec {
+            program: "pnpm".to_string(),
+            args: vec!["test".to_string()],
+            cwd: WorkspacePath::new("workspace", "."),
+            public_env: [
+                (
+                    "AWS_SECRET_ACCESS_KEY".to_string(),
+                    "must-not-enter-sandbox".to_string(),
+                ),
+                ("PUBLIC_VAR".to_string(), "survives".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let spawn = NormalizedSpawn::from_spec(&command).expect("command normalizes");
+        let constrained = ProcessService::apply_constraints(
+            spawn,
+            &Constraint {
+                disallowed_env: vec!["AWS_SECRET_ACCESS_KEY".to_string()],
+                ..Default::default()
+            },
+        );
+        let sandbox_command =
+            command_for_sandbox_wrapper(&command, Path::new("/workspace"), &constrained);
+
+        assert_eq!(
+            sandbox_command
+                .public_env
+                .get("PUBLIC_VAR")
+                .map(String::as_str),
+            Some("survives")
+        );
+        assert!(!sandbox_command
+            .public_env
+            .contains_key("AWS_SECRET_ACCESS_KEY"));
+
+        let profile = materialize_workspace_profile(
+            resolve_sandbox_profile("default-restrictive").expect("profile resolves"),
+            Path::new("/workspace"),
+        );
+        let wrapper_argv = LinuxSandboxBackend::build_bwrap_argv(&sandbox_command, &profile);
+        assert!(wrapper_argv.windows(3).any(|window| {
+            window[0] == "--setenv" && window[1] == "PUBLIC_VAR" && window[2] == "survives"
+        }));
+        assert!(!wrapper_argv
+            .iter()
+            .any(|argument| argument == "AWS_SECRET_ACCESS_KEY"
+                || argument == "must-not-enter-sandbox"));
     }
 }
 

@@ -746,8 +746,10 @@ async fn process_start_strips_disallowed_env_from_token_constraints() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn enforced_workspace_development_wrapper_uses_constrained_environment() {
-    let (_dir, kernel) = make_kernel();
+async fn enforced_default_wrapper_uses_constrained_environment() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (dir, kernel) = make_kernel();
     if !matches!(
         kernel.sandboxes.enforcement_report().status,
         terminus_sandbox::EnforcementStatus::Enforced
@@ -757,10 +759,32 @@ async fn enforced_workspace_development_wrapper_uses_constrained_environment() {
         return;
     }
 
-    let token = mint_workspace_development_exec_token(&kernel.token_issuer);
+    // Use a workspace-local executable named after an allowed constrained
+    // runner. This avoids depending on a host-installed pnpm while still
+    // exercising policy evaluation, wrapper construction, and execution
+    // inside the enforced namespace.
+    let runner = dir.path().join("pnpm");
+    std::fs::write(
+        &runner,
+        concat!(
+            "#!/bin/sh\n",
+            "printf 'PUBLIC_VAR=%s\\n' \"${PUBLIC_VAR-}\"\n",
+            "if [ \"${AWS_SECRET_ACCESS_KEY+x}\" = x ]; then\n",
+            "  printf 'AWS_SECRET_ACCESS_KEY_PRESENT\\n'\n",
+            "fi\n",
+        ),
+    )
+    .expect("write constrained environment fixture");
+    let mut permissions = std::fs::metadata(&runner)
+        .expect("read fixture metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&runner, permissions).expect("make fixture executable");
+
+    let token = mint_admin_token(&kernel.token_issuer);
     let ctx = ctx_with_token(&token);
     let command = CommandSpec {
-        program: "/usr/bin/env".to_string(),
+        program: runner.display().to_string(),
         cwd: WorkspacePath::new("ws-1", "."),
         public_env: [
             (
@@ -793,11 +817,11 @@ async fn enforced_workspace_development_wrapper_uses_constrained_environment() {
             _ => {}
         }
     }
-    let stdout = String::from_utf8(stdout).expect("env output is UTF-8");
+    let stdout = String::from_utf8(stdout).expect("fixture output is UTF-8");
     assert!(stdout.lines().any(|line| line == "PUBLIC_VAR=survives"));
     assert!(!stdout
         .lines()
-        .any(|line| line.starts_with("AWS_SECRET_ACCESS_KEY=")));
+        .any(|line| line == "AWS_SECRET_ACCESS_KEY_PRESENT"));
 }
 
 // ---------- Fix #7: audit.persist_authorized before effects ----------
