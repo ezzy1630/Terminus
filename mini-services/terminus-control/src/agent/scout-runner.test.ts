@@ -39,18 +39,24 @@ describe("R10 scout loop", () => {
       JSON.stringify({ claims: ["auth check lives in guard.ts:42"], files: [{ path: "src/guard.ts", role: "core" }], open_questions: [] }),
       "```",
     ].join("\n");
-    const calls: string[][] = [];
+    const calls: import("./delegation-runner.js").DelegationTranscriptMessage[][] = [];
     let step = 0;
     const result = await runScoutLoop({
       objective: "Find the login guard",
+      authority: {
+        allowedTools: ["grep"],
+        allowedReadPaths: ["**"],
+        allowedWritePaths: [],
+        deniedEffects: ["write", "execute"],
+      },
       callProvider: async (transcript) => {
-        calls.push(transcript.map((m) => m.role));
+        calls.push([...transcript]);
         if (step === 0) {
           step += 1;
           return {
             renderedBody: {},
             projectedText: "let me grep",
-            toolCalls: [{ toolName: "grep", argumentsJson: JSON.stringify({ pattern: "guard" }) }],
+            toolCalls: [{ toolName: "grep", providerCallId: "call_provider_42", argumentsJson: JSON.stringify({ pattern: "guard" }) }],
           };
         }
         return { renderedBody: {}, projectedText: finalJson, toolCalls: [] };
@@ -64,8 +70,14 @@ describe("R10 scout loop", () => {
     expect(result.claims).toEqual(["auth check lives in guard.ts:42"]);
     // First message is the scout system prompt as user role; results fed back after assistant.
     // First request carries the scout system prompt AND the objective.
-    expect(calls[0]).toEqual(["user", "user"]);
-    expect(calls[1]?.length).toBe(4); // + assistant transcript + tool results
+    expect(calls[0]?.map((message) => message.role)).toEqual(["user", "user"]);
+    expect(calls[1]?.length).toBe(5); // + assistant text, canonical call, and tool result
+    expect(calls[1]?.[3]?.role).toBe("assistant");
+    expect(calls[1]?.[3]?.providerCallId).toBe("call_provider_42");
+    expect(calls[1]?.[4]?.role).toBe("tool");
+    expect(calls[1]?.[3]?.text).toContain('"protocol":"terminus.tool-call.v1"');
+    expect(calls[1]?.[4]?.text).toContain('"protocol":"terminus.tool-result.v1"');
+    expect(calls[1]?.[4]?.text).toContain('"provider_call_id":"call_provider_42"');
   });
 
   test("write/exec tools fail closed inside the loop", async () => {

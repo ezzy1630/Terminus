@@ -28,13 +28,14 @@ import {
   type DelegationIdentity,
   type DelegationLoopCallInput,
   type DelegationStepAccountant,
+  type DelegationTranscriptMessage,
   type DelegationUsage,
 } from "./delegation-runner.js";
 
 export const SCOUT_SYSTEM_PROMPT = [
   "You are a Terminus read-only scout. Fresh context; you see only the objective below.",
   "Mission: locate the exact code relevant to the objective so a separate implementer does not have to search.",
-  "Tools: read (line-numbered, returns file_sha256), grep (rg), glob. No writing, no exec.",
+  "Tools: read (line-numbered, returns file_sha256). No writing, no exec, no shell-backed search.",
   "Work in a few targeted searches; then reply with your FINAL answer as a fenced json block:",
   "```json",
   '{"claims": ["..."], "files": [{"path": "...", "role": "..."}], "open_questions": ["..."]}',
@@ -146,7 +147,7 @@ export interface ScoutLoopDeps {
   readonly objective: string;
   /** Build one provider request for [system, messages] and execute it. */
   readonly callProvider: (
-    messages: readonly { readonly role: "user" | "assistant"; readonly text: string }[],
+    messages: readonly DelegationTranscriptMessage[],
     context: Omit<DelegationLoopCallInput, "messages">,
   ) => Promise<ScoutStepInput>;
   /** Dispatch one read-only tool through the kernel boundary. */
@@ -158,6 +159,9 @@ export interface ScoutLoopDeps {
   readonly authority?: DelegationAuthority;
   readonly budget?: Partial<DelegationBudgetLimits>;
   readonly accountant?: DelegationStepAccountant;
+  readonly deadlineAtMs?: number;
+  /** Reject model-authored files/claims that lack observed evidence. */
+  readonly validateFinalResult?: (result: ScoutParsedResult) => string | null;
 }
 
 /**
@@ -172,7 +176,9 @@ export async function runScoutLoop(deps: ScoutLoopDeps): Promise<ScoutParsedResu
     attemptIdForStep: (step: number) => `legacy-scout:${stableObjectiveId(deps.objective)}:attempt:${step}`,
   };
   const authority = deps.authority ?? {
-    allowedTools: SCOUT_TOOL_NAMES,
+    // The safe default is read-only file inspection. Shell-backed grep/glob
+    // must never become ambient just because a caller omitted authority.
+    allowedTools: ["read"],
     allowedReadPaths: ["**"],
     allowedWritePaths: [],
     deniedEffects: ["write", "execute", "external_effect"],
@@ -194,6 +200,7 @@ export async function runScoutLoop(deps: ScoutLoopDeps): Promise<ScoutParsedResu
     acceptsFinalResponse: (text) => parseScoutResult(text) !== null,
     ...(deps.accountant === undefined ? {} : { accountant: deps.accountant }),
     ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+    ...(deps.deadlineAtMs === undefined ? {} : { deadlineAtMs: deps.deadlineAtMs }),
     callProvider: async ({ messages, ...context }) => {
       const response = await deps.callProvider(messages, context);
       return {
@@ -201,6 +208,11 @@ export async function runScoutLoop(deps: ScoutLoopDeps): Promise<ScoutParsedResu
         toolCalls: response.toolCalls,
         ...(response.usage === undefined ? {} : { usage: response.usage }),
       };
+    },
+    validateFinalResult: (text) => {
+      const parsed = parseScoutResult(text);
+      if (parsed === null) return "invalid or empty scout result";
+      return deps.validateFinalResult?.(parsed) ?? null;
     },
     executeTool: async ({ toolName, argumentsJson, step, attemptId, callIndex, signal }) => deps.executeTool({
       toolName,

@@ -81,6 +81,23 @@ export interface DelegationStepAccountant {
 export interface DelegationProviderToolCall {
   readonly toolName: string;
   readonly argumentsJson: string;
+  /** Provider-native id. Legacy test doubles may omit it; the runner then
+   * assigns a deterministic id before the call can enter the transcript. */
+  readonly providerCallId?: string;
+}
+
+export type DelegationMessageRole = "user" | "assistant" | "tool";
+
+/**
+ * Canonical child transcript. Tool calls/results retain their provider ids so
+ * provider renderers can reconstruct the provider's required wire roles after
+ * a restart; a flattened "tool output" user message is not equivalent.
+ */
+export interface DelegationTranscriptMessage {
+  readonly role: DelegationMessageRole;
+  readonly text: string;
+  readonly providerCallId?: string;
+  readonly toolName?: string;
 }
 
 export interface DelegationProviderStep {
@@ -92,7 +109,7 @@ export interface DelegationProviderStep {
 export interface DelegationLoopCallInput {
   readonly step: number;
   readonly attemptId: string;
-  readonly messages: readonly { readonly role: "user" | "assistant"; readonly text: string }[];
+  readonly messages: readonly DelegationTranscriptMessage[];
   readonly authority: DelegationAuthority;
   readonly signal: AbortSignal | null;
 }
@@ -110,7 +127,11 @@ export interface DelegationLoopDeps {
   readonly identity: DelegationIdentity;
   readonly authority: DelegationAuthority;
   readonly budget: DelegationBudgetLimits;
-  readonly initialMessages?: readonly { readonly role: "user" | "assistant"; readonly text: string }[];
+  readonly initialMessages?: readonly DelegationTranscriptMessage[];
+  /** A monotonic wall-clock deadline for this child, when one is available. */
+  readonly deadlineAtMs?: number;
+  /** Validate model-authored claims against observed durable evidence. */
+  readonly validateFinalResult?: (text: string) => string | null;
   /** A child-specific parser may reject a no-tool response and request one more bounded turn. */
   readonly acceptsFinalResponse?: (text: string) => boolean;
   readonly callProvider: (input: DelegationLoopCallInput) => Promise<DelegationProviderStep>;
@@ -153,6 +174,12 @@ function validateBudget(budget: DelegationBudgetLimits): void {
     ["maxCostMicros", budget.maxCostMicros],
   ] as const) {
     if (value !== null && value < 0n) throw new Error(`delegation ${label} must be non-negative`);
+  }
+}
+
+function validateDeadline(deadlineAtMs: number | undefined): void {
+  if (deadlineAtMs !== undefined && (!Number.isFinite(deadlineAtMs) || deadlineAtMs <= 0)) {
+    throw new Error("delegation deadline must be a positive finite timestamp");
   }
 }
 
@@ -210,12 +237,31 @@ async function withCancellation<T>(
   if (signal === null || signal === undefined) return work;
   if (signal.aborted) throw abortError();
   let onAbort: (() => void) | null = null;
+  let aborted = false;
   const cancellation = new Promise<never>((_, reject) => {
-    onAbort = () => reject(abortError());
+    onAbort = () => {
+      aborted = true;
+      reject(abortError());
+    };
     signal.addEventListener("abort", onAbort, { once: true });
   });
+  const completion = Promise.resolve(work);
   try {
-    return await Promise.race([work, cancellation]);
+    return await Promise.race([completion, cancellation]);
+  } catch (error) {
+    // A cancellation race must not settle the durable attempt while the
+    // provider/tool still runs. Wait for the underlying promise to finish;
+    // the caller still receives cancellation, but paid work has a terminal
+    // observation before its receipt is written.
+    if (aborted) {
+      try {
+        await completion;
+      } catch {
+        // The cancellation is the authoritative outcome for this attempt.
+      }
+      throw abortError();
+    }
+    throw error;
   } finally {
     if (onAbort !== null) signal.removeEventListener("abort", onAbort);
   }
@@ -231,8 +277,51 @@ function validateProviderStep(step: DelegationProviderStep): void {
       || typeof call.argumentsJson !== "string") {
       throw new Error("delegation provider returned an invalid tool call");
     }
+    if (call.providerCallId !== undefined && call.providerCallId.trim() === "") {
+      throw new Error("delegation provider returned a blank tool call id");
+    }
   }
 }
+
+function pathAllowed(path: string, allowedPaths: readonly string[]): boolean {
+  if (allowedPaths.includes("**")) return true;
+  return allowedPaths.some((pattern) => {
+    if (pattern === path) return true;
+    if (pattern.endsWith("/**")) return path.startsWith(pattern.slice(0, -3));
+    return false;
+  });
+}
+
+function toolPath(toolName: string, argumentsJson: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(argumentsJson);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    const path = (parsed as Record<string, unknown>).path;
+    return typeof path === "string" ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+function canonicalToolCall(call: DelegationProviderToolCall, providerCallId: string): string {
+  return JSON.stringify({
+    protocol: "terminus.tool-call.v1",
+    provider_call_id: providerCallId,
+    tool_name: call.toolName,
+    arguments: JSON.parse(call.argumentsJson) as unknown,
+  });
+}
+
+function canonicalToolResult(providerCallId: string, toolName: string, resultText: string): string {
+  return JSON.stringify({
+    protocol: "terminus.tool-result.v1",
+    provider_call_id: providerCallId,
+    tool_name: toolName,
+    result: resultText,
+  });
+}
+
+const DELEGATION_TOOL_RESULT_MAX_CHARS = 48_000;
 
 function toolIsAllowed(authority: DelegationAuthority, name: string): name is ScoutToolName {
   return (SCOUT_TOOL_NAMES as readonly string[]).includes(name)
@@ -263,6 +352,7 @@ export async function runBoundedDelegation(
   requireId("delegation parentTaskId", deps.identity.parentTaskId);
   requireId("delegation delegationId", deps.identity.delegationId);
   validateBudget(deps.budget);
+  validateDeadline(deps.deadlineAtMs);
   if (deps.authority.allowedWritePaths.length !== 0) {
     throw new Error("delegation authority may not contain write paths");
   }
@@ -270,7 +360,8 @@ export async function runBoundedDelegation(
   const accountant = deps.accountant ?? new InMemoryDelegationStepAccountant();
   const receipts: DelegationStepReceipt[] = [];
   let totalUsage = ZERO_DELEGATION_USAGE;
-  const transcript: { role: "user" | "assistant"; text: string }[] = [...(deps.initialMessages ?? [])];
+  const transcript: DelegationTranscriptMessage[] = [...(deps.initialMessages ?? [])];
+  const seenProviderCallIds = new Set<string>();
   let finalText: string | null = null;
   let failureReason: string | null = null;
   let status: DelegationLoopStatus = "budget_exhausted";
@@ -279,6 +370,16 @@ export async function runBoundedDelegation(
     if (isAborted(deps.signal)) {
       status = "cancelled";
       failureReason = "delegation cancelled";
+      break;
+    }
+    if (deps.budget.maxTokens === 0n || deps.budget.maxCostMicros === 0n) {
+      status = "budget_exhausted";
+      failureReason = "delegation has no provider budget remaining";
+      break;
+    }
+    if (deps.deadlineAtMs !== undefined && Date.now() >= deps.deadlineAtMs) {
+      status = "budget_exhausted";
+      failureReason = "delegation deadline exhausted";
       break;
     }
     const attemptId = requireId(
@@ -318,16 +419,35 @@ export async function runBoundedDelegation(
       validateProviderStep(response);
       stepUsage = usageFrom(response.usage);
       totalUsage = addUsage(totalUsage, stepUsage);
-      if ((deps.budget.maxTokens !== null && budgetTokens(totalUsage) > deps.budget.maxTokens)
+      if (deps.deadlineAtMs !== undefined && Date.now() >= deps.deadlineAtMs) {
+        stepStatus = "failed";
+        stepFailure = "delegation deadline exhausted";
+        status = "budget_exhausted";
+      } else if ((deps.budget.maxTokens !== null && budgetTokens(totalUsage) > deps.budget.maxTokens)
         || (deps.budget.maxCostMicros !== null && totalUsage.costMicros > deps.budget.maxCostMicros)) {
         stepStatus = "failed";
         stepFailure = "delegation budget exhausted";
         status = "budget_exhausted";
       } else {
-        const invalidTool = response.toolCalls.find((call) => !toolIsAllowed(deps.authority, call.toolName));
-        if (invalidTool !== undefined) {
+        const duplicateProviderCall = response.toolCalls
+          .map((call, callIndex) => call.providerCallId ?? `${attemptId}:tool:${callIndex}`)
+          .find((providerCallId, index, ids) => ids.indexOf(providerCallId) !== index
+            || seenProviderCallIds.has(providerCallId));
+        const invalidTool = response.toolCalls.find((call) => {
+          if (!toolIsAllowed(deps.authority, call.toolName)) return true;
+          const path = toolPath(call.toolName, call.argumentsJson);
+          return path !== null && !pathAllowed(path, deps.authority.allowedReadPaths);
+        });
+        if (duplicateProviderCall !== undefined) {
           stepStatus = "failed";
-          stepFailure = `tool '${invalidTool.toolName}' is not available to this delegation`;
+          stepFailure = `duplicate provider tool call id: ${duplicateProviderCall}`;
+          status = "failed";
+        } else if (invalidTool !== undefined) {
+          stepStatus = "failed";
+          const path = toolPath(invalidTool.toolName, invalidTool.argumentsJson);
+          stepFailure = path !== null && !pathAllowed(path, deps.authority.allowedReadPaths)
+            ? `tool '${invalidTool.toolName}' path '${path}' is outside delegation read scope`
+            : `tool '${invalidTool.toolName}' is not available to this delegation`;
           status = "failed";
         } else if (response.toolCalls.length === 0) {
           if (deps.acceptsFinalResponse?.(response.projectedText) === false) {
@@ -338,8 +458,19 @@ export async function runBoundedDelegation(
             status = "completed";
           }
         } else {
-          const resultParts: string[] = [];
+          if (response.projectedText.length > 0) {
+            transcript.push({ role: "assistant", text: response.projectedText });
+          }
           for (const [callIndex, call] of response.toolCalls.entries()) {
+            const providerCallId = call.providerCallId ?? `${attemptId}:tool:${callIndex}`;
+            seenProviderCallIds.add(providerCallId);
+            const callTranscript = canonicalToolCall(call, providerCallId);
+            transcript.push({
+              role: "assistant",
+              text: callTranscript,
+              providerCallId,
+              toolName: call.toolName,
+            });
             const toolName = call.toolName as ScoutToolName;
             try {
               const result = await withCancellation(deps.executeTool({
@@ -350,14 +481,30 @@ export async function runBoundedDelegation(
                 callIndex,
                 signal: deps.signal ?? null,
               }), deps.signal);
-              resultParts.push(result.resultText.slice(0, 48_000));
+              if (result.resultText.length > DELEGATION_TOOL_RESULT_MAX_CHARS) {
+                throw new Error(
+                  `tool '${toolName}' result exceeded ${DELEGATION_TOOL_RESULT_MAX_CHARS} characters; provide an artifact or continuation`,
+                );
+              }
+              const resultTranscript = canonicalToolResult(providerCallId, toolName, result.resultText);
+              transcript.push({
+                role: "tool",
+                text: resultTranscript,
+                providerCallId,
+                toolName,
+              });
             } catch (error) {
               if (isAborted(deps.signal)) throw abortError();
-              resultParts.push(`tool ${toolName} failed: ${errorText(error)}`);
+              const failure = `tool ${toolName} failed: ${errorText(error)}`;
+              const resultTranscript = canonicalToolResult(providerCallId, toolName, failure);
+              transcript.push({
+                role: "tool",
+                text: resultTranscript,
+                providerCallId,
+                toolName,
+              });
             }
           }
-          transcript.push({ role: "assistant", text: response.projectedText });
-          transcript.push({ role: "user", text: resultParts.join("\n\n").slice(0, 48_000) });
         }
       }
     } catch (error) {
@@ -388,6 +535,14 @@ export async function runBoundedDelegation(
   if (status === "completed" && finalText === null) {
     status = "failed";
     failureReason = "delegation completed without a final response";
+  }
+  if (status === "completed" && finalText !== null && deps.validateFinalResult !== undefined) {
+    const validationFailure = deps.validateFinalResult(finalText);
+    if (validationFailure !== null) {
+      status = "failed";
+      failureReason = validationFailure;
+      finalText = null;
+    }
   }
   return { status, finalText, usage: totalUsage, stepReceipts: receipts, failureReason };
 }

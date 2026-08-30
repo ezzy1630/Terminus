@@ -88,6 +88,29 @@ describe("bounded delegation runner", () => {
     expect(accountant.settlements[0]?.status).toBe("failed");
   });
 
+  test("rejects duplicate provider tool call ids", async () => {
+    let executions = 0;
+    const result = await runBoundedDelegation({
+      identity: identity(),
+      authority,
+      budget: { maxSteps: 1, maxTokens: null, maxCostMicros: null },
+      callProvider: async () => ({
+        projectedText: "two reads",
+        toolCalls: [
+          { toolName: "read", providerCallId: "same", argumentsJson: "{}" },
+          { toolName: "read", providerCallId: "same", argumentsJson: "{}" },
+        ],
+      }),
+      executeTool: async () => {
+        executions += 1;
+        return { ok: true, resultText: "must not run" };
+      },
+    });
+    expect(result.status).toBe("failed");
+    expect(result.failureReason).toContain("duplicate provider tool call id");
+    expect(executions).toBe(0);
+  });
+
   test("propagates cancellation and settles the in-flight provider attempt", async () => {
     const controller = new AbortController();
     const accountant = new InMemoryDelegationStepAccountant();
@@ -121,5 +144,112 @@ describe("bounded delegation runner", () => {
     });
     expect(result.status).toBe("failed");
     expect(result.failureReason).toContain("duplicate");
+  });
+
+  test("does not dispatch a provider call with zero remaining budget", async () => {
+    let calls = 0;
+    const accountant = new InMemoryDelegationStepAccountant();
+    const result = await runBoundedDelegation({
+      identity: identity(),
+      authority,
+      budget: { maxSteps: 2, maxTokens: 0n, maxCostMicros: 10n },
+      accountant,
+      callProvider: async () => {
+        calls += 1;
+        return { projectedText: "must not run", toolCalls: [] };
+      },
+      executeTool: async () => ({ ok: true, resultText: "unused" }),
+    });
+    expect(result.status).toBe("budget_exhausted");
+    expect(result.failureReason).toContain("no provider budget");
+    expect(calls).toBe(0);
+    expect(accountant.starts).toHaveLength(0);
+  });
+
+  test("does not dispatch after the child deadline", async () => {
+    let calls = 0;
+    const result = await runBoundedDelegation({
+      identity: identity(),
+      authority,
+      budget: { maxSteps: 2, maxTokens: 10n, maxCostMicros: null },
+      deadlineAtMs: Date.now() - 1,
+      callProvider: async () => {
+        calls += 1;
+        return { projectedText: "must not run", toolCalls: [] };
+      },
+      executeTool: async () => ({ ok: true, resultText: "unused" }),
+    });
+    expect(result.status).toBe("budget_exhausted");
+    expect(result.failureReason).toContain("deadline");
+    expect(calls).toBe(0);
+  });
+
+  test("rejects a read outside the delegated path scope before execution", async () => {
+    let executions = 0;
+    const result = await runBoundedDelegation({
+      identity: identity(),
+      authority,
+      budget: { maxSteps: 1, maxTokens: null, maxCostMicros: null },
+      callProvider: async () => ({
+        projectedText: "read secret",
+        toolCalls: [{ toolName: "read", argumentsJson: JSON.stringify({ path: "secrets.env" }) }],
+      }),
+      executeTool: async () => {
+        executions += 1;
+        return { ok: true, resultText: "must not run" };
+      },
+    });
+    expect(result.status).toBe("failed");
+    expect(result.failureReason).toContain("outside delegation read scope");
+    expect(executions).toBe(0);
+  });
+
+  test("fails the tool result explicitly instead of slicing it silently", async () => {
+    let providerCalls = 0;
+    let followup = "";
+    const result = await runBoundedDelegation({
+      identity: identity(),
+      authority,
+      budget: { maxSteps: 2, maxTokens: null, maxCostMicros: null },
+      callProvider: async ({ messages }) => {
+        providerCalls += 1;
+        if (providerCalls === 1) return { projectedText: "read", toolCalls: [{ toolName: "read", argumentsJson: "{}" }] };
+        followup = messages.at(-1)?.text ?? "";
+        return { projectedText: "```json\n{\"claims\":[\"done\"],\"files\":[],\"open_questions\":[]}\n```", toolCalls: [] };
+      },
+      executeTool: async () => ({ ok: true, resultText: "x".repeat(48_001) }),
+    });
+    expect(result.status).toBe("completed");
+    expect(followup).toContain("exceeded 48000 characters");
+    expect(followup).not.toContain("x".repeat(1_000));
+  });
+
+  test("waits for an in-flight provider before settling cancellation", async () => {
+    const controller = new AbortController();
+    const accountant = new InMemoryDelegationStepAccountant();
+    let settled = false;
+    let providerStarted: (() => void) | null = null;
+    const started = new Promise<void>((resolve) => { providerStarted = resolve; });
+    const resultPromise = runBoundedDelegation({
+      identity: identity(),
+      authority,
+      budget: { maxSteps: 1, maxTokens: null, maxCostMicros: null },
+      accountant,
+      signal: controller.signal,
+      callProvider: async () => {
+        providerStarted?.();
+        return new Promise((resolve) => setTimeout(() => {
+          settled = true;
+          resolve({ projectedText: "late", toolCalls: [] });
+        }, 20));
+      },
+      executeTool: async () => ({ ok: true, resultText: "unused" }),
+    });
+    await started;
+    controller.abort();
+    const result = await resultPromise;
+    expect(result.status).toBe("cancelled");
+    expect(settled).toBe(true);
+    expect(accountant.settlements[0]?.status).toBe("cancelled");
   });
 });

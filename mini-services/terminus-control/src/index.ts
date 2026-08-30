@@ -456,7 +456,6 @@ function concatUint8(chunks: readonly Uint8Array[]): Uint8Array {
 }
 import {
   ScoutUtilityLedger,
-  resolveScoutEnabled,
   runScoutLoop,
   type ScoutParsedResult,
 } from "./agent/scout-runner.js";
@@ -16670,12 +16669,12 @@ async function agentLoop(turnId: string): Promise<void> {
     // opt-in, and a utility ledger disables the scout after repeated
     // zero-yield runs. Result becomes a bounded scout_brief world-state
     // section.
-    const scoutEnabledForTurn = !resumeVerificationFromState
-      && toolsEnabled
-      && selectedProfile.subagentsEnabled
-      && resolveScoutEnabled(process.env.TERMINUS_ENABLE_SCOUT)
-      && configuredMaxSteps > 1
-      && SCOUT_LEDGER.shouldRun();
+    // Intentionally disabled until the child tool path is wired through the
+    // normal durable tool-settlement boundary. The previous opt-in path called
+    // process.Start for grep/glob, inherited workspace-influenced PATH, and
+    // wrote no tool-call/result evidence. Adaptive delegation remains a typed
+    // runner, but no paid live child can execute an unsafe or unaudited path.
+    const scoutEnabledForTurn = false;
     let scoutFiles: readonly { path: string; role: string }[] = [];
     let scoutUsage: DelegationUsage = ZERO_DELEGATION_USAGE;
     let scoutProviderStepCount = 0;
@@ -16713,7 +16712,7 @@ async function agentLoop(turnId: string): Promise<void> {
           const scoutDelegationId = `scout-delegation:${turnId}`;
           const scoutObjective = `Objective: ${contract.objective}\nRead paths in scope: ${contract.allowedScope.readPaths.slice(0, 64).join(", ") || "(entire workspace)"}`;
           const scoutAuthority = {
-            allowedTools: ["read", "grep", "glob"],
+            allowedTools: ["read"],
             allowedReadPaths: leastWorkspaceScope(contract.allowedScope.readPaths),
             allowedWritePaths: [],
             deniedEffects: ["write", "external_network", "secret_access", "scope_expansion"],
@@ -16852,7 +16851,7 @@ async function agentLoop(turnId: string): Promise<void> {
             pathPatterns: [],
           };
           const now = new Date().toISOString() as never;
-          const fragment = (fragmentId: string, kind: "authority" | "recent_episode", text: string, hash: string): ContextFragment => ({
+          const fragment = (fragmentId: string, kind: "authority" | "recent_episode" | "tool_result" | "user_attachment", text: string, hash: string): ContextFragment => ({
             id: fragmentId,
             kind,
             contentRef: {
@@ -16885,12 +16884,11 @@ async function agentLoop(turnId: string): Promise<void> {
             workspaceId: workspace.id,
             operationClasses: [
               CapabilityOperationProto.CAPABILITY_OPERATION_READ,
-              CapabilityOperationProto.CAPABILITY_OPERATION_EXEC,
-              CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
             ],
             workspacePaths: leastWorkspaceScope(contract.allowedScope.readPaths),
           });
           const scoutTracker = new ObservedSourceTracker();
+          const scoutObservedPaths = new Set<string>();
           const result = await runScoutLoop({
             objective: scoutObjective,
             identity: {
@@ -16902,10 +16900,35 @@ async function agentLoop(turnId: string): Promise<void> {
             budget: scoutBudget,
             accountant: scoutAccountant,
             signal: abortController.signal,
+            validateFinalResult: (scout) => {
+              const unobserved = scout.files.find((file) => !scoutObservedPaths.has(file.path));
+              if (unobserved !== undefined) {
+                return `scout cited unobserved file '${unobserved.path}'`;
+              }
+              const invalidReference = scout.evidenceRefs.find(
+                (reference) => !reference.startsWith("artifact://") && !reference.startsWith("workspace://"),
+              );
+              return invalidReference === undefined
+                ? null
+                : `scout returned an unsupported evidence reference '${invalidReference}'`;
+            },
             callProvider: async (messages, { step, attemptId }) => {
-              const fragments = messages.map((message, index) =>
-                fragment(`scout:${turnId}:${index}`, index === 0 ? "authority" : "recent_episode", message.text, computeContentHash(message.text)));
-              const scoutToolSchemas = STANDALONE_TOOL_SCHEMAS.filter((tool) => tool.id === "read" || tool.id === "grep" || tool.id === "glob");
+              const fragments = messages.map((message, index) => {
+                const kind = index === 0
+                  ? "authority"
+                  : message.role === "assistant"
+                    ? "recent_episode"
+                    : message.role === "tool"
+                      ? "tool_result"
+                      : "user_attachment";
+                return fragment(
+                  `scout:${turnId}:${index}`,
+                  kind,
+                  message.text,
+                  computeContentHash(message.text),
+                );
+              });
+              const scoutToolSchemas = STANDALONE_TOOL_SCHEMAS.filter((tool) => tool.id === "read");
               const rendered = await scoutRenderer.render({
                 provider: selectedProvider,
                 model: selectedModel,
@@ -17143,6 +17166,11 @@ async function agentLoop(turnId: string): Promise<void> {
                 observedSources: scoutTracker,
                 signal: abortController.signal,
               });
+              if (toolName === "read" && result.status === "success" && parsedArguments !== null
+                && typeof parsedArguments === "object" && !Array.isArray(parsedArguments)
+                && typeof (parsedArguments as Record<string, unknown>).path === "string") {
+                scoutObservedPaths.add((parsedArguments as Record<string, unknown>).path as string);
+              }
               const visible = projectModelVisibleResult(result);
               return { ok: result.status === "success" || result.status === "partial", resultText: JSON.stringify(visible) };
             },
