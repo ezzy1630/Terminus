@@ -427,10 +427,19 @@ def _result_for_process(
     ).hexdigest()
     receipt = {
         "receipt_id": f"cli:{receipt_digest}",
+        "receipt_kind": "diagnostic",
         "provider": provider,
         "model": model,
+        # A CLI's stdout is a diagnostic observation, not a provider receipt.
+        # It has no trustworthy request identity, endpoint/account binding, or
+        # provider-owned response artifact at this boundary.
+        "request_id": None,
+        "endpoint_hash": _safe_hash(request.provider_endpoint),
+        "account_hash": request.provider_account_hash or _safe_hash(request.provider_account_id),
         "artifact_ref": process.stdout.artifact_ref,
-        "verified": process.returncode == 0 and not process.timed_out,
+        "response_artifact_ref": None,
+        "verified": False,
+        "verification_reason": "synthetic_cli_output",
         "usage": totals,
         "exit_code": process.returncode,
     }
@@ -462,6 +471,13 @@ def _result_for_process(
         independently_verified=False,
         provider_receipts=[receipt],
     )
+
+
+def _safe_hash(value: str | None) -> str:
+    """Hash optional routing metadata without persisting the raw value."""
+    if not value:
+        return "missing"
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 @dataclass

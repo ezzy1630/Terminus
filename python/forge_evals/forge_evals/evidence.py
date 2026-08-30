@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from enum import StrEnum
+from typing import Any
 
 __all__ = [
     "RELEASE_HOLDOUT_PARTITIONS",
@@ -44,8 +45,38 @@ def has_complete_provider_receipt(receipt: object) -> bool:
 
     if not isinstance(receipt, Mapping):
         return False
-    required = ("receipt_id", "provider", "model", "artifact_ref")
+    # CLI output and other synthetic observations deliberately use a separate
+    # diagnostic receipt kind.  A successful process exit or a stdout hash is
+    # not proof that an authenticated provider request happened.
+    if receipt.get("receipt_kind") != "provider":
+        return False
+    required = (
+        "receipt_id",
+        "provider",
+        "model",
+        "request_id",
+        "endpoint_hash",
+        "account_hash",
+        "response_artifact_ref",
+    )
     if any(not isinstance(receipt.get(key), str) or not receipt[key].strip() for key in required):
         return False
+    if any(not _safe_hash(receipt[key]) for key in ("endpoint_hash", "account_hash")):
+        return False
+    response_artifact = receipt["response_artifact_ref"]
+    if not response_artifact.startswith("artifact://sha256/"):
+        return False
+    usage = receipt.get("usage")
+    if not isinstance(usage, Mapping):
+        return False
+    # Usage telemetry must contain numeric input/output counts.  Zero is valid
+    # for a failed or cached turn; omission is not.
+    if any(not isinstance(usage.get(key), (int, float)) for key in ("input", "output")):
+        return False
     verified = receipt.get("verified")
-    return isinstance(verified, bool)
+    return verified is True
+
+
+def _safe_hash(value: Any) -> bool:
+    """Accept only a content hash, never a raw endpoint or account value."""
+    return isinstance(value, str) and value.startswith("sha256:") and len(value) == 71

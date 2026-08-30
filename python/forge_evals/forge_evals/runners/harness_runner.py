@@ -176,6 +176,11 @@ class RunRequest:
     # Both are None for fixture harnesses, which have nothing to steer.
     reasoning_effort: str | None = None
     provider_account_id: str | None = None
+    # Raw routing values are accepted only at the runner boundary.  Records
+    # carry the corresponding hashes below, never these values.
+    provider_endpoint: str | None = None
+    provider_endpoint_hash: str | None = None
+    provider_account_hash: str | None = None
     # An instruction supplied by the caller rather than by a `prompt.md` in the
     # task package. External harnesses (Harbor) hand the instruction over as a
     # string, and writing it into the workspace would pollute the very tree the
@@ -250,6 +255,10 @@ def build_evaluation_identity(
         budget_hash=_stable_hash(request.budgets.to_dict()),
         tool_schema_hash=request.tool_schema_hash or "missing:tool_schema_hash",
         instruction_hash=request.instruction_hash or "missing:instruction_hash",
+        provider_endpoint_hash=request.provider_endpoint_hash
+        or (_stable_hash(request.provider_endpoint) if request.provider_endpoint else "missing:provider_endpoint_hash"),
+        provider_account_hash=request.provider_account_hash
+        or (_stable_hash(request.provider_account_id) if request.provider_account_id else "missing:provider_account_hash"),
     )
 
 

@@ -103,3 +103,22 @@ def test_invoke_external_evaluator_reports_failure(monkeypatch: pytest.MonkeyPat
 def test_live_run_error_type_exists() -> None:
     with pytest.raises(LiveRunError):
         raise LiveRunError("precondition")
+
+
+def test_task_workspace_reports_path_separation_not_verified_isolation(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "setup.sh").write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\necho input > input.txt\nmkdir hidden\necho secret > hidden/test.txt\n",
+        encoding="utf-8",
+    )
+    (package / "setup.sh").chmod(0o755)
+    workspace = tmp_path / "workspace"
+
+    from forge_evals.runners.live_runner import materialize_task_workspace
+
+    materialized = materialize_task_workspace(package, workspace)
+    assets = materialized.to_dict()["grader_assets"]
+    assert assets["path_separated"] is True
+    assert assets["access_isolation_verified"] is False
+    assert assets["isolated"] is False
