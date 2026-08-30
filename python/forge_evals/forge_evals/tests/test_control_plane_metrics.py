@@ -141,6 +141,54 @@ def test_a_task_wide_ledger_that_exceeds_the_turn_wins() -> None:
     assert metrics.tokens_input_fresh == 9_000
 
 
+def test_provider_receipts_sum_original_and_repair_attempts() -> None:
+    """Run accounting covers every attempt, including automatic repairs."""
+    receipts = [
+        {
+            "receipt_id": "original-1",
+            "turn_id": "turn-original",
+            "attempt_number": 1,
+            "usage": _route_usage(input_tokens=1_000, cached=0, output=100, reasoning=10),
+            "provider_reported_cost_micros": "2_000",
+            "finish_reason": "tool_use",
+        },
+        {
+            "receipt_id": "repair-1",
+            "turn_id": "turn-repair",
+            "attempt_number": 1,
+            "usage": _route_usage(input_tokens=2_000, cached=1_500, output=200, reasoning=20),
+            "provider_reported_cost_micros": "3_000",
+            "finish_reason": "stop",
+        },
+    ]
+
+    metrics = reconcile_metrics(events=[], provider_receipts=receipts)
+
+    assert metrics.token_source == "provider_receipts"
+    assert metrics.tokens_input_fresh == 1_500
+    assert metrics.tokens_input_cached == 1_500
+    assert metrics.tokens_output == 300
+    assert metrics.tokens_reasoning == 30
+    assert metrics.provider_cost_micros == 5_000
+    assert [attempt.attempt_index for attempt in metrics.attempts] == [1, 2]
+
+
+def test_missing_provider_receipt_cost_is_not_reported_as_zero() -> None:
+    """A receipt set with unknown prices must keep provider cost unknown."""
+    receipts = [
+        {
+            "receipt_id": "original-1",
+            "usage": _route_usage(input_tokens=1_000, output=100),
+            "provider_reported_cost_micros": None,
+            "finish_reason": "stop",
+        },
+    ]
+
+    metrics = reconcile_metrics(events=[], provider_receipts=receipts)
+
+    assert metrics.provider_cost_micros is None
+
+
 def test_routes_that_404_fall_back_to_the_event_log() -> None:
     """A control plane older than Phase 0-F2 answers neither turn route."""
     events = [

@@ -358,6 +358,7 @@ def test_run_harbor_tasks_records_harbors_verdict(
     assert record.grader_results[0].grader_id.endswith("terminal-bench/terminal-bench-2@2.0")
     assert record.environment_digest.startswith("sha256:")
     assert record.model_capability_snapshot["harbor_version"] == "harbor 0.22.0"
+    assert record.end is not None
     assert record.end > record.start
 
     # The pinned dataset and the Terminus agent actually reached Harbor.

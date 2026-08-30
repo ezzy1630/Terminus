@@ -267,6 +267,19 @@ def test_trajectory_recorder_records_events() -> None:
     assert e1.ts <= e2.ts <= e3.ts
 
 
+def test_trajectory_recorder_preserves_unknown_events_without_calling_them_errors() -> None:
+    """Future/internal events are explicit evidence, not uncaught failures."""
+    rec = TrajectoryRecorder(run_id="r1")
+
+    event = rec.record("harness.new_internal_event", {"value": 1})
+
+    assert event.event_type == "event.unknown"
+    assert event.payload == {
+        "value": 1,
+        "unknown_event_type": "harness.new_internal_event",
+    }
+
+
 def test_trajectory_recorder_finalizes_and_blocks_after() -> None:
     """finalize() closes the recorder; further record() raises."""
     rec = TrajectoryRecorder(run_id="r1")

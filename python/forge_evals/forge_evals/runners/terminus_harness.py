@@ -221,6 +221,7 @@ class TerminusHarness:
             turn_attempts=turn_attempts,
             budget_ledger=task_detail.get("budget_ledger"),
             repair_metrics=task_detail.get("repair_metrics"),
+            provider_receipts=provider_receipts,
         )
         # The criteria the run was actually graded against, read back from the
         # contract rather than re-read from the fixture on disk: the two can

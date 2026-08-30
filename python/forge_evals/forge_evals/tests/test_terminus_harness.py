@@ -601,6 +601,13 @@ def test_live_run_includes_original_and_ordered_repair_turn_receipts(
         "turn-repair-2",
     ]
     assert receipt_artifact["status"] == "complete"
+    # Usage accounting follows the complete receipt projection, not only the
+    # original turn's attempts route.
+    assert result.metrics["token_source"] == "provider_receipts"
+    assert result.metrics["tokens_input_fresh"] == 320
+    assert result.metrics["tokens_input_cached"] == 80
+    assert result.metrics["tokens_output"] == 120
+    assert result.metrics["tokens_reasoning"] == 20
 
 
 @pytest.mark.parametrize(

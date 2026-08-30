@@ -392,6 +392,56 @@ def _legacy_attempts_from_events(events: Sequence[Mapping[str, Any]]) -> list[At
     return attempts
 
 
+def _attempts_from_receipts(receipts: Sequence[Mapping[str, Any]]) -> list[AttemptUsage]:
+    """Decode the complete run receipt projection into ordered attempts.
+
+    Unlike a turn's attempts route, receipts can span the original turn and
+    automatic repair turns.  The ordinal here is therefore run-wide.  The
+    receipt artifact retains each turn id and the server's per-turn ordinal;
+    this sequence only gives the run record a stable order for aggregate
+    accounting and cache analysis.
+    """
+    attempts: list[AttemptUsage] = []
+    for receipt in receipts:
+        usage = _usage_from_payload(receipt)
+        if usage is None:
+            continue
+        attempts.append(
+            AttemptUsage(
+                attempt_index=len(attempts) + 1,
+                provider_attempt_id=(
+                    receipt.get("receipt_id")
+                    if isinstance(receipt.get("receipt_id"), str)
+                    else None
+                ),
+                input_tokens=_as_int(usage.get("input_tokens")),
+                cached_input_tokens=_as_int(usage.get("cached_input_tokens")),
+                cache_write_tokens=_as_int(usage.get("cache_write_tokens")),
+                output_tokens=_as_int(usage.get("output_tokens")),
+                reasoning_tokens=_as_int(usage.get("reasoning_tokens")),
+                tool_schema_tokens=_as_int(usage.get("tool_schema_tokens")),
+                latency_ms=_as_opt_int(usage.get("latency_ms")),
+                time_to_first_token_ms=_as_opt_int(usage.get("time_to_first_token_ms")),
+                finish_reason=(
+                    receipt.get("finish_reason")
+                    if isinstance(receipt.get("finish_reason"), str)
+                    else None
+                ),
+            )
+        )
+    return attempts
+
+
+def _receipt_cost_micros(receipts: Sequence[Mapping[str, Any]]) -> int | None:
+    """Return the total provider-reported cost when every receipt reports it."""
+    if not receipts:
+        return None
+    costs = [_as_opt_int(receipt.get("provider_reported_cost_micros")) for receipt in receipts]
+    if any(cost is None for cost in costs):
+        return None
+    return sum(cost for cost in costs if cost is not None)
+
+
 def _verdict_from_events(events: Sequence[Mapping[str, Any]]) -> VerificationVerdict:
     """Reconcile the harness's own verification conclusion."""
     plan_ids: list[str] = []
@@ -511,21 +561,28 @@ def reconcile_metrics(
     turn_attempts: Any = None,
     budget_ledger: Mapping[str, Any] | None = None,
     repair_metrics: Mapping[str, Any] | None = None,
+    provider_receipts: Iterable[Mapping[str, Any]] | None = None,
 ) -> TurnMetrics:
     """Assemble every first-class run metric from control-plane evidence.
 
     ``turn`` is ``GET /v1/turns/:id`` and ``turn_attempts`` is
     ``GET /v1/turns/:id/attempts``; pass ``None`` for either when the route
     404s and the event-log fallback should run instead. ``budget_ledger`` and
-    ``repair_metrics`` come from ``GET /v1/tasks/:id``. ``events`` is the
-    task's semantic event log in any of its three renderings (transcript rows,
+    ``repair_metrics`` come from ``GET /v1/tasks/:id``. ``provider_receipts``
+    is the complete original-plus-repair receipt projection when available;
+    it takes precedence for aggregate usage and cost. ``events`` is the task's
+    semantic event log in any of its three renderings (transcript rows,
     ``/v1/events`` SSE payloads, ``/v2/events`` envelopes) and remains the only
     source of tool lifecycle, repair and ``verification.*`` evidence.
     """
     event_list = [e for e in events if isinstance(e, Mapping)]
     turn_row = turn if isinstance(turn, Mapping) else None
-    attempts = attempts_from_route(turn_attempts)
-    attempt_source = "provider_attempts_route"
+    receipt_list = [r for r in (provider_receipts or ()) if isinstance(r, Mapping)]
+    attempts = _attempts_from_receipts(receipt_list)
+    attempt_source = "provider_receipts"
+    if not attempts:
+        attempts = attempts_from_route(turn_attempts)
+        attempt_source = "provider_attempts_route"
     if not attempts:
         attempts = _legacy_attempts_from_events(event_list)
         attempt_source = "provider_attempt_events"
@@ -623,8 +680,14 @@ def reconcile_metrics(
 
     # Null cost is not zero cost: a turn whose price the provider never
     # reported did not run for free.
-    provider_cost_micros = _as_opt_int(turn_row.get("cost_micros")) if turn_row else None
-    if provider_cost_micros is None and "cost_micros" in ledger:
+    provider_cost_micros = _receipt_cost_micros(receipt_list)
+    if provider_cost_micros is None:
+        provider_cost_micros = _as_opt_int(turn_row.get("cost_micros")) if turn_row else None
+    if "cost_micros" in ledger and (
+        provider_cost_micros is None or ledger["cost_micros"] > provider_cost_micros
+    ):
+        # The task ledger is cumulative and can include a repair whose receipt
+        # route was unavailable.  Prefer it only when it proves a wider run.
         provider_cost_micros = ledger["cost_micros"]
 
     return TurnMetrics(
