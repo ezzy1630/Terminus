@@ -1056,6 +1056,10 @@ async fn dispatch_https(
     let connect_timeout = timeouts.idle.unwrap_or(timeouts.total);
     let client = reqwest::Client::builder()
         .https_only(true)
+        // Redirect targets are a new destination and therefore require a
+        // fresh grant/egress authorization. Never let reqwest follow one
+        // behind the broker's pinned host and address set.
+        .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .connect_timeout(connect_timeout)
         .timeout(timeouts.total)

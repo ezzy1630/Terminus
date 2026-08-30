@@ -12,15 +12,6 @@ use std::time::Duration;
 use terminus_connector::{AuthStyle, ConnectorDescriptor, ConnectorTimeouts, HostPolicy};
 use terminus_egress::{DestinationPolicy, EgressPolicy};
 
-/// Wire identity for `chatgpt-codex` is a CALLER decision, not a kernel one.
-///
-/// Live probing (Research/ChatGPT_OAuth_And_Codex_Wire_2026-08-28 §1) showed
-/// `version` is a minimum-version GATE, not an identity claim: a stale value
-/// returns `400 "requires a newer version of Codex"`, while omitting it is
-/// ungated. `originator` and `User-Agent` change nothing on the measured
-/// account and are a per-account ToS decision. So the kernel injects no
-/// identity headers here; the control plane sets `originator` and
-/// `user-agent` per request through the caller-header allowlist below.
 /// Total budget for a model call, including a full streamed completion.
 const MODEL_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
 /// Maximum gap between response bytes (and the wait for the response head).
@@ -50,11 +41,6 @@ const MODEL_RESPONSE_HEADERS: &[&str] = &[
     "request-id",
     "x-request-id",
 ];
-/// Additionally surfaced for the ChatGPT Codex backend: usage windows,
-/// credits, plan type, sticky turn routing (`x-codex-turn-state`, echoed on
-/// the next request of the same turn), and the model-catalog ETag.
-const CODEX_RESPONSE_HEADERS: &[&str] = &["x-codex-*", "x-models-*"];
-
 /// Hosts admitted regardless of which connectors are registered. `opencode.ai`
 /// is the historical gateway floor; `models.dev` is the model-catalog source
 /// fetched through `web-fetch`. Kept as Rust constants so no shipped
@@ -64,41 +50,6 @@ pub const EGRESS_FLOOR_HOSTS: &[&str] = &["opencode.ai", "models.dev"];
 const GATEWAY_HOST: &str = "opencode.ai";
 const OPENAI_API_HOST: &str = "api.openai.com";
 const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
-const CHATGPT_HOST: &str = "chatgpt.com";
-const OPENAI_AUTH_HOST: &str = "auth.openai.com";
-
-/// Request headers the caller may set on `chatgpt-codex`.
-///
-/// This is the "Recommended Terminus header set" from
-/// `Research/ChatGPT_OAuth_And_Codex_Wire_2026-08-28.md` §1.2 — the
-/// Codex-identical subset minus pure telemetry — with `Authorization`
-/// removed because the broker injects it, and `Content-Type`/`Accept`
-/// removed because they are globally admitted.
-///
-/// `originator` and `user-agent` are admitted (not injected) because
-/// presenting as the Codex CLI versus as Terminus is a per-account product
-/// decision. `session-id` is stable per Terminus session, `thread-id` per
-/// thread, and `x-client-request-id` carries the same value as `thread-id`.
-/// `x-codex-turn-state` is echoed back from an earlier response in the same
-/// turn and omitted on the first request.
-///
-/// Deliberately NOT admitted, per the same research pass:
-/// - `version` — a minimum-version GATE, not an identity claim. A stale
-///   value hard-400s ("requires a newer version of Codex") on every backend
-///   rollout; omitting it is ungated.
-/// - `x-oai-attestation` — device attestation Terminus cannot produce.
-/// - `x-codex-routing-hint`, `x-openai-internal-*` — internal routing and
-///   residency controls with no defined contract for third parties.
-const CHATGPT_CODEX_REQUEST_HEADERS: &[&str] = &[
-    "chatgpt-account-id",
-    "session-id",
-    "thread-id",
-    "x-codex-turn-state",
-    "x-client-request-id",
-    "accept-encoding",
-    "originator",
-    "user-agent",
-];
 
 /// Feature-flag headers the caller may set on any model connector.
 ///
@@ -114,26 +65,13 @@ const MODEL_BETA_REQUEST_HEADERS: &[&str] = &["anthropic-beta", "openai-beta"];
 ///
 /// The Zen gateway serves its anonymous free tier only to clients whose
 /// `user-agent` names OpenCode; under the broker's default agent every
-/// anonymous dispatch came back `429 FreeUsageLimitError`. As with
-/// `chatgpt-codex`, the wire identity is the caller's decision, so the header
-/// is admitted rather than injected here.
+/// anonymous dispatch came back `429 FreeUsageLimitError`. The wire identity
+/// is the caller's decision, so the header is admitted rather than injected.
 const OPENCODE_GATEWAY_REQUEST_HEADERS: &[&str] = &["user-agent"];
-
-/// OAuth token calls are small and synchronous; they get a tight bound.
-const OAUTH_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
-const OAUTH_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn model_response_headers() -> Vec<String> {
     MODEL_RESPONSE_HEADERS
         .iter()
-        .map(|h| (*h).to_string())
-        .collect()
-}
-
-fn codex_response_headers() -> Vec<String> {
-    MODEL_RESPONSE_HEADERS
-        .iter()
-        .chain(CODEX_RESPONSE_HEADERS.iter())
         .map(|h| (*h).to_string())
         .collect()
 }
@@ -196,38 +134,6 @@ pub fn default_connector_registry() -> Vec<(&'static str, ConnectorDescriptor)> 
                 AuthStyle::NamedHeader("x-api-key".into()),
                 HostPolicy::Fixed(vec![ANTHROPIC_API_HOST.to_string()]),
             ),
-        ),
-        (
-            // Borrows a ChatGPT subscription through the Codex backend. No
-            // broker-injected identity: the caller chooses `originator` and
-            // `user-agent` per account, and `version` is deliberately never
-            // sent (it gates on a minimum CLI version).
-            "chatgpt-codex",
-            model_descriptor(
-                AuthStyle::Bearer,
-                HostPolicy::Fixed(vec![CHATGPT_HOST.to_string()]),
-            )
-            .with_allowed_request_headers(
-                CHATGPT_CODEX_REQUEST_HEADERS
-                    .iter()
-                    .copied()
-                    .chain(MODEL_BETA_REQUEST_HEADERS.iter().copied()),
-            )
-            .with_response_headers(codex_response_headers()),
-        ),
-        (
-            // Token exchange, refresh, and revocation for the ChatGPT
-            // credential. Bearer-less: the refresh/authorization material is
-            // in the request body, so there is nothing for the broker to
-            // inject. Runs in the kernel so the control plane never talks to
-            // `auth.openai.com` directly.
-            "openai-oauth",
-            ConnectorDescriptor::new(AuthStyle::None)
-                .with_timeouts(ConnectorTimeouts::with_idle(
-                    OAUTH_TOTAL_TIMEOUT,
-                    OAUTH_IDLE_TIMEOUT,
-                ))
-                .with_hosts(HostPolicy::Fixed(vec![OPENAI_AUTH_HOST.to_string()])),
         ),
         (
             // OpenAI-wire-compatible third-party endpoints. The host comes
@@ -300,12 +206,7 @@ mod tests {
                 "floor host {host} denied"
             );
         }
-        for host in [
-            CHATGPT_HOST,
-            OPENAI_AUTH_HOST,
-            OPENAI_API_HOST,
-            ANTHROPIC_API_HOST,
-        ] {
+        for host in [OPENAI_API_HOST, ANTHROPIC_API_HOST] {
             assert!(
                 policy.matches(host, 443, "https"),
                 "{host} must be admitted"
@@ -320,12 +221,14 @@ mod tests {
             "evil.example.com",
             "integrate.api.nvidia.com",
             "api.openai.com.evil.com",
+            "chatgpt.com",
+            "auth.openai.com",
         ] {
             assert!(!policy.matches(host, 443, "https"), "{host} must be denied");
         }
         // Non-443 and plaintext stay denied for admitted hosts too.
-        assert!(!policy.matches(CHATGPT_HOST, 80, "https"));
-        assert!(!policy.matches(CHATGPT_HOST, 443, "http"));
+        assert!(!policy.matches(OPENAI_API_HOST, 80, "https"));
+        assert!(!policy.matches(OPENAI_API_HOST, 443, "http"));
     }
 
     #[test]
@@ -333,11 +236,7 @@ mod tests {
         for (id, descriptor) in default_connector_registry() {
             if !matches!(
                 id,
-                "openai-responses"
-                    | "openai-chat"
-                    | "anthropic-messages"
-                    | "chatgpt-codex"
-                    | "openai-compatible"
+                "openai-responses" | "openai-chat" | "anthropic-messages" | "openai-compatible"
             ) {
                 continue;
             }
@@ -378,30 +277,13 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_codex_injects_no_identity_headers() {
-        // The backend gates on `version`, and originator/User-Agent are a
-        // per-account decision: the kernel must inject none of them.
-        let codex = descriptor_for("chatgpt-codex");
-        assert!(
-            codex.static_headers.is_empty(),
-            "chatgpt-codex must not inject static headers, found {:?}",
-            codex.static_headers
-        );
-        assert!(
-            !codex.allowed_request_headers.iter().any(|h| h == "version"),
-            "`version` must never be sent: it is a minimum-version gate"
-        );
-        for header in ["originator", "user-agent"] {
-            assert!(
-                codex.allowed_request_headers.iter().any(|h| h == header),
-                "caller must be able to set {header}"
-            );
-        }
-        assert_eq!(
-            codex.fixed_hosts(),
-            [CHATGPT_HOST.to_string()],
-            "token endpoints belong to the openai-oauth connector"
-        );
+    fn retired_subscription_connectors_are_not_registered_or_admitted() {
+        let registry = default_connector_registry();
+        assert!(!registry.iter().any(|(id, _)| *id == "chatgpt-codex"));
+        assert!(!registry.iter().any(|(id, _)| *id == "openai-oauth"));
+        let policy = connector_egress_policy(&registry);
+        assert!(!policy.matches("chatgpt.com", 443, "https"));
+        assert!(!policy.matches("auth.openai.com", 443, "https"));
     }
 
     #[test]
@@ -426,101 +308,6 @@ mod tests {
     }
 
     #[test]
-    fn openai_oauth_is_bearerless_and_pinned_to_the_auth_host() {
-        let oauth = descriptor_for("openai-oauth");
-        assert!(matches!(oauth.auth, AuthStyle::None));
-        assert_eq!(oauth.fixed_hosts(), [OPENAI_AUTH_HOST.to_string()]);
-        assert!(oauth.static_headers.is_empty());
-        assert!(oauth.response_headers.is_empty());
-        // `content-type` is already globally admitted, so no extra caller
-        // headers are needed for the form-encoded and JSON token calls.
-        assert!(oauth.allowed_request_headers.is_empty());
-        assert_eq!(
-            oauth.timeouts,
-            Some(ConnectorTimeouts::with_idle(
-                OAUTH_TOTAL_TIMEOUT,
-                OAUTH_IDLE_TIMEOUT
-            ))
-        );
-    }
-
-    #[test]
-    fn caller_headers_and_response_allowlist_match_the_design() {
-        let codex = descriptor_for("chatgpt-codex");
-        for header in CHATGPT_CODEX_REQUEST_HEADERS {
-            assert!(
-                codex.allowed_request_headers.iter().any(|h| h == header),
-                "missing caller header {header}"
-            );
-        }
-        // Exactly what the control plane reads back for the Codex dialect:
-        // sticky turn routing, usage windows, the catalog ETag, retry
-        // pacing, rate limits, and request correlation.
-        for pattern in [
-            "x-codex-*",
-            "x-models-*",
-            "retry-after",
-            "x-ratelimit-*",
-            "anthropic-ratelimit-*",
-            "anthropic-organization-id",
-            "request-id",
-            "x-request-id",
-        ] {
-            assert!(
-                codex.response_headers.iter().any(|p| p == pattern),
-                "missing response header pattern {pattern}"
-            );
-        }
-        // Credential and session material is never surfaced, and no
-        // descriptor may opt into it.
-        for forbidden in ["authorization", "set-cookie", "*"] {
-            assert!(
-                !codex.response_headers.iter().any(|p| p == forbidden),
-                "response allowlist must not carry {forbidden}"
-            );
-        }
-    }
-
-    #[test]
-    fn chatgpt_codex_admits_the_recommended_wire_header_set_and_nothing_else() {
-        // Source of truth: Research/ChatGPT_OAuth_And_Codex_Wire_2026-08-28
-        // §1.2 "Recommended Terminus header set".
-        let codex = descriptor_for("chatgpt-codex");
-        for header in [
-            "chatgpt-account-id",
-            "originator",
-            "user-agent",
-            "session-id",
-            "thread-id",
-            "x-client-request-id",
-            "x-codex-turn-state",
-        ] {
-            assert!(
-                codex.allowed_request_headers.iter().any(|h| h == header),
-                "the Codex dialect cannot send {header}"
-            );
-        }
-        // `Authorization` is broker-injected, `Content-Type`/`Accept` are
-        // globally admitted: none of them belongs in the descriptor.
-        for header in [
-            // A minimum-version GATE, not an identity claim: a stale value
-            // hard-400s on every backend rollout.
-            "version",
-            // Device attestation Terminus cannot produce.
-            "x-oai-attestation",
-            "x-codex-routing-hint",
-            "x-openai-internal-codex-responses-lite",
-            "x-openai-internal-codex-residency",
-            "authorization",
-        ] {
-            assert!(
-                !codex.allowed_request_headers.iter().any(|h| h == header),
-                "{header} must never be caller-settable on chatgpt-codex"
-            );
-        }
-    }
-
-    #[test]
     fn every_model_connector_admits_the_provider_beta_headers() {
         // Without these the Claude 5 / GPT-5.6 feature flags are
         // unreachable: the broker rejected `anthropic-beta` and
@@ -529,7 +316,6 @@ mod tests {
             "openai-responses",
             "openai-chat",
             "anthropic-messages",
-            "chatgpt-codex",
             "openai-compatible",
         ] {
             let descriptor = descriptor_for(id);
@@ -544,7 +330,7 @@ mod tests {
             }
         }
         // The credential-free public paths gain nothing from them.
-        for id in ["openai-oauth", "web-fetch"] {
+        for id in ["web-fetch"] {
             let descriptor = descriptor_for(id);
             assert!(
                 descriptor.allowed_request_headers.is_empty(),
@@ -564,7 +350,6 @@ mod tests {
             "openai-responses",
             "openai-chat",
             "anthropic-messages",
-            "chatgpt-codex",
             "openai-compatible",
         ] {
             let descriptor = descriptor_for(id);

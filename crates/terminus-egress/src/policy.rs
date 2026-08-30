@@ -64,10 +64,18 @@ impl EgressPolicy {
     /// Returns true if the IP is private, loopback, or link-local.
     pub fn is_private_ip(ip: IpAddr) -> bool {
         match ip {
-            IpAddr::V4(v4) => {
-                v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
-            }
+            IpAddr::V4(v4) => is_private_ipv4(v4),
             IpAddr::V6(v6) => {
+                // IPv4-mapped IPv6 addresses can otherwise bypass the IPv4
+                // private-range checks when a resolver returns `::ffff:x.y.z.w`.
+                let segments = v6.segments();
+                let is_ipv4_mapped = segments[..5].iter().all(|segment| *segment == 0)
+                    && segments[5] == 0xffff;
+                if is_ipv4_mapped {
+                    if let Some(v4) = v6.to_ipv4() {
+                        return is_private_ipv4(v4);
+                    }
+                }
                 v6.is_loopback()
                     || v6.is_unspecified()
                     || {
@@ -83,6 +91,10 @@ impl EgressPolicy {
             }
         }
     }
+}
+
+fn is_private_ipv4(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
 }
 
 #[cfg(test)]
@@ -131,6 +143,15 @@ mod tests {
         assert!(EgressPolicy::is_private_ip("::1".parse().unwrap()));
         assert!(EgressPolicy::is_private_ip("fe80::1".parse().unwrap()));
         assert!(EgressPolicy::is_private_ip("fc00::1".parse().unwrap()));
+        assert!(EgressPolicy::is_private_ip(
+            "::ffff:127.0.0.1".parse().unwrap()
+        ));
+        assert!(EgressPolicy::is_private_ip(
+            "::ffff:10.0.0.1".parse().unwrap()
+        ));
+        assert!(EgressPolicy::is_private_ip(
+            "::ffff:169.254.169.254".parse().unwrap()
+        ));
         assert!(!EgressPolicy::is_private_ip("8.8.8.8".parse().unwrap()));
         assert!(!EgressPolicy::is_private_ip(
             "2606:4700:4700::1111".parse().unwrap()

@@ -101,8 +101,6 @@ fn default_egress_is_derived_from_the_registered_connectors() {
     for host in [
         "opencode.ai",
         "models.dev",
-        "chatgpt.com",
-        "auth.openai.com",
         "api.openai.com",
         "api.anthropic.com",
     ] {
@@ -220,7 +218,7 @@ fn a_fixed_host_connector_cannot_be_minted_for_a_foreign_destination() {
         .mint_grant(
             &ctx(&token),
             ACCOUNT_URI,
-            binding("chatgpt-codex", "evil.example.com", Vec::new()),
+            binding("openai-responses", "evil.example.com", Vec::new()),
             60,
             1,
         )
