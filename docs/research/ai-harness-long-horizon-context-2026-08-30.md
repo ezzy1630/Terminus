@@ -61,7 +61,7 @@ ADR-0023 remains correct: durable semantic memory stays off until paired held-ou
 
 ## Terminus change in this branch
 
-- `terminus.adaptive-compaction.v1` derives the trigger, retained tail, summary hard limit, and maximum source chunk from the live `ContextBudget`; unavailable budgets use an explicit fallback, while known zero capacity or degraded tokenizer calibration disables compaction. The degraded path retains the baseline history window rather than pretending unsafe estimates are provider limits.
+- `terminus.adaptive-compaction.v1` derives the trigger, retained tail, summary hard limit, and maximum source chunk from the live `ContextBudget` only when explicitly selected. Unavailable capacity or degraded tokenizer calibration falls back to the exact fixed-byte control path, including its loader, trigger, retained tail, and summary chunk ceiling, rather than treating unsafe estimates as provider limits.
 - CAS byte metadata is a no-read preflight only. Candidate sources are measured with the selected model's tokenizer estimator before pruning and every summary chunk is rechecked. Calibrated estimates carry observed-error headroom; degraded estimates use a conservative UTF-8 byte bound. Unavailable metadata forces materialization.
 - `ToolEpisodeService` accepts the live token window instead of hiding history behind its legacy fixed byte cap.
 - `terminus.compaction-summary.v2` stores the exact obligation subset and typed parent-summary lineage.
