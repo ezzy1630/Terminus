@@ -1490,6 +1490,35 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn long_running_spawn() -> NormalizedSpawn {
+        NormalizedSpawn {
+            program: "/bin/sleep".into(),
+            args: vec!["30".into()],
+            env: std::collections::BTreeMap::new(),
+            working_dir: None,
+            timeout_ms: 0,
+            shell: false,
+            allocate_pty: false,
+        }
+    }
+
+    #[cfg(windows)]
+    fn long_running_spawn() -> NormalizedSpawn {
+        let system_root = std::env::var_os("SystemRoot")
+            .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows"));
+        let ping = PathBuf::from(system_root).join("System32").join("ping.exe");
+        NormalizedSpawn {
+            program: ping.to_string_lossy().into_owned(),
+            args: vec!["-n".into(), "31".into(), "127.0.0.1".into()],
+            env: std::collections::BTreeMap::new(),
+            working_dir: None,
+            timeout_ms: 0,
+            shell: false,
+            allocate_pty: false,
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn signal_number_allows_the_documented_signals() {
         assert!(signal_number("SIGTERM").is_ok());
@@ -1667,16 +1696,7 @@ mod tests {
     async fn cancel_running_process() {
         let (_dir, store) = store();
         let mgr = ProcessManager::new(store);
-        let spawn = NormalizedSpawn {
-            program: "/bin/sleep".into(),
-            args: vec!["30".into()],
-            env: std::collections::BTreeMap::new(),
-            working_dir: None,
-            timeout_ms: 0,
-            shell: false,
-            allocate_pty: false,
-        };
-        let (outcome, _rx) = mgr.spawn(spawn).await.unwrap();
+        let (outcome, _rx) = mgr.spawn(long_running_spawn()).await.unwrap();
         // `spawn` returns as soon as the child is registered; the supervisor
         // task that publishes the running state may not have been polled yet.
         // Poll for the transition instead of asserting on a race.
@@ -1696,17 +1716,8 @@ mod tests {
     async fn task_owned_spawn_records_process_control_owner() {
         let (_dir, store) = store();
         let mgr = ProcessManager::new(store);
-        let spawn = NormalizedSpawn {
-            program: "/bin/sleep".into(),
-            args: vec!["30".into()],
-            env: std::collections::BTreeMap::new(),
-            working_dir: None,
-            timeout_ms: 0,
-            shell: false,
-            allocate_pty: false,
-        };
         let (outcome, _rx) = mgr
-            .spawn_for_task(spawn, "task-owner".to_string())
+            .spawn_for_task(long_running_spawn(), "task-owner".to_string())
             .await
             .unwrap();
         assert_eq!(
