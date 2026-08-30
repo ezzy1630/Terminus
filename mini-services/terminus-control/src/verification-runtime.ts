@@ -34,6 +34,7 @@ import {
   buildVerificationPlan,
   createStandardPredicateRegistry,
   deriveVerificationNodes,
+  parseNodeSpec,
   type PredicateCommandOutcome,
   type PredicateCommandRunner,
   type EvidenceArtifactWriter,
@@ -424,6 +425,23 @@ const RUNNER_KINDS_BY_PREDICATE: Readonly<Record<string, readonly VerificationRu
   e2e_test: ["e2e_test"],
 };
 
+/**
+ * Baseline probes are useful when the repository implements them, but they
+ * are not task acceptance predicates. If every required acceptance predicate
+ * is runnable, an unavailable baseline probe must stay visible as an optional
+ * skip instead of making an otherwise provable task impossible to admit.
+ *
+ * Risk-specific predicates are intentionally absent. A missing security,
+ * migration, compatibility, performance, or UI verifier remains required and
+ * therefore fails closed.
+ */
+const OPTIONAL_UNAVAILABLE_BASELINE_PREDICATES = new Set([
+  "file_parses",
+  "formatter_check",
+  "static_diagnostics",
+  "unit_test",
+]);
+
 type PredicateCommandResolution =
   | { readonly kind: "command"; readonly program: string; readonly args: readonly string[]; readonly source: string | null }
   | { readonly kind: "skipped"; readonly reason: string };
@@ -522,6 +540,55 @@ function parseCommand(command: string): { readonly program: string; readonly arg
   const [program, ...args] = tokens;
   if (program === undefined) throw new Error("verification command is empty");
   return { program, args };
+}
+
+function nodeCommandResolution(
+  node: VerificationNode,
+  catalog: VerificationRunnerCatalog,
+): PredicateCommandResolution | null {
+  const specification = parseNodeSpec(node.specification);
+  if (specification.predicateType === null) return null;
+  const command = specification.command ?? `terminus-predicate ${specification.predicateType}`;
+  const parsed = parseCommand(command);
+  return resolvePredicateCommand(
+    specification.predicateType,
+    parsed.program,
+    parsed.args,
+    catalog,
+  );
+}
+
+/**
+ * Select the applicable required baseline before the plan becomes immutable.
+ * This never turns a skipped result into a pass: only criterion-free baseline
+ * probes known to have no runner are made optional, and only when every
+ * mandatory acceptance predicate has a concrete command to execute.
+ */
+export function selectApplicableVerificationRequirements(
+  nodes: readonly VerificationNode[],
+  catalog: VerificationRunnerCatalog,
+): VerificationNode[] {
+  const requiredCriteria = nodes.filter(
+    (node) => node.required && node.acceptanceCriterionId !== null,
+  );
+  const allRequiredCriteriaRunnable = requiredCriteria.length > 0
+    && requiredCriteria.every(
+      (node) => nodeCommandResolution(node, catalog)?.kind === "command",
+    );
+  if (!allRequiredCriteriaRunnable) return [...nodes];
+
+  return nodes.map((node) => {
+    if (!node.required || node.acceptanceCriterionId !== null) return node;
+    const predicateType = parseNodeSpec(node.specification).predicateType;
+    if (
+      predicateType === null
+      || !OPTIONAL_UNAVAILABLE_BASELINE_PREDICATES.has(predicateType)
+      || nodeCommandResolution(node, catalog)?.kind !== "skipped"
+    ) {
+      return node;
+    }
+    return { ...node, required: false };
+  });
 }
 
 const DEFAULT_PREDICATE_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -1538,6 +1605,8 @@ export function defaultCriteriaNodes(
     readonly riskClass?: "low" | "normal" | "high" | "critical" | undefined;
     readonly mode?: VerificationPlanMode | undefined;
     readonly signals?: VerificationDerivationSignals | undefined;
+    /** Repository commands observed for this exact source revision. */
+    readonly runnerCatalog?: VerificationRunnerCatalog | undefined;
     /**
      * The task contract's wall-clock budget. Raises node timeouts above their
      * class floor (600 s tests / 120 s parse+lint); it can never lower one,
@@ -1555,5 +1624,43 @@ export function defaultCriteriaNodes(
     ...(options.timeoutSeconds === undefined ? {} : { timeoutSeconds: options.timeoutSeconds }),
     idSource: uuid,
   });
-  return [...derivation.nodes];
+  return selectApplicableVerificationRequirements(
+    derivation.nodes,
+    options.runnerCatalog ?? {},
+  );
+}
+
+export interface RequiredVerificationSummary {
+  readonly requiredNodeIds: readonly string[];
+  readonly runnableRequiredNodeIds: readonly string[];
+  readonly skippedRequiredNodeIds: readonly string[];
+  readonly noRunnableChecks: boolean;
+}
+
+/**
+ * Summarize required execution without conflating one explicit skip with an
+ * entirely non-runnable plan. A plan has no runnable checks only when every
+ * required node produced a justified `skipped` result.
+ */
+export function summarizeRequiredVerification(
+  nodes: readonly VerificationNode[],
+  results: readonly VerificationResult[],
+): RequiredVerificationSummary {
+  const resultByNodeId = new Map(results.map((result) => [result.nodeId, result]));
+  const requiredNodeIds = nodes.filter((node) => node.required).map((node) => node.id);
+  const skippedRequiredNodeIds = requiredNodeIds.filter(
+    (nodeId) => resultByNodeId.get(nodeId)?.status === "skipped",
+  );
+  const runnableRequiredNodeIds = requiredNodeIds.filter((nodeId) => {
+    const status = resultByNodeId.get(nodeId)?.status;
+    return status === "pass" || status === "fail" || status === "error";
+  });
+  return {
+    requiredNodeIds,
+    runnableRequiredNodeIds,
+    skippedRequiredNodeIds,
+    noRunnableChecks:
+      requiredNodeIds.length > 0
+      && skippedRequiredNodeIds.length === requiredNodeIds.length,
+  };
 }

@@ -220,6 +220,7 @@ import {
   createVerificationRuntime,
   createKernelPredicateRunner,
   defaultCriteriaNodes,
+  summarizeRequiredVerification,
   persistPlanToPrisma,
   persistResultsToPrisma,
   persistClaimEvidenceGraphToPrisma,
@@ -20331,6 +20332,7 @@ async function agentLoop(turnId: string): Promise<void> {
               generatedPaths: latestChangedFiles.filter((path) => /generated/i.test(path)),
               uiComputerUseAvailable: false,
             },
+            runnerCatalog: latestRepositorySignals.value?.verificationRunners ?? {},
           });
           const completionExpression = nodes
             .filter((node) => node.required)
@@ -20395,18 +20397,10 @@ async function agentLoop(turnId: string): Promise<void> {
         // repository has no check to run". The second is not a verification
         // failure and must not burn repair attempts.
         const resultByNodeId = new Map(evaluation.results.map((result) => [result.nodeId, result]));
-        const requiredNodeIds = plan.nodes.filter((node) => node.required).map((node) => node.id);
-        const skippedRequiredNodes = requiredNodeIds.filter(
-          (nodeId) => resultByNodeId.get(nodeId)?.status === "skipped",
-        );
-        const unsatisfiedRequiredNodes = requiredNodeIds.filter((nodeId) => {
-          const status = resultByNodeId.get(nodeId)?.status;
-          return status !== "pass" && status !== "skipped";
-        });
+        const requiredSummary = summarizeRequiredVerification(plan.nodes, evaluation.results);
+        const skippedRequiredNodes = requiredSummary.skippedRequiredNodeIds;
         const noRunnableChecks = !allPassed
-          && unsatisfiedRequiredNodes.length === 0
-          && skippedRequiredNodes.length > 0
-          && evaluation.blocked.length === 0;
+          && requiredSummary.noRunnableChecks;
         const resumedNodeIds = new Set(resumedResults.map((result) => result.nodeId));
         const newlyEvaluatedResults = evaluation.results.filter((result) => !resumedNodeIds.has(result.nodeId));
         const existingPlanCompletedEvent = await db.semanticEvent.findFirst({

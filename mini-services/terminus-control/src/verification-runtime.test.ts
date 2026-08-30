@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  createVerificationRuntime,
   defaultCriteriaNodes,
   isNotAGitWorkspace,
   buildDirtyGitWorkspaceRevision,
@@ -7,9 +8,47 @@ import {
   resolveKernelEnvironmentDigest,
   resolveWorkspaceRevision,
   resolvePredicateCommand,
+  summarizeRequiredVerification,
   WORKSPACE_TREE_HASH_SCRIPT,
 } from "./verification-runtime.js";
+import { parseNodeSpec } from "@terminus/verification";
+import type { VerificationNode, VerificationResult } from "@terminus/domain";
 import type { VerificationRunnerCatalog } from "./agent/repository-signals.js";
+
+const runnerCatalog = (
+  entries: Readonly<Record<string, { readonly command: string; readonly sourcePath: string }>>,
+): VerificationRunnerCatalog => Object.fromEntries(
+  Object.entries(entries).map(([kind, value]) => [kind, {
+    kind,
+    command: value.command,
+    sourcePath: value.sourcePath,
+    sourceVersion: "sha256:test",
+  }]),
+) as VerificationRunnerCatalog;
+
+function resultFor(
+  nodeId: string,
+  status: VerificationResult["status"],
+): VerificationResult {
+  return {
+    id: `00000000-0000-7000-8000-result-${nodeId}` as VerificationResult["id"],
+    planId: "00000000-0000-7000-8000-000000000001" as VerificationResult["planId"],
+    nodeId,
+    status,
+    startedAt: "2026-08-30T00:00:00.000Z" as VerificationResult["startedAt"],
+    completedAt: "2026-08-30T00:00:01.000Z" as VerificationResult["completedAt"],
+    sourceRevision: "rev-test",
+    environmentImageDigest: "env:test",
+    commandOrQuery: `check:${nodeId}`,
+    exitCode: status === "pass" ? 0 : null,
+    structuredObservations: {},
+    artifacts: [],
+    toolCallId: null,
+    verifierVersion: "1.0.0",
+    reasonIfSkipped: status === "skipped" ? "no matching runner" : null,
+    attempts: status === "skipped" ? 0 : 1,
+  };
+}
 
 describe("verification runtime plan nodes", () => {
   test("namespaces criterion nodes across repair plans", () => {
@@ -33,20 +72,148 @@ describe("verification runtime plan nodes", () => {
     expect(firstPlan[1]?.dependsOn).toEqual([firstPlan[0]?.id]);
     expect(firstPlan[2]?.dependsOn).toEqual([firstPlan[1]?.id]);
   });
+
+  test("an unavailable diagnostics baseline stays visible but cannot erase runnable acceptance evidence", async () => {
+    const criteria = [
+      {
+        id: "import-clean",
+        statement: "The module imports successfully",
+        verificationHint: "predicate: unit_test",
+        required: true,
+      },
+      {
+        id: "regression-tests",
+        statement: "The regression suite passes",
+        verificationHint: "predicate: unit_test",
+        required: true,
+      },
+    ];
+    const nodes = defaultCriteriaNodes(criteria, {
+      signals: {
+        changedFiles: ["src/module.py"],
+        nativeTestCommands: [
+          "python -m pytest tests/test_import.py",
+          "python -m pytest tests/test_regression.py",
+        ],
+      },
+      runnerCatalog: runnerCatalog({
+        test: { command: "python -m pytest", sourcePath: "pytest.ini" },
+      }),
+    });
+    const diagnostics = nodes.find(
+      (node) => parseNodeSpec(node.specification).predicateType === "static_diagnostics",
+    );
+
+    expect(diagnostics).toBeDefined();
+    expect(diagnostics?.acceptanceCriterionId).toBeNull();
+    expect(diagnostics?.required).toBe(false);
+    expect(nodes.filter((node) => node.acceptanceCriterionId !== null).every((node) => node.required)).toBe(true);
+    expect(nodes.filter((node) => parseNodeSpec(node.specification).command !== undefined)).toHaveLength(2);
+
+    const runtime = createVerificationRuntime({
+      async run(request) {
+        if (request.predicateType === "static_diagnostics") {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            status: "skipped",
+            reasonIfSkipped: "no typecheck or lint runner",
+          };
+        }
+        return { exitCode: 0, stdout: "pass", stderr: "" };
+      },
+    });
+    const plan = await runtime.lifecycle.createPlan({
+      taskContractId: "00000000-0000-7000-8000-000000000002" as VerificationResult["planId"],
+      taskContractVersion: 1,
+      sourceRevision: "rev-test",
+      criteria,
+      nodes,
+      completionExpression: nodes.filter((node) => node.required).map((node) => node.id).join(" && "),
+    });
+    const evaluation = await runtime.lifecycle.evaluate(plan.id, "rev-test", "env:test");
+
+    expect(evaluation.results.find((result) => result.nodeId === diagnostics?.id)?.status).toBe("skipped");
+    expect(evaluation.allRequiredPassed).toBe(true);
+    expect(evaluation.completionExpressionSatisfied).toBe(true);
+  });
+
+  test("no runnable acceptance predicate keeps every admission requirement fail-closed", () => {
+    const nodes = defaultCriteriaNodes([{
+      id: "tests",
+      statement: "The tests pass",
+      verificationHint: "predicate: unit_test",
+      required: true,
+    }], {
+      signals: { changedFiles: ["src/module.py"] },
+      runnerCatalog: {},
+    });
+
+    expect(nodes.every((node) => node.required)).toBe(true);
+  });
+
+  test("missing risk-specific verification is never relaxed by runnable baseline checks", () => {
+    const nodes = defaultCriteriaNodes([{
+      id: "tests",
+      statement: "The tests pass",
+      verificationHint: "predicate: unit_test",
+      required: true,
+    }], {
+      riskClass: "high",
+      signals: { changedFiles: ["src/module.py"] },
+      runnerCatalog: runnerCatalog({
+        test: { command: "python -m pytest", sourcePath: "pytest.ini" },
+      }),
+    });
+    const security = nodes.find(
+      (node) => parseNodeSpec(node.specification).predicateType === "security_scanner",
+    );
+
+    expect(security).toBeDefined();
+    expect(security?.required).toBe(true);
+  });
+});
+
+describe("verification settlement classification", () => {
+  const requiredNode = (id: string): VerificationNode => ({
+    id,
+    kind: "command",
+    required: true,
+    dependsOn: [],
+    specification: "{}",
+    timeout: 1_000,
+    retryPolicy: { maxAttempts: 1, backoffMs: 0, flakeIdentity: null },
+    acceptanceCriterionId: null,
+  });
+
+  test("one skipped check does not classify passing runnable checks as a non-runnable plan", () => {
+    const nodes = [requiredNode("parse"), requiredNode("diagnostics"), requiredNode("tests")];
+    const summary = summarizeRequiredVerification(nodes, [
+      resultFor("parse", "pass"),
+      resultFor("diagnostics", "skipped"),
+      resultFor("tests", "pass"),
+    ]);
+
+    expect(summary.runnableRequiredNodeIds).toEqual(["parse", "tests"]);
+    expect(summary.skippedRequiredNodeIds).toEqual(["diagnostics"]);
+    expect(summary.noRunnableChecks).toBe(false);
+  });
+
+  test("a plan whose required checks all skip remains explicitly non-runnable", () => {
+    const nodes = [requiredNode("parse"), requiredNode("diagnostics")];
+    const summary = summarizeRequiredVerification(nodes, [
+      resultFor("parse", "skipped"),
+      resultFor("diagnostics", "skipped"),
+    ]);
+
+    expect(summary.runnableRequiredNodeIds).toEqual([]);
+    expect(summary.skippedRequiredNodeIds).toEqual(["parse", "diagnostics"]);
+    expect(summary.noRunnableChecks).toBe(true);
+  });
 });
 
 describe("H3 predicate command derivation", () => {
-  const catalog = (
-    entries: Readonly<Record<string, { readonly command: string; readonly sourcePath: string }>>,
-  ): VerificationRunnerCatalog => Object.fromEntries(
-    Object.entries(entries).map(([kind, value]) => [kind, {
-      kind,
-      command: value.command,
-      sourcePath: value.sourcePath,
-      sourceVersion: "sha256:test",
-    }]),
-  ) as VerificationRunnerCatalog;
-
   test("an explicit node command is honored verbatim", () => {
     const resolved = resolvePredicateCommand("unit_test", "cargo", ["test", "--lib"], {});
     expect(resolved).toEqual({ kind: "command", program: "cargo", args: ["test", "--lib"], source: null });
@@ -57,7 +224,7 @@ describe("H3 predicate command derivation", () => {
       "unit_test",
       "terminus-predicate",
       ["unit_test", "."],
-      catalog({ test: { command: "bun run test", sourcePath: "package.json" } }),
+      runnerCatalog({ test: { command: "bun run test", sourcePath: "package.json" } }),
     );
     expect(resolved).toEqual({
       kind: "command",
@@ -72,7 +239,7 @@ describe("H3 predicate command derivation", () => {
       "static_diagnostics",
       "terminus-predicate",
       ["static_diagnostics"],
-      catalog({
+      runnerCatalog({
         typecheck: { command: "npm run typecheck", sourcePath: "package.json" },
         lint: { command: "npm run lint", sourcePath: "package.json" },
       }),
@@ -81,7 +248,7 @@ describe("H3 predicate command derivation", () => {
       "static_diagnostics",
       "terminus-predicate",
       ["static_diagnostics"],
-      catalog({ lint: { command: "npm run lint", sourcePath: "package.json" } }),
+      runnerCatalog({ lint: { command: "npm run lint", sourcePath: "package.json" } }),
     )).toMatchObject({ kind: "command", args: ["run", "lint"] });
   });
 
@@ -98,7 +265,7 @@ describe("H3 predicate command derivation", () => {
       "security_scanner",
       "terminus-predicate",
       ["security_scanner"],
-      catalog({ test: { command: "bun run test", sourcePath: "package.json" } }),
+      runnerCatalog({ test: { command: "bun run test", sourcePath: "package.json" } }),
     );
     expect(resolved.kind).toBe("skipped");
     if (resolved.kind !== "skipped") throw new Error("expected a skipped resolution");
