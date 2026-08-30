@@ -398,7 +398,9 @@ describe("truthful operator cockpit", () => {
 
     expect(screen.getByRole("button", { name: /Sessions|Board|Kanban/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Mission Ledger" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Agents" })).toBeInTheDocument();
+    // Agents has no complete, actionable control-plane surface, so it is not
+    // exposed as a permanent destination.
+    expect(screen.queryByRole("button", { name: "Agents" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Sessions|Board|Kanban/ }));
 
     expect(onNavigate).toHaveBeenNthCalledWith(1, "board");

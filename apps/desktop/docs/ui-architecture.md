@@ -70,6 +70,14 @@ Interactive controls use shared Radix tabs, menus, and tooltips for keyboard
 behavior and accessible names. A delegated tooltip layer serves truncated non-interactive text,
 without a DOM mutation observer or continuously repainting animation.
 
+The task inspector is intentionally tabbed: `Run` contains the current
+lifecycle, event tail, delegation, approvals, and material questions;
+`Context` contains the reported model, effort, route, permission profile,
+contract, workspace, and change source; `Proof` contains only explicit
+verification evidence and artifacts. It does not manufacture cache hit rates,
+computer-use state, or effect receipts when the control plane did not report
+them. Cache metrics are shown only when a raw count is available.
+
 ## State ownership
 
 `useTerminusStore` (`hooks/use-terminus.ts`) is the source of truth for
@@ -114,6 +122,13 @@ the Rust kernel and control-plane contracts. The Electron main process owns
 only native window presentation, notifications, theme preference, the system
 directory picker, validated bounds/title updates, fixed menu commands, and a
 validated dropped-directory path through a trusted preload bridge.
+
+Provider account discovery is consent-gated and account rows are read back from
+the control plane. OpenCode connections can be used when explicitly connected;
+a local ChatGPT/Codex subscription is shown as an unsupported native route and
+is available only through the separate external Codex lane. The desktop must
+never silently import raw subscription tokens or present that external loop as
+a Terminus-native run.
 
 ## Live event flow
 

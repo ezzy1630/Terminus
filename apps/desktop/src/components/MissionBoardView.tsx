@@ -284,7 +284,7 @@ const MissionBoardCard = memo(function MissionBoardCard({
   pending: boolean;
   onSelect: (taskId: string) => void;
   onOpen: (task: TaskV2Snapshot) => void;
-  onInspect: (taskId: string) => void;
+  onInspect: (task: TaskV2Snapshot) => void;
   onFocusCard: (taskId: string) => void;
   registerRef: (taskId: string, element: HTMLElement | null) => void;
   onDragStart: (task: TaskV2Snapshot, event: DragEvent<HTMLElement>) => void;
