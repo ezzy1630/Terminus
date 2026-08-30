@@ -40,7 +40,6 @@ export interface CompactionPolicyDecision {
   readonly assignment: "control" | "adaptive";
   readonly source:
     | "provider_budget"
-    | "provider_budget_exhausted"
     | "provider_summary_budget_exhausted"
     | "fallback_unverified_tokenizer"
     | "fallback_unavailable_budget"
@@ -174,24 +173,6 @@ export function deriveCompactionPolicy(
       ),
     };
   }
-  if (optionalContextTargetTokens === 0) {
-    return {
-      policyVersion: ADAPTIVE_COMPACTION_POLICY_VERSION,
-      assignment: "adaptive",
-      source: "provider_budget_exhausted",
-      compactionEnabled: false,
-      compactThresholdTokens: 0,
-      keepRecentTokens: 0,
-      summaryHardInputLimitTokens: hardInputLimitTokens,
-      summaryReservedInputTokens,
-      maxTranscriptChunkTokens: transcriptTokenBudget,
-      maxTranscriptChunkChars: Math.min(
-        MAX_COMPACTION_TRANSCRIPT_CHARS,
-        transcriptTokenBudget * SUMMARY_CHARS_PER_TOKEN_ESTIMATE,
-      ),
-    };
-  }
-
   const compactThresholdTokens = Math.max(
     1,
     Math.floor(optionalContextTargetTokens * TRIGGER_NUMERATOR / TRIGGER_DENOMINATOR),

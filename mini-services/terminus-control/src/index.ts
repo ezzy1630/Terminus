@@ -17539,7 +17539,7 @@ async function agentLoop(turnId: string): Promise<void> {
         tool_schema_hash: computeContentHash(canonicalJson(profileToolSchemas)),
         context_compatibility_key: selectedProvider.continuation.compatibilityKey,
         tested_safe_tokens: selectedProvider.context.testedSafeTokens,
-        compaction_assignment: requestedCompactionMode,
+        compaction_requested_assignment: requestedCompactionMode,
       },
     });
     turnProfile = selectedProfile;
