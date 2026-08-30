@@ -2,9 +2,6 @@ name: Linux enforcement evidence
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - codex/release-blocker-closure
 
 permissions:
   contents: read
@@ -12,7 +9,11 @@ permissions:
 jobs:
   evidence:
     name: Produce signed Linux enforcement evidence
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, terminus-enforcement]
+    env:
+      # The runner administrator delegates this subtree to the Actions user.
+      # The workflow verifies it but never mutates the host cgroup hierarchy.
+      TERMINUS_CGROUP_ROOT: /sys/fs/cgroup/terminus-ci
     permissions:
       contents: read
       id-token: write
@@ -32,47 +33,21 @@ jobs:
           }
           printf 'TERMINUS_RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
           printf 'TERMINUS_RELEASE_COMMIT=%s\n' "$GITHUB_SHA" >> "$GITHUB_ENV"
-      - name: Install host enforcement dependencies
-        run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3
-      - name: Delegate cgroup-v2 subtree to the kernel probe
-        run: |
-          sudo install -d -m 0755 /sys/fs/cgroup/terminus-ci
-          printf '+cpu +memory +pids\n' | sudo tee /sys/fs/cgroup/terminus-ci/cgroup.subtree_control
-      - name: Verify Bubblewrap namespace support
-        run: |
-          sudo bwrap --unshare-all --ro-bind / / --proc /proc --dev /dev \
-            --die-with-parent --new-session --cap-drop ALL -- /bin/true
-      - name: Verify delegated cgroup lease controls
-        run: |
-          sudo bash -ec '
-            parent=/sys/fs/cgroup/terminus-ci/.terminus-control-parent
-            lease="$parent/job"
-             mkdir "$parent"; \
-             printf "%s\n" "+cpu +memory +pids" > "$parent/cgroup.subtree_control"; \
-             mkdir "$lease"; \
-             printf "%s\n" 32 > "$lease/pids.max"; \
-             printf "%s\n" "$$" > "$lease/cgroup.procs"
-          '
-          sudo rmdir /sys/fs/cgroup/terminus-ci/.terminus-control-parent/job
-          sudo rmdir /sys/fs/cgroup/terminus-ci/.terminus-control-parent
+      - name: Verify dedicated-runner enforcement prerequisites
+        run: just linux-enforcement-prereqs
       - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
       - name: Build kernel probe binary
-        run: |
-          cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
-          sudo install -D -m 0755 \
-            mini-services/terminus-kernel/target/release/terminus-kernel-mini \
-            /usr/local/lib/terminus/terminus-kernel-mini
+        run: cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
       - name: Produce signed evidence
         env:
           TERMINUS_RELEASE_COMMIT: ${{ github.sha }}
-          TERMINUS_CGROUP_ROOT: /sys/fs/cgroup/terminus-ci
-          TERMINUS_KERNEL_BINARY: /usr/local/lib/terminus/terminus-kernel-mini
+          TERMINUS_KERNEL_BINARY: ${{ github.workspace }}/mini-services/terminus-kernel/target/release/terminus-kernel-mini
           TERMINUS_ENFORCEMENT_REPORT: ${{ runner.temp }}/terminus-enforcement-report.json
           TERMINUS_LINUX_EVIDENCE: ${{ runner.temp }}/terminus-linux-evidence.json
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/terminus-linux-evidence.json.pem
           TERMINUS_LINUX_TEST_LOG: ${{ runner.temp }}/terminus-linux-enforcement.log
-          TERMINUS_LINUX_TEST_COMMAND: sudo --preserve-env=TERMINUS_CGROUP_ROOT,TERMINUS_ENFORCEMENT_REPORT,TERMINUS_KERNEL_BINARY,TERMINUS_RELEASE_COMMIT,TERMINUS_RELEASE_VERSION,GITHUB_SHA bash scripts/run-linux-enforcement-probe.sh
+          TERMINUS_LINUX_TEST_COMMAND: bash scripts/run-linux-enforcement-probe.sh
         run: just linux-enforcement-evidence
       - name: Verify signed evidence
         env:

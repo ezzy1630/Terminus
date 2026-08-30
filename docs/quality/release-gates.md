@@ -13,12 +13,18 @@ source cannot produce a release decision.
 
 ## Release gate (SPEC ?46.18)
 
-The dedicated Linux sandbox runner must publish an immutable, line-oriented
-evidence manifest and expose its path as `TERMINUS_LINUX_EVIDENCE` when the
-release gate runs. The manifest must contain `platform: linux`,
-`profile: secure-local-default`, `enforcement: enforced`, `seccomp: active`,
-`cgroup_v2: active`, `network: proxy-only`, and `status: passed`. Missing,
-skipped, placeholder, unavailable, or degraded evidence is a release failure.
+The dedicated Linux sandbox runner must publish a signed JSON evidence
+manifest and expose its path as `TERMINUS_LINUX_EVIDENCE` when the release
+gate runs. The manifest must bind `candidate_commit` and `release_version`,
+record `runner.os: linux`, `sandbox.cgroup_mode: v2`,
+`sandbox.network_mode: deny`, a non-empty seccomp filter digest, and only
+passing test entries. Missing, skipped, placeholder, unavailable, degraded,
+or wrong-candidate evidence is a release failure.
+
+The release workflow also requires signed macOS evidence from the same
+candidate. The Seatbelt job runs the live backend tests and effective-control
+probes, then signs both `macos-enforcement.json` and
+`macos-platform-probes.json`. A green generic macOS build is not equivalent.
 
 Stable release requires:
 

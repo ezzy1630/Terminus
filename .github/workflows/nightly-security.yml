@@ -15,12 +15,22 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
-      - run: just fuzz-smoke
+      - name: Run property and fuzz smoke
+        run: >-
+          bash scripts/run-security-job.sh
+          fuzz-smoke
+          "$RUNNER_TEMP/security-results/fuzz-smoke.json"
+          product_failure
+          false
+          -- just fuzz-smoke
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: fuzz-smoke-evidence
-          path: artifacts/release-gate/fuzz-smoke.json
+          path: |
+            artifacts/release-gate/fuzz-smoke.json
+            ${{ runner.temp }}/security-results/fuzz-smoke.json
+          if-no-files-found: error
 
   fault-injection:
     name: Fault-injection matrix (SPEC §46.9)
@@ -28,12 +38,22 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
-      - run: just fault-injection
+      - name: Run fault-injection matrix
+        run: >-
+          bash scripts/run-security-job.sh
+          fault-injection
+          "$RUNNER_TEMP/security-results/fault-injection.json"
+          product_failure
+          false
+          -- just fault-injection
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: fault-injection-evidence
-          path: artifacts/release-gate/fault-injection.json
+          path: |
+            artifacts/release-gate/fault-injection.json
+            ${{ runner.temp }}/security-results/fault-injection.json
+          if-no-files-found: error
 
   soak-smoke:
     name: Soak/leak smoke (30s)
@@ -44,12 +64,21 @@ jobs:
       - name: Short soak
         env:
           TERMINUS_SOAK_SECONDS: "30"
-        run: just soak
+        run: >-
+          bash scripts/run-security-job.sh
+          soak-smoke
+          "$RUNNER_TEMP/security-results/soak-smoke.json"
+          product_failure
+          false
+          -- just soak
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: soak-leak-evidence
-          path: artifacts/release-gate/soak-leak.json
+          path: |
+            artifacts/release-gate/soak-leak.json
+            ${{ runner.temp }}/security-results/soak-smoke.json
+          if-no-files-found: error
 
   # GitHub-hosted Ubuntu does not expose the delegated cgroup and namespace
   # controls required for authoritative enforcement evidence. Keep these
@@ -57,58 +86,128 @@ jobs:
   linux-enforcement-preflight-nightly:
     name: Linux enforcement prerequisites (nightly)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
       - name: Install host enforcement dependencies
-        run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq
+        run: >-
+          bash scripts/run-security-job.sh
+          linux-enforcement-preflight
+          "$RUNNER_TEMP/security-results/linux-enforcement-preflight.json"
+          dependency_failure
+          false
+          -- bash -c
+          'sudo apt-get update && sudo apt-get install --yes bubblewrap jq'
       - name: Verify delegated Linux controls
-        run: just linux-enforcement-prereqs
+        continue-on-error: true
+        run: >-
+          bash scripts/run-security-job.sh
+          linux-enforcement-preflight
+          "$RUNNER_TEMP/security-results/linux-enforcement-preflight.json"
+          non_promotable_environment
+          false
+          -- just linux-enforcement-prereqs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: linux-enforcement-preflight-nightly
+          path: ${{ runner.temp }}/security-results/linux-enforcement-preflight.json
+          if-no-files-found: error
 
   linux-adversarial-nightly:
     name: Linux adversarial (nightly)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
-      - run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3
-      - run: cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
-      - name: Run enforcement probe
+      - name: Install host enforcement dependencies
+        run: >-
+          bash scripts/run-security-job.sh
+          linux-adversarial
+          "$RUNNER_TEMP/security-results/linux-adversarial.json"
+          dependency_failure
+          false
+          -- bash -c
+          'sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3'
+      - name: Classify hosted-runner enforcement capability
+        id: prerequisites
+        continue-on-error: true
+        run: >-
+          bash scripts/run-security-job.sh
+          linux-adversarial
+          "$RUNNER_TEMP/security-results/linux-adversarial.json"
+          non_promotable_environment
+          false
+          -- just linux-enforcement-prereqs
+      - name: Build and run enforcement probe
+        if: steps.prerequisites.outcome == 'success'
         env:
           TERMINUS_ENFORCEMENT_REPORT: ${{ runner.temp }}/terminus-enforcement-report.json
           TERMINUS_KERNEL_BINARY: ${{ github.workspace }}/mini-services/terminus-kernel/target/release/terminus-kernel-mini
-        run: bash scripts/run-linux-enforcement-probe.sh
+        run: >-
+          bash scripts/run-security-job.sh
+          linux-adversarial
+          "$RUNNER_TEMP/security-results/linux-adversarial.json"
+          product_failure
+          false
+          -- bash -c
+          'cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
+          && bash scripts/run-linux-enforcement-probe.sh'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: linux-enforcement-report-nightly
-          path: ${{ runner.temp }}/terminus-enforcement-report.json
-          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/terminus-enforcement-report.json
+            ${{ runner.temp }}/security-results/linux-adversarial.json
+          if-no-files-found: error
 
-  cargo-fuzz-optional:
-    name: cargo-fuzz short campaign (optional)
+  cargo-fuzz:
+    name: cargo-fuzz short campaign
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
         with:
           toolchain: nightly
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        id: install
+        continue-on-error: true
+        run: >-
+          bash scripts/run-security-job.sh
+          cargo-fuzz
+          "$RUNNER_TEMP/security-results/cargo-fuzz.json"
+          dependency_failure
+          false
+          -- cargo +nightly install cargo-fuzz --locked
       - name: Short fuzz each target
+        if: steps.install.outcome == 'success'
         working-directory: fuzz
-        # A crash MUST fail the step (the job stays continue-on-error, so it
-        # will not block CI, but the red X is what makes a finding visible).
-        # Previously `|| true` swallowed even crashes.
         run: |
-          status=0
-          for t in command_ast path_symlink patch_anchors unified_diff protobuf_public mcp_tool_schemas provider_projection context_manifests policy redaction_parsers archive_notebook; do
-            cargo fuzz run "$t" -- -max_total_time=20 || status=1
-          done
-          exit $status
+          bash ../scripts/run-security-job.sh \
+            cargo-fuzz \
+            "$RUNNER_TEMP/security-results/cargo-fuzz.json" \
+            product_failure \
+            false \
+            -- bash -c '
+              status=0
+              for target in command_ast path_symlink patch_anchors unified_diff protobuf_public mcp_tool_schemas provider_projection context_manifests policy redaction_parsers archive_notebook; do
+                cargo +nightly fuzz run "$target" -- -max_total_time=20 || status=1
+              done
+              exit "$status"
+            '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: cargo-fuzz-result
+          path: |
+            ${{ runner.temp }}/security-results/cargo-fuzz.json
+            fuzz/artifacts/
+          if-no-files-found: error
+      - name: Fail when cargo-fuzz installation failed
+        if: always() && steps.install.outcome != 'success'
+        run: exit 1
+
   kernel-mini-supply-chain:
     name: cargo-deny (kernel mini workspace)
     runs-on: ubuntu-latest
@@ -118,9 +217,33 @@ jobs:
         with:
           toolchain: stable
       - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+        id: install
+        continue-on-error: true
+        run: >-
+          bash scripts/run-security-job.sh
+          kernel-mini-supply-chain
+          "$RUNNER_TEMP/security-results/kernel-mini-supply-chain.json"
+          dependency_failure
+          false
+          -- cargo install cargo-deny --locked
       - name: Scan advisories/licenses/bans/sources for the privileged mini-service
+        if: steps.install.outcome == 'success'
         # The mini-service is its own Cargo workspace with its own lockfile;
         # the root `cargo deny check` never sees its dependency graph.
         working-directory: mini-services/terminus-kernel
-        run: cargo deny check
+        run: >-
+          bash ../../scripts/run-security-job.sh
+          kernel-mini-supply-chain
+          "$RUNNER_TEMP/security-results/kernel-mini-supply-chain.json"
+          dependency_failure
+          false
+          -- cargo deny check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: kernel-mini-supply-chain-result
+          path: ${{ runner.temp }}/security-results/kernel-mini-supply-chain.json
+          if-no-files-found: error
+      - name: Fail when cargo-deny installation failed
+        if: always() && steps.install.outcome != 'success'
+        run: exit 1

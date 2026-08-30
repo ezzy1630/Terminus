@@ -26,16 +26,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-terminus
-      - name: cargo deny (licenses, advisories, bans, sources)
-        run: cargo deny check
-      - name: bun audit (npm advisories)
-        run: bun audit --production
-      - name: pip-audit (Python advisories)
-        run: cd python && uv export --frozen --extra dev --no-emit-project | uv run pip-audit --strict -r /dev/stdin
-      - name: Boundary checks (§42.5)
-        run: just boundary-check
-      - name: Codegen drift (§45.2)
-        run: just codegen-check
       - name: Resolve version
         id: version
         env:
@@ -52,6 +42,32 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Run release dependency and advisory scans
+        env:
+          TERMINUS_RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: >-
+          bash scripts/run-security-job.sh
+          release-supply-chain
+          "$RUNNER_TEMP/security-results/release-supply-chain.json"
+          dependency_failure
+          true
+          -- bash -c
+          'set -o pipefail
+          && cargo deny check
+          && (cd mini-services/terminus-kernel && cargo deny check)
+          && bun audit --production
+          && (cd python && uv export --frozen --extra dev --no-emit-project
+          | uv run pip-audit --strict -r /dev/stdin)'
+      - name: Boundary checks (§42.5)
+        run: just boundary-check
+      - name: Codegen drift (§45.2)
+        run: just codegen-check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: release-supply-chain-result
+          path: ${{ runner.temp }}/security-results/release-supply-chain.json
+          if-no-files-found: error
 
   # ---------- Build signed artifacts across platforms ----------
   build-artifacts:
@@ -454,8 +470,10 @@ jobs:
   # ---------- Signed Linux enforcement evidence ----------
   linux-enforcement-evidence:
     name: Signed Linux enforcement evidence
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, terminus-enforcement]
     needs: supply-chain-gate
+    env:
+      TERMINUS_CGROUP_ROOT: /sys/fs/cgroup/terminus-ci
     permissions:
       contents: read
       id-token: write
@@ -464,48 +482,22 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-terminus
-      - name: Install host enforcement dependencies
-        run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3
-      - name: Delegate cgroup-v2 subtree to the kernel probe
-        run: |
-          sudo install -d -m 0755 /sys/fs/cgroup/terminus-ci
-          printf '+cpu +memory +pids\n' | sudo tee /sys/fs/cgroup/terminus-ci/cgroup.subtree_control
-      - name: Verify Bubblewrap namespace support
-        run: |
-          sudo bwrap --unshare-all --ro-bind / / --proc /proc --dev /dev \
-            --die-with-parent --new-session --cap-drop ALL -- /bin/true
-      - name: Verify delegated cgroup lease controls
-        run: |
-          sudo bash -ec '
-            parent=/sys/fs/cgroup/terminus-ci/.terminus-control-parent
-            lease="$parent/job"
-            mkdir "$parent"
-            printf "%s\\n" "+cpu +memory +pids" > "$parent/cgroup.subtree_control"
-            mkdir "$lease"
-            printf "%s\\n" 32 > "$lease/pids.max"
-            printf "%s\\n" "$$" > "$lease/cgroup.procs"
-          '
-          sudo rmdir /sys/fs/cgroup/terminus-ci/.terminus-control-parent/job
-          sudo rmdir /sys/fs/cgroup/terminus-ci/.terminus-control-parent
+      - name: Verify dedicated-runner enforcement prerequisites
+        run: just linux-enforcement-prereqs
       - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
       - name: Build kernel probe binary
-        run: |
-          cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
-          sudo install -D -m 0755 \
-            mini-services/terminus-kernel/target/release/terminus-kernel-mini \
-            /usr/local/lib/terminus/terminus-kernel-mini
+        run: cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
       - name: Produce signed evidence
         env:
           TERMINUS_RELEASE_COMMIT: ${{ github.sha }}
           TERMINUS_RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
-          TERMINUS_CGROUP_ROOT: /sys/fs/cgroup/terminus-ci
-          TERMINUS_KERNEL_BINARY: /usr/local/lib/terminus/terminus-kernel-mini
+          TERMINUS_KERNEL_BINARY: ${{ github.workspace }}/mini-services/terminus-kernel/target/release/terminus-kernel-mini
           TERMINUS_ENFORCEMENT_REPORT: ${{ runner.temp }}/terminus-enforcement-report.json
           TERMINUS_LINUX_EVIDENCE: ${{ runner.temp }}/terminus-linux-evidence.json
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/terminus-linux-evidence.json.pem
           TERMINUS_LINUX_TEST_LOG: ${{ runner.temp }}/terminus-linux-enforcement.log
-          TERMINUS_LINUX_TEST_COMMAND: sudo --preserve-env=TERMINUS_CGROUP_ROOT,TERMINUS_ENFORCEMENT_REPORT,TERMINUS_KERNEL_BINARY,TERMINUS_RELEASE_COMMIT,TERMINUS_RELEASE_VERSION bash scripts/run-linux-enforcement-probe.sh
+          TERMINUS_LINUX_TEST_COMMAND: bash scripts/run-linux-enforcement-probe.sh
         run: just linux-enforcement-evidence
       - name: Verify signed evidence
         env:
@@ -526,11 +518,81 @@ jobs:
             ${{ runner.temp }}/terminus-enforcement-report.json
           if-no-files-found: error
 
+  # ---------- Candidate-bound macOS enforcement evidence ----------
+  macos-enforcement-evidence:
+    name: macOS Seatbelt enforcement evidence
+    runs-on: macos-latest
+    needs: supply-chain-gate
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      MACOS_EVIDENCE_DIR: ${{ runner.temp }}/macos-evidence
+      TERMINUS_RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-terminus
+      - name: Run live Seatbelt tests and effective-control probes
+        run: >-
+          bash scripts/run-security-job.sh
+          macos-enforcement
+          "$MACOS_EVIDENCE_DIR/macos-enforcement.json"
+          product_failure
+          true
+          -- bash -c
+          'cargo test -p terminus-sandbox-macos live_probe_tests:: --locked
+          && cargo test --workspace --test capability_token_e2e --test non_bypassability
+          --test policy_wiring --test path_properties --test redaction_properties
+          --test secret_canary_e2e && just platform-probes'
+      - name: Bind effective-control probes to the evidence bundle
+        run: cp docs/generated/platform-probes.json "$MACOS_EVIDENCE_DIR/macos-platform-probes.json"
+      - name: Verify strict macOS evidence semantics
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+        run: |
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg version "$EXPECTED_VERSION" '
+            .schema_version == 1 and
+            .candidate_commit == $commit and
+            .release_version == $version and
+            .status == "passed" and
+            .classification == "none" and
+            .promotable == true and
+            .exit_code == 0
+          ' "$MACOS_EVIDENCE_DIR/macos-enforcement.json" >/dev/null
+          jq -e '
+            .schema == "terminus.platform-matrix.v1" and
+            (.rows | any(.[];
+              .platform == "Macos" and
+              .backend == "macos" and
+              .status == "enforced" and
+              ([.probes[] | select(.verdict == "enforced") | .probe] as $enforced |
+                ($enforced | index("filesystem_escape")) != null and
+                ($enforced | index("ambient_secret_denial")) != null and
+                ($enforced | index("network_egress")) != null)))
+          ' "$MACOS_EVIDENCE_DIR/macos-platform-probes.json" >/dev/null
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+      - name: Sign strict macOS evidence
+        run: |
+          for evidence in macos-enforcement.json macos-platform-probes.json; do
+            cosign sign-blob --yes "$MACOS_EVIDENCE_DIR/$evidence" \
+              --output-signature "$MACOS_EVIDENCE_DIR/$evidence.sig" \
+              --output-certificate "$MACOS_EVIDENCE_DIR/$evidence.pem"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: macos-enforcement-evidence
+          path: ${{ runner.temp }}/macos-evidence/
+          if-no-files-found: error
+
   # ---------- Blocking release validation ----------
   release-validation:
     name: Blocking release validation
     runs-on: ubuntu-latest
-    needs: [supply-chain-gate, build-artifacts, desktop-macos, linux-enforcement-evidence]
+    needs: [supply-chain-gate, build-artifacts, desktop-macos, linux-enforcement-evidence, macos-enforcement-evidence]
     permissions:
       contents: read
     steps:
@@ -545,6 +607,11 @@ jobs:
           merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
+          name: macos-enforcement-evidence
+          path: ${{ runner.temp }}/macos-evidence
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
           pattern: terminus-kernel-*
           path: ${{ runner.temp }}/release-builds
           merge-multiple: true
@@ -553,6 +620,38 @@ jobs:
           name: terminus-desktop-macos
           path: ${{ runner.temp }}/desktop-release
       - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+      - name: Verify candidate-bound macOS enforcement evidence
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+          MACOS_EVIDENCE_DIR: ${{ runner.temp }}/macos-evidence
+        run: |
+          for evidence in macos-enforcement.json macos-platform-probes.json; do
+            cosign verify-blob "$MACOS_EVIDENCE_DIR/$evidence" \
+              --signature "$MACOS_EVIDENCE_DIR/$evidence.sig" \
+              --certificate "$MACOS_EVIDENCE_DIR/$evidence.pem" \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          done
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg version "$EXPECTED_VERSION" '
+            .candidate_commit == $commit and
+            .release_version == $version and
+            .status == "passed" and
+            .classification == "none" and
+            .promotable == true and
+            .exit_code == 0
+          ' "$MACOS_EVIDENCE_DIR/macos-enforcement.json" >/dev/null
+          jq -e '
+            .schema == "terminus.platform-matrix.v1" and
+            (.rows | any(.[];
+              .platform == "Macos" and
+              .backend == "macos" and
+              .status == "enforced" and
+              ([.probes[] | select(.verdict == "enforced") | .probe] as $enforced |
+                ($enforced | index("filesystem_escape")) != null and
+                ($enforced | index("ambient_secret_denial")) != null and
+                ($enforced | index("network_egress")) != null)))
+          ' "$MACOS_EVIDENCE_DIR/macos-platform-probes.json" >/dev/null
       - name: Verify packaged control runtimes and release signatures
         env:
           RELEASE_COMMIT: ${{ github.sha }}
@@ -606,6 +705,8 @@ jobs:
           TERMINUS_LINUX_EVIDENCE: ${{ runner.temp }}/linux-evidence/terminus-linux-evidence.json
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/linux-evidence/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/linux-evidence/terminus-linux-evidence.json.pem
+          TERMINUS_MACOS_EVIDENCE: ${{ runner.temp }}/macos-evidence/macos-enforcement.json
+          TERMINUS_MACOS_PROBES: ${{ runner.temp }}/macos-evidence/macos-platform-probes.json
           TERMINUS_RELEASE_REQUIRE_LINUX: "1"
           TERMINUS_RELEASE_ENFORCE_SIGNED_ARTIFACTS: "1"
           TERMINUS_RELEASE_OWNER_APPROVAL: ${{ vars.TERMINUS_RELEASE_OWNER_APPROVAL }}
@@ -626,7 +727,7 @@ jobs:
   publish-release:
     name: Publish release with SBOM and provenance
     runs-on: ubuntu-latest
-    needs: [supply-chain-gate, build-artifacts, desktop-macos, linux-enforcement-evidence, release-validation]
+    needs: [supply-chain-gate, build-artifacts, desktop-macos, linux-enforcement-evidence, macos-enforcement-evidence, release-validation]
     permissions:
       contents: write
     environment: terminus-release
@@ -655,6 +756,37 @@ jobs:
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: dist/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: dist/terminus-linux-evidence.json.pem
         run: bash scripts/verify-release-evidence.sh
+      - name: Verify macOS enforcement evidence before publishing
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+        run: |
+          for evidence in macos-enforcement.json macos-platform-probes.json; do
+            cosign verify-blob "dist/$evidence" \
+              --signature "dist/$evidence.sig" \
+              --certificate "dist/$evidence.pem" \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          done
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg version "$EXPECTED_VERSION" '
+            .candidate_commit == $commit and
+            .release_version == $version and
+            .status == "passed" and
+            .classification == "none" and
+            .promotable == true and
+            .exit_code == 0
+          ' dist/macos-enforcement.json >/dev/null
+          jq -e '
+            .schema == "terminus.platform-matrix.v1" and
+            (.rows | any(.[];
+              .platform == "Macos" and
+              .backend == "macos" and
+              .status == "enforced" and
+              ([.probes[] | select(.verdict == "enforced") | .probe] as $enforced |
+                ($enforced | index("filesystem_escape")) != null and
+                ($enforced | index("ambient_secret_denial")) != null and
+                ($enforced | index("network_egress")) != null)))
+          ' dist/macos-platform-probes.json >/dev/null
       - name: Verify exact desktop artifact digests before publishing
         env:
           RELEASE_COMMIT: ${{ github.sha }}
@@ -675,6 +807,8 @@ jobs:
           cp dist/terminus-linux-evidence.json* release/
           cp dist/terminus-linux-enforcement.log release/
           cp dist/terminus-enforcement-report.json release/
+          cp dist/macos-enforcement.json* release/
+          cp dist/macos-platform-probes.json* release/
           cp dist/terminus-kernel-* release/
           cp dist/terminus-control-*.tar.gz release/
           cp dist/Terminus-*.dmg release/
@@ -716,6 +850,11 @@ jobs:
           merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
+          name: macos-enforcement-evidence
+          path: ${{ runner.temp }}/macos-evidence
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
           name: release-validation-evidence
           path: artifacts/release-gate
           merge-multiple: true
@@ -726,6 +865,8 @@ jobs:
           TERMINUS_LINUX_EVIDENCE: ${{ runner.temp }}/linux-evidence/terminus-linux-evidence.json
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/linux-evidence/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/linux-evidence/terminus-linux-evidence.json.pem
+          TERMINUS_MACOS_EVIDENCE: ${{ runner.temp }}/macos-evidence/macos-enforcement.json
+          TERMINUS_MACOS_PROBES: ${{ runner.temp }}/macos-evidence/macos-platform-probes.json
           TERMINUS_RELEASE_ENFORCE_SIGNED_ARTIFACTS: "1"
           TERMINUS_RELEASE_OWNER_APPROVAL: ${{ vars.TERMINUS_RELEASE_OWNER_APPROVAL }}
           TERMINUS_SECURITY_OWNER_APPROVAL: ${{ vars.TERMINUS_SECURITY_OWNER_APPROVAL }}

@@ -6,8 +6,8 @@ adversarial input (SPEC §46.4, §46.10 nightly corpus).
 ## Install
 
 ```bash
-rustup component add llvm-tools-preview
-cargo install cargo-fuzz
+rustup component add --toolchain nightly llvm-tools-preview
+cargo +nightly install cargo-fuzz --locked
 ```
 
 Requires a nightly toolchain for `cargo fuzz` (libfuzzer-sys).
@@ -17,10 +17,14 @@ Requires a nightly toolchain for `cargo fuzz` (libfuzzer-sys).
 From the repository root:
 
 ```bash
-cargo fuzz run command_ast --fuzz-dir fuzz
-cargo fuzz run unified_diff --fuzz-dir fuzz
-cargo fuzz run policy --fuzz-dir fuzz
+cargo +nightly fuzz run command_ast --fuzz-dir fuzz
+cargo +nightly fuzz run unified_diff --fuzz-dir fuzz
+cargo +nightly fuzz run policy --fuzz-dir fuzz
 ```
+
+The explicit `+nightly` is required. The repository `rust-toolchain.toml`
+selects stable for production builds, and installing nightly does not override
+that file for a bare `cargo fuzz` command.
 
 Seed corpora live under `fuzz/corpus/<target>/`. Add regression seeds when a
 crash is minimized; do not commit raw crash artifacts that contain secrets.

@@ -18,6 +18,8 @@ How M12 release evidence is produced and verified. Maps to
 | Eval release | `scripts/run-release-evals.sh` | `eval-release.json` |
 | SBOM | `scripts/verify-sbom-local.sh` | `sbom-verify.json` |
 | Schema freeze | `scripts/write-schema-freeze-evidence.ts` | `schema-freeze.json` |
+| Nightly security job outcome | `scripts/run-security-job.sh` | one typed result per job with product, dependency, or runner classification |
+| macOS Seatbelt enforcement | release workflow live tests + `just platform-probes` | signed `macos-enforcement.json` and `macos-platform-probes.json` |
 | Findings status | `scripts/m12-exit-gate.ts` | `findings-register-status.json` |
 | Candidate evidence manifest | `scripts/produce-release-evidence-manifest.ts` | `release-evidence-manifest.json` |
 | Release decision (§50.10) | `scripts/produce-release-decision.ts` | `release-decision.yaml` |
@@ -138,6 +140,14 @@ its own.
 LibFuzzer campaigns live in `fuzz/`; CI/release uses `fuzz-smoke` rather than
 long campaigns (see `fuzz/README.md`).
 
+The nightly workflow also runs a required short LibFuzzer campaign with the
+nightly toolchain selected on every `cargo` invocation. Hosted Linux
+enforcement checks are diagnostic only. An incapable hosted runner emits
+`classification: non_promotable_environment`; it cannot become release
+evidence. Signed Linux evidence runs only on a self-hosted runner labeled
+`linux`, `x64`, and `terminus-enforcement`, with
+`/sys/fs/cgroup/terminus-ci` pre-delegated to the Actions user.
+
 ## Verify
 
 ```bash
@@ -156,6 +166,7 @@ skip.
 | Gate item | Evidence |
 |---|---|
 | Platform checks / Linux sandbox | `TERMINUS_LINUX_EVIDENCE` + linux check in exit gate |
+| macOS Seatbelt sandbox | signed macOS job result + effective-control probe matrix |
 | No unresolved critical findings | `findings-register-status.json` + `docs/security/findings-register.yaml` |
 | Migration and recovery (§46.9, §50.2) | `fault-injection.json`, `upgrade-rollback.json`, release drills |
 | Default policy/eval non-regression | `eval-release.json`, `fuzz-smoke.json` |
