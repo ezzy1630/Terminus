@@ -110,5 +110,8 @@ artifacts/codegen/
 artifacts/paired-pilot-*/
 artifacts/terminus-live-*/
 
-# Local development runtime state (SQLite db, kernel data, UDS socket, tokens)
-.terminus-dev/
+# Local Codex compilation caches and Terminus runtime state are disposable.
+# The wildcard also covers crash-recovery snapshots such as
+# `.terminus-dev.wedged.<timestamp>/`.
+.codex-tmp/
+.terminus-dev*/
