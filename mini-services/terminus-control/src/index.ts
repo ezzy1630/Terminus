@@ -352,6 +352,15 @@ import {
 import { ANTHROPIC_MODEL_PROFILES } from "@terminus/provider-anthropic";
 import { GOOGLE_MODEL_PROFILES } from "@terminus/provider-google";
 import { CodexTurnState, OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
+import {
+  CODEX_EXTERNAL_HARNESS,
+  CodexAppServerError,
+  CodexAppServerSession,
+  type CodexAppServerSessionOptions,
+  type CodexAppServerStartThreadInput,
+  type CodexAppServerStatus,
+  type CodexAppServerTurnInput,
+} from "./codex-app-server.js";
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
 import {
   CodingTurnEngine,
@@ -4515,6 +4524,200 @@ function canonicalArtifactHash(raw: string): string | null {
   return /^[0-9a-f]{64}$/.test(hex) ? `sha256:${hex}` : null;
 }
 
+// ───────────────────── External Codex subscription lane ───────────────────
+//
+// This lane is intentionally separate from the native provider renderer. The
+// Codex App Server owns its loop, tools, approvals, and model state; Terminus
+// only owns the kernel-brokered process and the durable identity that lets the
+// desktop reconnect to it. The key includes both values so one workspace can
+// never accidentally reuse another session's external thread.
+const codexLaneSessions = new Map<string, CodexAppServerSession>();
+const CODEX_METADATA_KEY = "external_codex";
+const CODEX_CONTEXT_TASK_PREFIX = "external-codex:";
+const CODEX_MAX_ID = 512;
+const CODEX_MAX_TEXT = 64 * 1_024;
+
+const codexThreadInputSchema = z.object({
+  session_id: z.string().uuid(),
+  workspace_id: z.string().uuid(),
+  cwd: z.string().min(1).max(4_096).optional(),
+  model: z.string().min(1).max(256).optional(),
+  sandbox: z.string().min(1).max(256).optional(),
+  approval_policy: z.string().min(1).max(256).optional(),
+  base_instructions: z.string().max(CODEX_MAX_TEXT).optional(),
+}).strict();
+
+const codexTurnInputSchema = z.object({
+  session_id: z.string().uuid(),
+  workspace_id: z.string().uuid(),
+  thread_id: z.string().min(1).max(CODEX_MAX_ID),
+  text: z.string().min(1).max(CODEX_MAX_TEXT),
+  model: z.string().min(1).max(256).optional(),
+  effort: z.string().min(1).max(64).optional(),
+  cwd: z.string().min(1).max(4_096).optional(),
+  approval_policy: z.string().min(1).max(256).optional(),
+  sandbox_policy: z.record(z.string(), z.unknown()).optional(),
+}).strict();
+
+const codexInterruptInputSchema = z.object({
+  session_id: z.string().uuid(),
+  workspace_id: z.string().uuid(),
+  thread_id: z.string().min(1).max(CODEX_MAX_ID),
+  turn_id: z.string().min(1).max(CODEX_MAX_ID),
+}).strict();
+
+const codexStopInputSchema = z.object({
+  session_id: z.string().uuid(),
+  workspace_id: z.string().uuid(),
+  reason: z.string().min(1).max(256).optional(),
+}).strict();
+
+interface PersistedCodexLaneState {
+  readonly external_harness: typeof CODEX_EXTERNAL_HARNESS;
+  readonly workspace_id: string;
+  readonly session_id: string;
+  readonly thread_id: string | null;
+  readonly job_id: string | null;
+  readonly state: string;
+  readonly updated_at: string;
+}
+
+function codexLaneKey(workspaceId: string, sessionId: string): string {
+  return `${workspaceId}:${sessionId}`;
+}
+
+function readCodexLaneState(session: PrismaSession): PersistedCodexLaneState | null {
+  const metadata = safeParse<Record<string, unknown>>(session.metadataJson, {});
+  const raw = metadata[CODEX_METADATA_KEY];
+  if (!isPlainRecord(raw)) return null;
+  const workspaceId = typeof raw.workspace_id === "string" ? raw.workspace_id : null;
+  const sessionId = typeof raw.session_id === "string" ? raw.session_id : null;
+  if (workspaceId !== session.workspaceId || sessionId !== session.id) return null;
+  const threadId = raw.thread_id === null || typeof raw.thread_id === "string" ? raw.thread_id : null;
+  const jobId = raw.job_id === null || typeof raw.job_id === "string" ? raw.job_id : null;
+  const state = typeof raw.state === "string" ? raw.state : "unknown";
+  const updatedAt = typeof raw.updated_at === "string" ? raw.updated_at : session.updatedAt.toISOString();
+  return {
+    external_harness: CODEX_EXTERNAL_HARNESS,
+    workspace_id: workspaceId,
+    session_id: sessionId,
+    thread_id: threadId,
+    job_id: jobId,
+    state,
+    updated_at: updatedAt,
+  };
+}
+
+async function persistCodexLaneState(
+  session: PrismaSession,
+  state: Omit<PersistedCodexLaneState, "external_harness" | "workspace_id" | "session_id" | "updated_at"> & { readonly updated_at?: string },
+): Promise<PersistedCodexLaneState> {
+  const metadata = safeParse<Record<string, unknown>>(session.metadataJson, {});
+  const persisted: PersistedCodexLaneState = {
+    external_harness: CODEX_EXTERNAL_HARNESS,
+    workspace_id: session.workspaceId,
+    session_id: session.id,
+    thread_id: state.thread_id,
+    job_id: state.job_id,
+    state: state.state,
+    updated_at: state.updated_at ?? new Date().toISOString(),
+  };
+  metadata[CODEX_METADATA_KEY] = persisted;
+  await db.session.update({ where: { id: session.id }, data: { metadataJson: JSON.stringify(metadata) } });
+  return persisted;
+}
+
+async function codexSessionIdentity(
+  workspaceId: string,
+  sessionId: string,
+): Promise<PrismaSession | null> {
+  const session = await db.session.findUnique({ where: { id: sessionId } });
+  if (session === null || session.workspaceId !== workspaceId || session.status === "deleted") return null;
+  return session;
+}
+
+async function codexKernelContext(
+  session: PrismaSession,
+  operation: string,
+): Promise<RequestContext> {
+  // A Codex App Server process is an external harness, not a native task
+  // turn. It still receives a concrete, short-lived kernel capability scoped
+  // to this session's workspace and JobService only.
+  return kernelTaskContext({
+    sessionId: session.id,
+    taskId: `${CODEX_CONTEXT_TASK_PREFIX}${session.id}`,
+    turnId: `codex-${operation}-${randomUUID()}`,
+    workspaceId: session.workspaceId,
+    operationClasses: [
+      CapabilityOperationProto.CAPABILITY_OPERATION_EXEC,
+      CapabilityOperationProto.CAPABILITY_OPERATION_JOB,
+    ],
+    workspacePaths: ["."],
+  });
+}
+
+function codexSessionOptions(session: PrismaSession): CodexAppServerSessionOptions {
+  return {
+    clients: requireKernelUds(),
+    context: () => codexKernelContext(session, "rpc"),
+    workspace_id: session.workspaceId,
+    // Do not inherit shell credentials. Codex owns subscription auth in its
+    // own supported App Server flow; Terminus never reads or forwards auth
+    // store material.
+    public_env: {},
+  };
+}
+
+function getCodexLaneSession(session: PrismaSession): CodexAppServerSession {
+  const key = codexLaneKey(session.workspaceId, session.id);
+  const existing = codexLaneSessions.get(key);
+  if (existing !== undefined) {
+    const state = existing.status().state;
+    if (state !== "expired" && state !== "exited" && state !== "stopped") return existing;
+    // A terminal process object cannot be reopened. Keep the durable thread
+    // in Session.metadataJson and create a fresh kernel job for an explicit
+    // reconnect/resume attempt.
+    codexLaneSessions.delete(key);
+  }
+  const created = new CodexAppServerSession(codexSessionOptions(session));
+  codexLaneSessions.set(key, created);
+  return created;
+}
+
+function codexErrorResponse(res: ServerResponse, error: unknown): void {
+  const code = error instanceof CodexAppServerError ? error.code : "CODEX_APP_SERVER_UNAVAILABLE";
+  const message = error instanceof CodexAppServerError ? error.message : "the Codex App Server lane is unavailable";
+  const status = code === "CODEX_APP_SERVER_PROTOCOL_ERROR" || code === "CODEX_APP_SERVER_METHOD_UNSUPPORTED" ? 422
+    : code === "CODEX_APP_SERVER_UNKNOWN_SETTLEMENT" ? 409
+      : code === "CODEX_APP_SERVER_EXPIRED" ? 409
+      : code === "CODEX_APP_SERVER_EXITED" ? 409
+        : 503;
+  const category = code === "CODEX_APP_SERVER_UNKNOWN_SETTLEMENT" ? "unknown_settlement"
+    : code === "CODEX_APP_SERVER_PROTOCOL_ERROR" || code === "CODEX_APP_SERVER_METHOD_UNSUPPORTED" ? "validation"
+      : "external_dependency";
+  sendError(res, status, code, message, category, {
+    external_harness: CODEX_EXTERNAL_HARNESS,
+    reconciliation_required: code === "CODEX_APP_SERVER_UNKNOWN_SETTLEMENT",
+  });
+}
+
+function codexStatusWire(
+  status: CodexAppServerStatus,
+  persisted: PersistedCodexLaneState | null,
+): Record<string, unknown> {
+  return {
+    ...status,
+    external_harness: CODEX_EXTERNAL_HARNESS,
+    persisted_thread_id: persisted?.thread_id ?? null,
+    persisted_state: persisted?.state ?? null,
+    persisted_updated_at: persisted?.updated_at ?? null,
+  };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 const routes: Route[] = [
   // ────────────────────────── /system ────────────────────────────────────
   route("POST", "/v1/system/initialize", async (req, res) => {
@@ -8087,6 +8290,166 @@ const routes: Route[] = [
     sendJson(res, 200, { configured: false, configuration: null });
   }),
 
+  // ───────────────────── External Codex subscription lane ────────────────
+  // These endpoints are deliberately not part of /provider-models. Codex
+  // owns the external agent loop and its models must never enter Terminus'
+  // native picker or appear as a native provider attempt.
+  route("GET", "/v1/external/codex/status", async (req, res) => {
+    const query = new URL(req.url ?? "/", "http://terminus.local").searchParams;
+    const sessionId = query.get("session_id");
+    const workspaceId = query.get("workspace_id");
+    if (sessionId === null || workspaceId === null) {
+      return sendError(res, 400, "CODEX_LANE_IDENTITY_REQUIRED", "session_id and workspace_id are required", "validation");
+    }
+    const session = await codexSessionIdentity(workspaceId, sessionId);
+    if (session === null) return sendError(res, 404, "SESSION_NOT_FOUND", "session was not found in workspace", "not_found");
+    const persisted = readCodexLaneState(session);
+    const lane = getCodexLaneSession(session);
+    try {
+      await lane.open();
+      const current = lane.status();
+      const durable = await persistCodexLaneState(session, {
+        thread_id: persisted?.thread_id ?? null,
+        job_id: current.job_id,
+        state: current.state,
+      });
+      sendJson(res, 200, codexStatusWire(current, durable));
+    } catch (error: unknown) {
+      sendJson(res, 200, codexStatusWire({
+        ...lane.status(),
+        available: false,
+        external_harness: CODEX_EXTERNAL_HARNESS,
+        reason: error instanceof CodexAppServerError ? error.message : "Codex App Server availability is unknown",
+      }, persisted));
+    }
+  }),
+  route("GET", "/v1/external/codex/account", async (req, res) => {
+    const query = new URL(req.url ?? "/", "http://terminus.local").searchParams;
+    const sessionId = query.get("session_id");
+    const workspaceId = query.get("workspace_id");
+    if (sessionId === null || workspaceId === null) {
+      return sendError(res, 400, "CODEX_LANE_IDENTITY_REQUIRED", "session_id and workspace_id are required", "validation");
+    }
+    const session = await codexSessionIdentity(workspaceId, sessionId);
+    if (session === null) return sendError(res, 404, "SESSION_NOT_FOUND", "session was not found in workspace", "not_found");
+    try {
+      const account = await getCodexLaneSession(session).account();
+      sendJson(res, 200, { external_harness: CODEX_EXTERNAL_HARNESS, account });
+    } catch (error: unknown) {
+      codexErrorResponse(res, error);
+    }
+  }),
+  route("GET", "/v1/external/codex/models", async (req, res) => {
+    const query = new URL(req.url ?? "/", "http://terminus.local").searchParams;
+    const sessionId = query.get("session_id");
+    const workspaceId = query.get("workspace_id");
+    if (sessionId === null || workspaceId === null) {
+      return sendError(res, 400, "CODEX_LANE_IDENTITY_REQUIRED", "session_id and workspace_id are required", "validation");
+    }
+    const session = await codexSessionIdentity(workspaceId, sessionId);
+    if (session === null) return sendError(res, 404, "SESSION_NOT_FOUND", "session was not found in workspace", "not_found");
+    try {
+      const models = await getCodexLaneSession(session).models();
+      sendJson(res, 200, { external_harness: CODEX_EXTERNAL_HARNESS, models });
+    } catch (error: unknown) {
+      codexErrorResponse(res, error);
+    }
+  }),
+  route("POST", "/v1/external/codex/thread/start", async (req, res) => {
+    const parsed = codexThreadInputSchema.safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "CODEX_LANE_INPUT_INVALID", "invalid Codex thread input", "validation");
+    const session = await codexSessionIdentity(parsed.data.workspace_id, parsed.data.session_id);
+    if (session === null) return sendError(res, 404, "SESSION_NOT_FOUND", "session was not found in workspace", "not_found");
+    const prior = readCodexLaneState(session);
+    if (prior?.thread_id !== null && prior?.thread_id !== undefined) {
+      return sendError(res, 409, "CODEX_THREAD_ALREADY_RECORDED", "an external Codex thread is already recorded; resume it or stop the lane", "conflict", { thread_id: prior.thread_id, external_harness: CODEX_EXTERNAL_HARNESS });
+    }
+    try {
+      const lane = getCodexLaneSession(session);
+      const result = await lane.startThread(parsed.data as CodexAppServerStartThreadInput);
+      const persisted = await persistCodexLaneState(session, {
+        thread_id: result.thread_id,
+        job_id: lane.status().job_id,
+        state: lane.status().state,
+      });
+      sendJson(res, 201, { ...result, persisted });
+    } catch (error: unknown) {
+      codexErrorResponse(res, error);
+    }
+  }),
+  route("POST", "/v1/external/codex/thread/resume", async (req, res) => {
+    const parsed = z.object({
+      session_id: z.string().uuid(),
+      workspace_id: z.string().uuid(),
+      thread_id: z.string().min(1).max(CODEX_MAX_ID),
+    }).strict().safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "CODEX_LANE_INPUT_INVALID", "invalid Codex thread resume input", "validation");
+    const session = await codexSessionIdentity(parsed.data.workspace_id, parsed.data.session_id);
+    if (session === null) return sendError(res, 404, "SESSION_NOT_FOUND", "session was not found in workspace", "not_found");
+    const prior = readCodexLaneState(session);
+    if (prior?.thread_id !== parsed.data.thread_id) {
+      return sendError(res, 409, "CODEX_THREAD_ID_MISMATCH", "thread id is not the persisted external thread for this session", "conflict", { external_harness: CODEX_EXTERNAL_HARNESS });
+    }
+    try {
+      const lane = getCodexLaneSession(session);
+      const result = await lane.resumeThread(parsed.data.thread_id);
+      const persisted = await persistCodexLaneState(session, { thread_id: result.thread_id, job_id: lane.status().job_id, state: lane.status().state });
+      sendJson(res, 200, { ...result, persisted });
+    } catch (error: unknown) {
+      codexErrorResponse(res, error);
+    }
+  }),
+  route("POST", "/v1/external/codex/turn/start", async (req, res) => {
+    const parsed = codexTurnInputSchema.safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "CODEX_LANE_INPUT_INVALID", "invalid Codex turn input", "validation");
+    const session = await codexSessionIdentity(parsed.data.workspace_id, parsed.data.session_id);
+    if (session === null) return sendError(res, 404, "SESSION_NOT_FOUND", "session was not found in workspace", "not_found");
+    const prior = readCodexLaneState(session);
+    if (prior?.thread_id !== parsed.data.thread_id) return sendError(res, 409, "CODEX_THREAD_ID_MISMATCH", "thread id is not the persisted external thread for this session", "conflict", { external_harness: CODEX_EXTERNAL_HARNESS });
+    try {
+      const lane = getCodexLaneSession(session);
+      const result = await lane.startTurn(parsed.data as CodexAppServerTurnInput);
+      await persistCodexLaneState(session, { thread_id: result.thread_id, job_id: lane.status().job_id, state: lane.status().state });
+      sendJson(res, 202, result);
+    } catch (error: unknown) {
+      codexErrorResponse(res, error);
+    }
+  }),
+  route("POST", "/v1/external/codex/turn/interrupt", async (req, res) => {
+    const parsed = codexInterruptInputSchema.safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "CODEX_LANE_INPUT_INVALID", "invalid Codex interrupt input", "validation");
+    const session = await codexSessionIdentity(parsed.data.workspace_id, parsed.data.session_id);
+    if (session === null) return sendError(res, 404, "SESSION_NOT_FOUND", "session was not found in workspace", "not_found");
+    const prior = readCodexLaneState(session);
+    if (prior?.thread_id !== parsed.data.thread_id) return sendError(res, 409, "CODEX_THREAD_ID_MISMATCH", "thread id is not the persisted external thread for this session", "conflict", { external_harness: CODEX_EXTERNAL_HARNESS });
+    try {
+      const result = await getCodexLaneSession(session).interrupt(parsed.data.thread_id, parsed.data.turn_id);
+      sendJson(res, 200, result);
+    } catch (error: unknown) {
+      codexErrorResponse(res, error);
+    }
+  }),
+  route("POST", "/v1/external/codex/stop", async (req, res) => {
+    const parsed = codexStopInputSchema.safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "CODEX_LANE_INPUT_INVALID", "invalid Codex stop input", "validation");
+    const session = await codexSessionIdentity(parsed.data.workspace_id, parsed.data.session_id);
+    if (session === null) return sendError(res, 404, "SESSION_NOT_FOUND", "session was not found in workspace", "not_found");
+    const key = codexLaneKey(session.workspaceId, session.id);
+    const lane = codexLaneSessions.get(key);
+    try {
+      if (lane !== undefined) await lane.stop(parsed.data.reason ?? "user-stop");
+      const persisted = await persistCodexLaneState(session, {
+        thread_id: readCodexLaneState(session)?.thread_id ?? null,
+        job_id: null,
+        state: "stopped",
+      });
+      codexLaneSessions.delete(key);
+      sendJson(res, 200, { external_harness: CODEX_EXTERNAL_HARNESS, stopped: true, persisted });
+    } catch (error: unknown) {
+      codexErrorResponse(res, error);
+    }
+  }),
+
   // ── Connected provider accounts ───────────────────────────────────────
   //
   // One row per usable credential this machine holds. The credential itself
@@ -8119,7 +8482,7 @@ const routes: Route[] = [
         res,
         400,
         "PROVIDER_ACCOUNT_INPUT_INVALID",
-        "expected_revision and consent: true are required",
+        "expected_revision, expected_fingerprint, and consent: true are required",
         "validation",
       );
     }
@@ -8135,6 +8498,16 @@ const routes: Route[] = [
         "provider account changed; reload it before connecting",
         "conflict",
         { expected_revision: parsed.data.expected_revision, actual_revision: account.revision },
+      );
+    }
+    if (account.fingerprint !== parsed.data.expected_fingerprint) {
+      return sendError(
+        res,
+        409,
+        "PROVIDER_ACCOUNT_CONFLICT",
+        "provider credential changed; reload discovery before connecting",
+        "conflict",
+        { expected_fingerprint: parsed.data.expected_fingerprint, actual_fingerprint: account.fingerprint },
       );
     }
     if (!account.source.startsWith("opencode:")) {
@@ -13779,6 +14152,7 @@ const providerAccountRevisionSchema = z.object({
 
 const providerAccountConnectSchema = z.object({
   expected_revision: z.number().int().nonnegative(),
+  expected_fingerprint: z.string().min(1).max(512),
   consent: z.literal(true),
 }).strict();
 
@@ -13804,7 +14178,13 @@ async function providerAccountsResponse(): Promise<{
   if (lastProviderAccountDiscovery?.codexInstalled === true) installedTools.push("codex");
   if (lastProviderAccountDiscovery?.opencodeInstalled === true) installedTools.push(ZEN_VENDOR_ID);
   return {
-    accounts: accounts.map((account) => providerAccountWire(account, counts.get(account.id) ?? 0)),
+    accounts: accounts.map((account) => ({
+      ...providerAccountWire(account, counts.get(account.id) ?? 0),
+      // A fingerprint is a non-secret identity only. The desktop sends it
+      // back with explicit consent so a rotated OpenCode key cannot be
+      // imported against a stale row.
+      credential_fingerprint: account.fingerprint,
+    })),
     discovery: {
       last_run_at: lastProviderAccountDiscovery?.lastRunAt ?? null,
       installed_tools: installedTools,

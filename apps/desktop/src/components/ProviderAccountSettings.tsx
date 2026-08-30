@@ -3,10 +3,9 @@
  *
  * The first group under "Agents and Models", above the forms that still take a
  * key by hand. It is deliberately a *report*, not a form: these accounts came
- * from credential stores the operator's own tools already keep, so there is
- * nothing here to type. Two actions exist per row — make it the default, and
- * disconnect it — and both round-trip through the control plane with the
- * revision the row was drawn from.
+ * from credential stores the operator's own tools already keep. Disconnected
+ * OpenCode API accounts expose an explicit two-step Connect approval; connected
+ * accounts can become the default or be disconnected with the row revision.
  *
  * Written in the same System Settings language as the rest of the pane: a
  * sentence-case heading, then a hairline-closed run of rows, label left and
@@ -30,8 +29,10 @@ import {
   ACCOUNT_STATUS_LABELS,
   accountSourceLabel,
   discoveryHints,
+  useCodexLane,
   useProviderAccounts,
 } from "../hooks/use-provider-accounts";
+import { useTerminusStore } from "../hooks/use-terminus";
 import { deriveMark } from "../hooks/use-model-inventory";
 import type { ProviderAccount } from "../types";
 import { Button } from "../ui/Button";
@@ -71,15 +72,18 @@ function AccountMark({ label, dimmed }: { label: string; dimmed: boolean }): JSX
 function AccountRow({
   account,
   busy,
+  onConnect,
   onSetDefault,
   onDisconnect,
 }: {
   account: ProviderAccount;
   busy: boolean;
+  onConnect: () => void;
   onSetDefault: () => void;
   onDisconnect: () => void;
 }): JSX.Element {
   const [confirming, setConfirming] = useState(false);
+  const [confirmingConnect, setConfirmingConnect] = useState(false);
   const expires = formatDate(account.expires_at);
   const connected = account.status === "connected";
   // One line of quiet meta: where the credential lives, how many models it
@@ -113,7 +117,23 @@ function AccountRow({
         ) : null}
       </div>
       <div className="flex flex-shrink-0 items-center gap-1.5">
-        {confirming ? (
+        {confirmingConnect ? (
+          <div className="flex max-w-[24rem] flex-wrap items-center justify-end gap-1.5">
+            <span className="ui-meta text-right">
+              Copy the API key for <span className="text-primary">{account.display_name}</span> from OpenCode into Terminus keyring at <span className="font-mono">https://{account.host}</span>?
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={busy}
+              aria-label={`Approve and connect ${account.display_name}`}
+              onClick={() => { setConfirmingConnect(false); onConnect(); }}
+            >
+              {busy ? "Connecting…" : "Approve & connect"}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmingConnect(false)}>Cancel</Button>
+          </div>
+        ) : confirming ? (
           <>
             <span className="ui-meta">Delete this credential?</span>
             <Button
@@ -129,6 +149,17 @@ function AccountRow({
           </>
         ) : (
           <>
+            {account.source.startsWith("opencode:") && account.status === "disconnected" ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                aria-label={`Connect ${account.display_name}`}
+                onClick={() => setConfirmingConnect(true)}
+              >
+                Connect
+              </Button>
+            ) : null}
             {/* Offered only where it would do something: an expired or
                 unsupported account cannot take a turn, so making it the
                 default would be a button whose only outcome is a 409. */}
@@ -159,6 +190,73 @@ function AccountRow({
   );
 }
 
+function CodexLaneSettings(): JSX.Element {
+  const sessions = useTerminusStore((state) => state.sessions);
+  const selectedSessionId = useTerminusStore((state) => state.selectedSessionId);
+  const session = sessions.find((candidate) => candidate.id === selectedSessionId) ?? sessions[0] ?? null;
+  const identity = session === null ? null : { session_id: session.id, workspace_id: session.workspace_id };
+  const codex = useCodexLane(identity);
+  const connected = codex.lane?.available === true && codex.status === "ready";
+  const accountMeta = codex.account === null
+    ? null
+    : [codex.account.email, codex.account.plan_type].filter((value): value is string => value !== null && value.length > 0).join(" · ");
+  const visibleModels = codex.models.filter((model) => !model.hidden).slice(0, 4);
+
+  return (
+    <section className="mb-6" aria-label="Codex subscription">
+      <div className="mb-1.5 flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm text-tertiary">Codex subscription</h2>
+          <p className="ui-meta mt-0.5">External Codex lane · Codex owns the agent loop</p>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {connected ? (
+            <Button variant="ghost" size="sm" disabled={codex.refreshing} onClick={() => { void codex.stop(); }}>
+              Stop
+            </Button>
+          ) : null}
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={identity === null || codex.refreshing}
+            onClick={() => { void codex.refresh(); }}
+          >
+            {codex.refreshing ? "Checking…" : connected ? "Refresh" : "Connect"}
+          </Button>
+        </div>
+      </div>
+      <div className="divide-y divide-[var(--border-subtle)] border-y border-subtle">
+        <div className="flex min-h-12 items-center justify-between gap-3 py-2">
+          <div className="min-w-0">
+            <p className="ui-body text-primary">Status</p>
+            <p className="ui-meta truncate">
+              {codex.status === "loading" ? "Detecting Codex CLI…" : connected ? "Connected to Codex App Server" : codex.detail ?? "Not connected"}
+            </p>
+          </div>
+          <span className={cn("ui-meta shrink-0", connected ? "text-secondary" : "text-tertiary")} role="status">
+            {connected ? "Ready" : codex.status === "unconfigured" ? "Needs project" : "Unavailable"}
+          </span>
+        </div>
+        {accountMeta ? (
+          <div className="flex min-h-10 items-center justify-between gap-3 py-2">
+            <span className="ui-body text-primary">Account</span>
+            <span className="ui-meta truncate text-right">{accountMeta}</span>
+          </div>
+        ) : null}
+        {connected && visibleModels.length > 0 ? (
+          <div className="flex min-h-10 items-start justify-between gap-3 py-2">
+            <span className="ui-body text-primary">Models</span>
+            <span className="ui-meta max-w-[65%] text-right">{visibleModels.map((model) => model.display_name ?? model.id).join(" · ")}</span>
+          </div>
+        ) : null}
+        <p className="ui-meta py-2">
+          Subscription turns stay in the external Codex lane. They are not Terminus-native provider runs or model-picker entries.
+        </p>
+      </div>
+    </section>
+  );
+}
+
 export function ProviderAccountSettings(): JSX.Element {
   const accounts = useProviderAccounts();
   const { detect } = accounts;
@@ -166,7 +264,9 @@ export function ProviderAccountSettings(): JSX.Element {
   const onDetect = useCallback((): void => { void detect(); }, [detect]);
 
   return (
-    <section className="mb-6" aria-label="Connected accounts">
+    <>
+      <CodexLaneSettings />
+      <section className="mb-6" aria-label="Connected accounts">
       <div className="mb-1.5 flex items-center justify-between gap-3">
         <h2 className="text-sm text-tertiary">Connected accounts</h2>
         {/* Not offered against a control plane with no such route: the sweep
@@ -199,6 +299,7 @@ export function ProviderAccountSettings(): JSX.Element {
               key={account.id}
               account={account}
               busy={accounts.busyId === account.id}
+              onConnect={() => { void accounts.connect(account); }}
               onSetDefault={() => { void accounts.setDefault(account); }}
               onDisconnect={() => { void accounts.disconnect(account); }}
             />
@@ -227,6 +328,7 @@ export function ProviderAccountSettings(): JSX.Element {
           <p key={hint} className="ui-meta py-2">{hint}</p>
         ))}
       </div>
-    </section>
+      </section>
+    </>
   );
 }

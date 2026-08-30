@@ -38,6 +38,7 @@ vi.mock("../src/lib/api", async () => {
       ...actual.api,
       listProviderAccounts: vi.fn(),
       discoverProviderAccounts: vi.fn(),
+      connectProviderAccount: vi.fn(async () => response([])),
       disconnectProviderAccount: vi.fn(async () => undefined),
       setDefaultProviderAccount: vi.fn(async () => undefined),
     },
@@ -97,6 +98,34 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("the connected accounts section", () => {
+  test("requires explicit consent before connecting a disconnected OpenCode account", async () => {
+    const disconnected = account({
+      id: "mock-account-disconnected",
+      status: "disconnected",
+      status_detail: "Credential discovered but not imported.",
+      credential_fingerprint: "sha256:credential-fingerprint",
+      revision: 7,
+      host: "api.example.test",
+    });
+    installList(response([disconnected]));
+    vi.mocked(api.connectProviderAccount).mockResolvedValue(response([account({ status: "connected", revision: 8 })]));
+    render(<ProviderAccountSettings />);
+
+    const row = await screen.findByTestId("provider-account-mock-account-disconnected");
+    await userEvent.click(within(row).getByRole("button", { name: "Connect Baseten" }));
+    expect(row).toHaveTextContent(/Copy the API key for Baseten from OpenCode into Terminus keyring/);
+    expect(screen.getByText("https://api.example.test")).toBeInTheDocument();
+    expect(api.connectProviderAccount).not.toHaveBeenCalled();
+
+    await userEvent.click(within(row).getByRole("button", { name: "Approve and connect Baseten" }));
+    await waitFor(() => expect(api.connectProviderAccount).toHaveBeenCalledWith(
+      "mock-account-disconnected",
+      7,
+      "sha256:credential-fingerprint",
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    ));
+  });
+
   test("states where each credential came from, its status, and what it reaches", async () => {
     installList(response([
       account({
@@ -337,7 +366,7 @@ describe("install and sign-in hints", () => {
     expect(discoveryHints(discovery(), [
       account({ id: "codex", source: "codex-chatgpt", status: "unsupported" }),
     ])).toEqual([
-      "A ChatGPT/Codex subscription login was detected, but Terminus-native routing is unavailable. Use an API provider or a future official Codex adapter.",
+      "A ChatGPT/Codex subscription login was detected. Use the separate external Codex lane; it is not Terminus-native routing.",
       "OpenCode is installed but no usable provider login was found — run `opencode auth login`.",
     ]);
   });

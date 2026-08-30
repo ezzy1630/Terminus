@@ -16,6 +16,8 @@ import type { KernelUdsClients } from "./kernel-uds.js";
 
 export const CODEX_EXTERNAL_HARNESS = "codex" as const;
 export const CODEX_APP_SERVER_PROTOCOL = "codex-app-server.v2" as const;
+/** JobService has a hard background ceiling; sessions must also state it. */
+export const CODEX_APP_SERVER_MAX_LIFETIME_SECONDS = 30 * 60;
 
 const MAX_PROTOCOL_BYTES = 8 * 1_024 * 1_024;
 const MAX_LINE_BYTES = 1 * 1_024 * 1_024;
@@ -42,12 +44,14 @@ export type CodexAppServerState =
   | "ready"
   | "running"
   | "exited"
+  | "expired"
   | "unknown_settlement"
   | "stopped";
 
 export type CodexAppServerFailureCode =
   | "CODEX_APP_SERVER_UNAVAILABLE"
   | "CODEX_APP_SERVER_EXITED"
+  | "CODEX_APP_SERVER_EXPIRED"
   | "CODEX_APP_SERVER_UNKNOWN_SETTLEMENT"
   | "CODEX_APP_SERVER_OUTPUT_LIMIT"
   | "CODEX_APP_SERVER_PROTOCOL_ERROR"
@@ -159,6 +163,7 @@ export class CodexAppServerSession {
   private inputBuffer = "";
   private protocolBytes = 0;
   private opened: Promise<void> | null = null;
+  private expiryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: CodexAppServerSessionOptions) {
     if (options.workspace_id.length === 0) {
@@ -185,6 +190,8 @@ export class CodexAppServerSession {
       job_id: this.jobId,
       reason: this.state === "unknown_settlement"
         ? "Codex App Server job settlement is unknown; reconcile before retrying"
+        : this.state === "expired"
+          ? "Codex App Server session lifetime expired; reconnect and resume the thread"
         : this.state === "exited"
           ? "Codex App Server exited; start a new external session"
           : null,
@@ -299,6 +306,10 @@ export class CodexAppServerSession {
   async stop(reason = "user-stop"): Promise<void> {
     if (this.jobId === null) return;
     const jobId = this.jobId;
+    if (this.expiryTimer !== null) {
+      clearTimeout(this.expiryTimer);
+      this.expiryTimer = null;
+    }
     this.state = "stopped";
     for (const pending of this.pending.values()) pending.reject(new CodexAppServerError("CODEX_APP_SERVER_EXITED", `Codex App Server stopped: ${reason}`));
     this.pending.clear();
@@ -309,6 +320,27 @@ export class CodexAppServerSession {
       jobId,
       reason,
     });
+  }
+
+  /** Expire the bounded lease while retaining a truthful terminal state. */
+  private async expire(): Promise<void> {
+    if (this.jobId === null || this.state === "stopped" || this.state === "exited" || this.state === "unknown_settlement") return;
+    const jobId = this.jobId;
+    this.expiryTimer = null;
+    this.state = "expired";
+    this.failPending(new CodexAppServerError("CODEX_APP_SERVER_EXPIRED", "Codex App Server session lifetime expired; reconnect and resume the thread"));
+    this.subscription?.unsubscribe();
+    this.subscription = null;
+    try {
+      await this.options.clients.jobs.Stop({
+        context: await nextContext(this.options.context, "codex-expire"),
+        jobId,
+        reason: "session-expired",
+      });
+    } catch (error: unknown) {
+      this.state = "unknown_settlement";
+      this.failPending(new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", `Codex App Server expiry settlement is unknown: ${error instanceof Error ? error.message : String(error)}`));
+    }
   }
 
   private async startAndInitialize(): Promise<void> {
@@ -332,10 +364,13 @@ export class CodexAppServerSession {
           cwd: { workspaceId: this.options.workspace_id, relativePath: "." },
           publicEnv: { ...this.options.public_env },
           secretCapabilityUris: [],
-          timeout: { seconds: 0, nanos: 0 },
+          // JobService durable jobs have a finite background ceiling. A
+          // session reconnects and resumes its persisted thread after this
+          // limit; an external lane is never an unbounded process.
+          timeout: { seconds: CODEX_APP_SERVER_MAX_LIFETIME_SECONDS, nanos: 0 },
           allocatePty: false,
           shell: undefined,
-          allowUnboundedTimeout: true,
+          allowUnboundedTimeout: false,
         },
         sandboxProfileId: "secure-local-default",
         outputPolicyId: "provider-response-bounded",
@@ -351,6 +386,7 @@ export class CodexAppServerSession {
     }
     this.jobId = started.jobId;
     this.processId = started.processId;
+    this.expiryTimer = setTimeout(() => { void this.expire(); }, CODEX_APP_SERVER_MAX_LIFETIME_SECONDS * 1_000);
     this.subscription = this.options.clients.jobs.Stream({
       context: await nextContext(this.options.context, "codex-stream"),
       jobId: started.jobId,
@@ -373,7 +409,7 @@ export class CodexAppServerSession {
   }
 
   private handleJobEvent(event: JobEvent): void {
-    if (this.state === "stopped") return;
+    if (this.state === "stopped" || this.state === "expired") return;
     if (event.stdout !== undefined) {
       this.protocolBytes += event.stdout.bytes.byteLength;
       if (this.protocolBytes > MAX_PROTOCOL_BYTES) {
@@ -451,6 +487,15 @@ export class CodexAppServerSession {
   }
 
   private async request(method: string, params: unknown): Promise<unknown> {
+    if (this.state === "unknown_settlement") {
+      throw new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", "Codex App Server job settlement is unknown; reconcile before retrying");
+    }
+    if (this.state === "expired") {
+      throw new CodexAppServerError("CODEX_APP_SERVER_EXPIRED", "Codex App Server session lifetime expired; reconnect and resume the thread");
+    }
+    if (this.state === "exited" || this.state === "stopped") {
+      throw new CodexAppServerError("CODEX_APP_SERVER_EXITED", "Codex App Server exited; start a new external session");
+    }
     if (method !== "initialize" && !ALLOWED_REQUESTS.has(method)) {
       throw new CodexAppServerError("CODEX_APP_SERVER_METHOD_UNSUPPORTED", `Codex App Server method '${method}' is not allowed in the external lane`);
     }
