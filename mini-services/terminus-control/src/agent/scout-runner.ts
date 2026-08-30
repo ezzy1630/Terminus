@@ -26,6 +26,7 @@ import {
   type DelegationAuthority,
   type DelegationBudgetLimits,
   type DelegationIdentity,
+  type DelegationLoopCallInput,
   type DelegationStepAccountant,
   type DelegationUsage,
 } from "./delegation-runner.js";
@@ -60,6 +61,9 @@ export interface ScoutStepInput {
 export type ScoutToolExecutor = (input: {
   readonly toolName: "read" | "grep" | "glob";
   readonly argumentsJson: string;
+  readonly step?: number;
+  readonly attemptId?: string;
+  readonly callIndex?: number;
   readonly signal?: AbortSignal | null;
 }) => Promise<{ readonly ok: boolean; readonly resultText: string }>;
 
@@ -141,7 +145,10 @@ export interface ScoutLoopDeps {
    */
   readonly objective: string;
   /** Build one provider request for [system, messages] and execute it. */
-  readonly callProvider: (messages: readonly { readonly role: "user" | "assistant"; readonly text: string }[]) => Promise<ScoutStepInput>;
+  readonly callProvider: (
+    messages: readonly { readonly role: "user" | "assistant"; readonly text: string }[],
+    context: Omit<DelegationLoopCallInput, "messages">,
+  ) => Promise<ScoutStepInput>;
   /** Dispatch one read-only tool through the kernel boundary. */
   readonly executeTool: ScoutToolExecutor;
   readonly maxSteps?: number;
@@ -187,15 +194,22 @@ export async function runScoutLoop(deps: ScoutLoopDeps): Promise<ScoutParsedResu
     acceptsFinalResponse: (text) => parseScoutResult(text) !== null,
     ...(deps.accountant === undefined ? {} : { accountant: deps.accountant }),
     ...(deps.signal === undefined ? {} : { signal: deps.signal }),
-    callProvider: async ({ messages }) => {
-      const response = await deps.callProvider(messages);
+    callProvider: async ({ messages, ...context }) => {
+      const response = await deps.callProvider(messages, context);
       return {
         projectedText: response.projectedText,
         toolCalls: response.toolCalls,
         ...(response.usage === undefined ? {} : { usage: response.usage }),
       };
     },
-    executeTool: async ({ toolName, argumentsJson, signal }) => deps.executeTool({ toolName, argumentsJson, signal }),
+    executeTool: async ({ toolName, argumentsJson, step, attemptId, callIndex, signal }) => deps.executeTool({
+      toolName,
+      argumentsJson,
+      step,
+      attemptId,
+      callIndex,
+      signal,
+    }),
   });
   const parsed = loop.finalText === null ? null : parseScoutResult(loop.finalText);
   const receipts = loop.stepReceipts.map(({ step, attemptId, status }) => ({ step, attemptId, status }));

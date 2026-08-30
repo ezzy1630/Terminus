@@ -33,13 +33,17 @@ function providerSequence() {
 describe("bounded delegation runner", () => {
   test("aggregates usage across provider steps and settles each attempt", async () => {
     const accountant = new InMemoryDelegationStepAccountant();
+    const toolIdentities: string[] = [];
     const result = await runBoundedDelegation({
       identity: identity(),
       authority,
       budget: { maxSteps: 4, maxTokens: 100n, maxCostMicros: 100n },
       accountant,
       callProvider: providerSequence(),
-      executeTool: async () => ({ ok: true, resultText: "read output" }),
+      executeTool: async ({ attemptId, callIndex }) => {
+        toolIdentities.push(`${attemptId}:tool:${callIndex}`);
+        return { ok: true, resultText: "read output" };
+      },
     });
     expect(result.status).toBe("completed");
     expect(result.usage.inputTokens).toBe(20n);
@@ -47,6 +51,7 @@ describe("bounded delegation runner", () => {
     expect(result.usage.costMicros).toBe(6n);
     expect(accountant.starts.map((entry) => entry.attemptId)).toEqual(["attempt-0", "attempt-1"]);
     expect(accountant.settlements.every((entry) => entry.status === "settled")).toBe(true);
+    expect(toolIdentities).toEqual(["attempt-0:tool:0"]);
   });
 
   test("stops before another provider call when aggregate token budget is exhausted", async () => {

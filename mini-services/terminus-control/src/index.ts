@@ -469,6 +469,12 @@ import {
   type ScoutParsedResult,
 } from "./agent/scout-runner.js";
 import {
+  ZERO_DELEGATION_USAGE,
+  type DelegationAuthority,
+  type DelegationStepAccountant,
+  type DelegationUsage,
+} from "./agent/delegation-runner.js";
+import {
   ASSISTANT_EXCERPT_MAX_CHARS,
   USER_EXCERPT_MAX_CHARS,
   buildRecentHistorySection,
@@ -16665,13 +16671,177 @@ async function agentLoop(turnId: string): Promise<void> {
       && toolsEnabled
       && selectedProfile.subagentsEnabled
       && resolveScoutEnabled(process.env.TERMINUS_ENABLE_SCOUT)
+      && configuredMaxSteps > 1
       && SCOUT_LEDGER.shouldRun();
     let scoutFiles: readonly { path: string; role: string }[] = [];
+    let scoutUsage: DelegationUsage = ZERO_DELEGATION_USAGE;
+    let scoutProviderStepCount = 0;
     if (scoutEnabledForTurn) {
       try {
         const scoutResult = await (async (): Promise<ScoutParsedResult | { status: "skipped" }> => {
           if (selectedProvider.context.toolCalling === false) return { status: "skipped" };
           const instructionsHash = computeContentHash("terminus-scout-authority-v1");
+          const scoutReasoningReplay = new ReasoningReplayLedger();
+          const scoutRenderer = accountRouting !== null
+            ? providerAccountRenderer(
+                accountRouting,
+                turnReasoningEffort,
+                `scout:${turnId}`,
+                scoutReasoningReplay,
+              )
+            : directConfiguration !== null
+              ? createDirectRenderer(directConfiguration, {
+                  reasoningEffort: turnReasoningEffort,
+                  reasoningReplay: scoutReasoningReplay,
+                })
+              : gatewayModel === null
+                ? new LocalRenderer()
+                : new GatewayRenderer([gatewayModel], {
+                    reasoningEffort: turnReasoningEffort,
+                    reasoningReplay: scoutReasoningReplay,
+                  });
+          const scoutGatewayConfig = providerGatewayConfig === null
+            ? null
+            : {
+                ...providerGatewayConfig,
+                ...(accountRouting === null ? {} : { codexTurnState: new CodexTurnState() }),
+              };
+          const scoutAgentId = `scout-agent:${turnId}`;
+          const scoutDelegationId = `scout-delegation:${turnId}`;
+          const scoutObjective = `Objective: ${contract.objective}\nRead paths in scope: ${contract.allowedScope.readPaths.slice(0, 64).join(", ") || "(entire workspace)"}`;
+          const scoutAuthority = {
+            allowedTools: ["read", "grep", "glob"],
+            allowedReadPaths: leastWorkspaceScope(contract.allowedScope.readPaths),
+            allowedWritePaths: [],
+            deniedEffects: ["write", "external_network", "secret_access", "scope_expansion"],
+          } satisfies DelegationAuthority;
+          const totalTokenLimit = mergeTurnBudget(
+            nonNegativeBigInt(taskBudget.max_tokens),
+            turnRequestBudget?.maxTokens ?? null,
+          );
+          const totalCostLimit = mergeTurnBudget(
+            nonNegativeBigInt(taskBudget.model_micros) ?? taskSnapshot.contract.budget.modelMicros,
+            turnRequestBudget?.maxCostMicros ?? null,
+          ) ?? taskSnapshot.contract.budget.modelMicros;
+          const scoutBudget = {
+            maxSteps: Math.min(10, Math.max(1, Math.floor(configuredMaxSteps / 4))),
+            maxTokens: totalTokenLimit === null ? 32_768n : totalTokenLimit / 5n,
+            maxCostMicros: totalCostLimit / 5n,
+          };
+          const scoutContract = {
+            schema: "terminus.scout-delegation.v1",
+            parent_task_id: task.id,
+            parent_turn_id: turnId,
+            delegation_id: scoutDelegationId,
+            objective: scoutObjective,
+            authority: scoutAuthority,
+            budget: {
+              max_steps: scoutBudget.maxSteps,
+              max_tokens: scoutBudget.maxTokens.toString(),
+              max_cost_micros: scoutBudget.maxCostMicros.toString(),
+            },
+            provider_id: selectedProvider.providerId,
+            model_key: selectedModel.modelKey,
+            profile_hash: selectedProfile.profileHash,
+          };
+          const scoutContractBytes = new TextEncoder().encode(canonicalJson(scoutContract));
+          const scoutContractArtifact = await artifactClient.ingest(scoutContractBytes, {
+            mediaType: "application/json",
+            custom: { purpose: "scout-delegation-contract", delegationId: scoutDelegationId },
+          });
+          await emit({
+            eventType: "agent.spawned",
+            aggregateType: "agent",
+            aggregateId: scoutAgentId,
+            correlationId: task.id,
+            idempotencyKey: `scout:${turnId}:admitted`,
+            payload: {
+              agent_id: scoutAgentId,
+              delegation_id: scoutDelegationId,
+              task_id: task.id,
+              parent_turn_id: turnId,
+              role: "scout",
+              authority: scoutAuthority,
+              budget: scoutContract.budget,
+            },
+            artifactRefs: [scoutContractArtifact.uri],
+          }, async (tx) => {
+            await tx.agent.upsert({
+              where: { id: scoutAgentId },
+              create: {
+                id: scoutAgentId,
+                taskId: task.id,
+                parentAgentId: null,
+                role: "scout",
+                adapterId: selectedProvider.providerId,
+                modelProfile: String(selectedModel.modelKey),
+                worktreeUri: null,
+                state: "RUNNING",
+              },
+              update: {
+                adapterId: selectedProvider.providerId,
+                modelProfile: String(selectedModel.modelKey),
+                state: "RUNNING",
+                completedAt: null,
+              },
+            });
+            await tx.delegation.upsert({
+              where: { id: scoutDelegationId },
+              create: {
+                id: scoutDelegationId,
+                taskId: task.id,
+                agentId: scoutAgentId,
+                contractArtifact: scoutContractArtifact.uri,
+                contractHash: scoutContractArtifact.hash,
+                resultArtifact: null,
+                status: "RUNNING",
+                budgetJson: canonicalJson(scoutContract.budget),
+              },
+              update: {
+                contractArtifact: scoutContractArtifact.uri,
+                contractHash: scoutContractArtifact.hash,
+                resultArtifact: null,
+                status: "RUNNING",
+                budgetJson: canonicalJson(scoutContract.budget),
+                completedAt: null,
+              },
+            });
+          });
+          const scoutAccountant = {
+            startStep: async (input) => {
+              await emit({
+                eventType: "scout.step_started",
+                aggregateType: "agent",
+                aggregateId: scoutAgentId,
+                correlationId: task.id,
+                idempotencyKey: `${input.attemptId}:started`,
+                payload: {
+                  delegation_id: input.delegationId,
+                  parent_task_id: input.parentTaskId,
+                  step: input.step,
+                  provider_attempt_id: input.attemptId,
+                },
+              });
+            },
+            settleStep: async (input) => {
+              await emit({
+                eventType: "scout.step_settled",
+                aggregateType: "agent",
+                aggregateId: scoutAgentId,
+                correlationId: task.id,
+                idempotencyKey: `${input.attemptId}:settled`,
+                payload: {
+                  delegation_id: input.delegationId,
+                  parent_task_id: input.parentTaskId,
+                  step: input.step,
+                  provider_attempt_id: input.attemptId,
+                  status: input.status,
+                  usage: jsonSafe(input.usage),
+                  failure_reason: input.failureReason,
+                },
+              });
+            },
+          } satisfies DelegationStepAccountant;
           const scope = {
             workspaceId: workspace.id as never,
             sessionId: turn.thread.sessionId as never,
@@ -16718,18 +16888,27 @@ async function agentLoop(turnId: string): Promise<void> {
             workspacePaths: leastWorkspaceScope(contract.allowedScope.readPaths),
           });
           const scoutTracker = new ObservedSourceTracker();
-          return await runScoutLoop({
-            maxSteps: 10,
-            objective: `Objective: ${contract.objective}\nRead paths in scope: ${contract.allowedScope.readPaths.slice(0, 64).join(", ") || "(entire workspace)"}`,
-            callProvider: async (messages) => {
+          const result = await runScoutLoop({
+            objective: scoutObjective,
+            identity: {
+              parentTaskId: task.id,
+              delegationId: scoutDelegationId,
+              attemptIdForStep: (step) => `${scoutDelegationId}:attempt:${step}`,
+            },
+            authority: scoutAuthority,
+            budget: scoutBudget,
+            accountant: scoutAccountant,
+            signal: abortController.signal,
+            callProvider: async (messages, { step, attemptId }) => {
               const fragments = messages.map((message, index) =>
                 fragment(`scout:${turnId}:${index}`, index === 0 ? "authority" : "recent_episode", message.text, computeContentHash(message.text)));
-              const rendered = await selectedRenderer.render({
+              const scoutToolSchemas = STANDALONE_TOOL_SCHEMAS.filter((tool) => tool.id === "read" || tool.id === "grep" || tool.id === "glob");
+              const rendered = await scoutRenderer.render({
                 provider: selectedProvider,
                 model: selectedModel,
-                manifestId: `scout:${turnId}`,
+                manifestId: `${scoutDelegationId}:manifest:${step}`,
                 fragments,
-                toolSchemas: STANDALONE_TOOL_SCHEMAS.filter((tool) => tool.id === "read" || tool.id === "grep" || tool.id === "glob"),
+                toolSchemas: scoutToolSchemas,
                 cachePlan: { stablePrefixHash: instructionsHash, breakpoints: [] },
                 continuationId: null,
                 outputProfile: "terse",
@@ -16738,29 +16917,199 @@ async function agentLoop(turnId: string): Promise<void> {
                 hardInputLimit: 200_000n as never,
                 signal: abortController.signal,
               } as Parameters<typeof selectedRenderer.render>[0]);
-              const response = await providerSessionService.execute({
-                rendered,
-                command: localProviderCommand,
-                gateway: providerGatewayConfig,
-                direct: directConfiguration === null
-                  ? null
-                  : { vendor: directConfiguration.vendor },
-                ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
-                context: { ...await buildScoutKernelContext(), idempotencyKey: `scout:${turnId}:${messages.length}` },
-                workspaceId: workspace.id,
-                signal: abortController.signal,
+              const requestArtifact = await artifactClient.ingest(
+                new TextEncoder().encode(canonicalJson(jsonSafe(rendered))),
+                {
+                  mediaType: "application/json",
+                  custom: {
+                    purpose: "scout-provider-request",
+                    delegationId: scoutDelegationId,
+                    providerAttemptId: attemptId,
+                  },
+                },
+              );
+              const modelSnapshotHash = computeContentHash(canonicalJson({
+                model: selectedModel,
+                provider: selectedProvider,
+              }));
+              const attemptIdentity = deriveProviderAttemptIdentity({
+                attemptId,
+                providerId: selectedProvider.providerId,
+                modelKey: selectedModel.modelKey,
+                modelSnapshotHash,
+                requestArtifactHash: requestArtifact.hash,
+                endpoint: providerAttemptEndpoint(directConfiguration, gatewayModel),
+                toolSchemaHash: computeContentHash(canonicalJson(scoutToolSchemas)),
+                contextEpochId: contextEpoch.epochId,
               });
-              const projectedScout = await selectedRenderer.projectResponse(response);
-              return {
-                renderedBody: {},
-                projectedText: projectedScout.text,
-                toolCalls: projectedScout.toolCalls.map((call) => ({
-                  toolName: call.toolName,
-                  argumentsJson: canonicalJson(call.arguments),
-                })),
-              };
+              await emit({
+                eventType: "scout.provider_running",
+                aggregateType: "agent",
+                aggregateId: scoutAgentId,
+                correlationId: task.id,
+                idempotencyKey: `${attemptId}:provider-running`,
+                payload: {
+                  delegation_id: scoutDelegationId,
+                  provider_attempt_id: attemptId,
+                  step,
+                  provider: selectedProvider.providerId,
+                  model: selectedModel.modelKey,
+                  request_fingerprint: attemptIdentity.requestFingerprint,
+                },
+                artifactRefs: [requestArtifact.uri],
+              }, async (tx) => {
+                await tx.providerAttempt.upsert({
+                  where: { id: attemptId },
+                  create: {
+                    id: attemptId,
+                    turnId,
+                    attemptNumber: -(step + 1),
+                    providerId: selectedProvider.providerId,
+                    modelKey: String(selectedModel.modelKey),
+                    capabilitySnapshotHash: modelSnapshotHash,
+                    contextManifestId: `${scoutDelegationId}:manifest:${step}`,
+                    requestArtifact: requestArtifact.uri,
+                    requestFingerprint: attemptIdentity.requestFingerprint,
+                    providerIdempotencyKey: attemptIdentity.providerIdempotencyKey,
+                    status: "running",
+                  },
+                  update: {
+                    requestArtifact: requestArtifact.uri,
+                    requestFingerprint: attemptIdentity.requestFingerprint,
+                    status: "running",
+                    completedAt: null,
+                    errorJson: null,
+                  },
+                });
+              });
+              try {
+                const response = await providerSessionService.execute({
+                  rendered,
+                  command: localProviderCommand,
+                  gateway: scoutGatewayConfig,
+                  direct: directConfiguration === null
+                    ? null
+                    : { vendor: directConfiguration.vendor },
+                  ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
+                  context: { ...await buildScoutKernelContext(), idempotencyKey: attemptIdentity.providerIdempotencyKey },
+                  workspaceId: workspace.id,
+                  signal: abortController.signal,
+                });
+                const projectedScout = await scoutRenderer.projectResponse(response);
+                const usage = scoutRenderer.extractUsage(response);
+              const accountFreeContract = accountRouting !== null
+                && (accountRouting.account.billing === "subscription" || accountRouting.account.billing === "free");
+              const freeModelContract = accountRouting !== null
+                ? accountFreeContract
+                : gatewayModel !== null
+                  && gatewayModel.deployment === "zen"
+                  && gatewayModel.free
+                  && gatewayProviderConfiguration?.credentialConfigured !== true
+                  && selectedProvider.economics.inputMicrosPerMillion === 0n
+                  && selectedProvider.economics.cachedInputMicrosPerMillion === 0n
+                  && selectedProvider.economics.outputMicrosPerMillion === 0n;
+              const costSource = accountRouting !== null || directConfiguration !== null || gatewayModel !== null
+                ? freeModelContract ? "free_model_contract" as const : "admitted_economics" as const
+                : "unavailable" as const;
+              const computedCostMicros = costSource === "unavailable"
+                ? null
+                : computeCost({
+                    usage,
+                    economics: selectedProvider.economics,
+                    providerReportedCostMicros: null,
+                  }).computedCostMicros;
+              const responseArtifact = await artifactClient.ingest(
+                new TextEncoder().encode(canonicalJson(response)),
+                {
+                  mediaType: "application/json",
+                  custom: {
+                    purpose: "scout-provider-response",
+                    delegationId: scoutDelegationId,
+                    providerAttemptId: attemptId,
+                  },
+                },
+              );
+              await emit({
+                eventType: "scout.provider_settled",
+                aggregateType: "agent",
+                aggregateId: scoutAgentId,
+                correlationId: task.id,
+                idempotencyKey: `${attemptId}:provider-settled`,
+                payload: {
+                  delegation_id: scoutDelegationId,
+                  provider_attempt_id: attemptId,
+                  step,
+                  usage: jsonSafe(usage),
+                  finish_reason: projectedScout.finishReason,
+                  cost_source: costSource,
+                  computed_cost_micros: computedCostMicros?.toString() ?? null,
+                },
+                artifactRefs: [responseArtifact.uri],
+              }, async (tx) => {
+                await tx.providerAttempt.update({
+                  where: { id: attemptId },
+                  data: {
+                    status: "completed",
+                    responseArtifact: responseArtifact.uri,
+                    providerRequestId: response.providerRequestId ?? providerRequestIdFromChunks(response.chunks),
+                    continuationId: projectedScout.continuationId,
+                    completedAt: new Date(),
+                    usageJson: canonicalJson(jsonSafe(usage)),
+                    providerReportedCostMicros: null,
+                    computedCostMicros,
+                    costSource,
+                    finishReason: projectedScout.finishReason,
+                    reasoningReplayJson: projectedScout.reasoningReplay === undefined || projectedScout.reasoningReplay.length === 0
+                      ? null
+                      : serializeReasoningReplay(projectedScout.reasoningReplay),
+                  },
+                });
+              });
+                return {
+                  renderedBody: jsonSafe(rendered),
+                  projectedText: projectedScout.text,
+                  toolCalls: projectedScout.toolCalls.map((call) => ({
+                    toolName: call.toolName,
+                    argumentsJson: canonicalJson(call.arguments),
+                  })),
+                  usage: {
+                    inputTokens: usage.inputTokens,
+                    cachedInputTokens: usage.cachedInputTokens,
+                    cacheWriteTokens: usage.cacheWriteTokens,
+                    outputTokens: usage.outputTokens,
+                    reasoningTokens: usage.reasoningTokens,
+                    toolSchemaTokens: usage.toolSchemaTokens,
+                    costMicros: computedCostMicros ?? 0n,
+                  },
+                };
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                await emit({
+                  eventType: "scout.provider_failed",
+                  aggregateType: "agent",
+                  aggregateId: scoutAgentId,
+                  correlationId: task.id,
+                  idempotencyKey: `${attemptId}:provider-failed`,
+                  payload: {
+                    delegation_id: scoutDelegationId,
+                    provider_attempt_id: attemptId,
+                    step,
+                    reason: message.slice(0, 512),
+                  },
+                }, async (tx) => {
+                  await tx.providerAttempt.updateMany({
+                    where: { id: attemptId, status: "running" },
+                    data: {
+                      status: abortController.signal.aborted ? "cancelled" : "failed",
+                      completedAt: new Date(),
+                      errorJson: canonicalJson({ message: message.slice(0, 512) }),
+                    },
+                  });
+                });
+                throw error;
+              }
             },
-            executeTool: async ({ toolName, argumentsJson }) => {
+            executeTool: async ({ toolName, argumentsJson, attemptId, callIndex }) => {
               let parsedArguments: unknown;
               try {
                 parsedArguments = JSON.parse(argumentsJson);
@@ -16768,7 +17117,7 @@ async function agentLoop(turnId: string): Promise<void> {
                 parsedArguments = {};
               }
               const call = parseStandaloneToolCall({
-                toolCallId: `scout-${Math.floor(Math.random() * 1e9).toString(36)}`,
+                toolCallId: `${attemptId ?? scoutDelegationId}:tool:${callIndex ?? 0}`,
                 toolName,
                 arguments: parsedArguments as Record<string, unknown>,
               });
@@ -16795,8 +17144,52 @@ async function agentLoop(turnId: string): Promise<void> {
               return { ok: result.status === "success" || result.status === "partial", resultText: JSON.stringify(visible) };
             },
           });
+          const resultArtifact = await artifactClient.ingest(
+            new TextEncoder().encode(canonicalJson(jsonSafe(result))),
+            {
+              mediaType: "application/json",
+              custom: { purpose: "scout-delegation-result", delegationId: scoutDelegationId },
+            },
+          );
+          const completed = result.status === "completed";
+          await emit({
+            eventType: completed ? "agent.completed" : "agent.failed",
+            aggregateType: "agent",
+            aggregateId: scoutAgentId,
+            correlationId: task.id,
+            idempotencyKey: `${scoutDelegationId}:terminal`,
+            payload: {
+              agent_id: scoutAgentId,
+              delegation_id: scoutDelegationId,
+              status: result.status,
+              provider_steps: result.stepReceipts.length,
+              usage: jsonSafe(result.usage),
+              failure_reason: result.failureReason,
+            },
+            artifactRefs: [resultArtifact.uri],
+          }, async (tx) => {
+            const completedAt = new Date();
+            await tx.delegation.update({
+              where: { id: scoutDelegationId },
+              data: {
+                resultArtifact: resultArtifact.uri,
+                status: result.status.toUpperCase(),
+                completedAt,
+              },
+            });
+            await tx.agent.update({
+              where: { id: scoutAgentId },
+              data: {
+                state: completed ? "COMPLETED" : result.status.toUpperCase(),
+                completedAt,
+              },
+            });
+          });
+          return result;
         })();
         if ("claims" in scoutResult && scoutResult.status === "completed") {
+          scoutUsage = scoutResult.usage;
+          scoutProviderStepCount = scoutResult.stepReceipts.length;
           scoutFiles = scoutResult.files;
           SCOUT_LEDGER.recordScout(task.id, scoutResult.claims.length + scoutResult.files.length);
           scoutBriefSection = {
@@ -16816,6 +17209,10 @@ async function agentLoop(turnId: string): Promise<void> {
             },
           }));
         } else {
+          if ("usage" in scoutResult) {
+            scoutUsage = scoutResult.usage;
+            scoutProviderStepCount = scoutResult.stepReceipts.length;
+          }
           SCOUT_LEDGER.recordScout(task.id, 0);
           await mutateAgentState(() => emit({
             eventType: "scout.skipped",
@@ -16833,6 +17230,16 @@ async function agentLoop(turnId: string): Promise<void> {
           aggregateId: task.id,
           correlationId: task.id,
           payload: { reason: message.slice(0, 512) },
+        }, async (tx) => {
+          const completedAt = new Date();
+          await tx.delegation.updateMany({
+            where: { id: `scout-delegation:${turnId}`, status: "RUNNING" },
+            data: { status: "FAILED", completedAt },
+          });
+          await tx.agent.updateMany({
+            where: { id: `scout-agent:${turnId}`, state: "RUNNING" },
+            data: { state: "FAILED", completedAt },
+          });
         }));
       }
     }
@@ -16844,15 +17251,27 @@ async function agentLoop(turnId: string): Promise<void> {
       nonNegativeBigInt(taskBudget.model_micros) ?? taskSnapshot.contract.budget.modelMicros,
       turnRequestBudget?.maxCostMicros ?? null,
     ) ?? taskSnapshot.contract.budget.modelMicros;
+    const scoutTokenUsage = scoutUsage.inputTokens
+      + scoutUsage.cacheWriteTokens
+      + scoutUsage.outputTokens
+      + scoutUsage.reasoningTokens
+      + scoutUsage.toolSchemaTokens;
+    const remainingMaxTokens = maxTokens === null
+      ? null
+      : maxTokens > scoutTokenUsage ? maxTokens - scoutTokenUsage : 0n;
+    const remainingCostMicros = maxCostMicros > scoutUsage.costMicros
+      ? maxCostMicros - scoutUsage.costMicros
+      : 0n;
+    const remainingMaxSteps = Math.max(1, configuredMaxSteps - scoutProviderStepCount);
     const wallClockSeconds = numberOr(taskBudget.wall_clock_seconds, taskSnapshot.contract.budget.wallClockSeconds);
     const finalVerificationReserveTokens = contextBudget.outputReserve + contextBudget.recoveryMargin;
     const finalVerificationReserveCostMicros = 0n;
     const ledgerBudget = {
-      maxSteps: configuredMaxSteps,
+      maxSteps: remainingMaxSteps,
       hardMaxSteps: HARD_MAX_STEPS,
       wallClockMs: Math.max(0, Math.floor(wallClockSeconds * 1_000)),
-      ...(maxTokens === null ? {} : { maxTokens }),
-      maxCostMicros,
+      ...(remainingMaxTokens === null ? {} : { maxTokens: remainingMaxTokens }),
+      maxCostMicros: remainingCostMicros,
       contextHeadroomTokens: contextBudget.hardInputLimit,
       finalVerificationReserveTokens,
       finalVerificationReserveCostMicros,

@@ -100,6 +100,9 @@ export interface DelegationLoopCallInput {
 export interface DelegationToolInput {
   readonly toolName: ScoutToolName;
   readonly argumentsJson: string;
+  readonly step: number;
+  readonly attemptId: string;
+  readonly callIndex: number;
   readonly signal: AbortSignal | null;
 }
 
@@ -336,12 +339,15 @@ export async function runBoundedDelegation(
           }
         } else {
           const resultParts: string[] = [];
-          for (const call of response.toolCalls) {
+          for (const [callIndex, call] of response.toolCalls.entries()) {
             const toolName = call.toolName as ScoutToolName;
             try {
               const result = await withCancellation(deps.executeTool({
                 toolName,
                 argumentsJson: call.argumentsJson,
+                step,
+                attemptId,
+                callIndex,
                 signal: deps.signal ?? null,
               }), deps.signal);
               resultParts.push(result.resultText.slice(0, 48_000));
