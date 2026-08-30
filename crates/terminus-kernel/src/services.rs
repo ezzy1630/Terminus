@@ -2557,6 +2557,13 @@ impl ProcessService {
         let mut egress_broker: Option<ActiveEgressBroker> = None;
         let mut sandbox_command = command.clone();
         sandbox_command.cwd.relative_path = resolved_cwd.host.host_path.display().to_string();
+        // Build the sandbox wrapper from the effective spawn, not the
+        // caller's original command. Policy constraints may have removed
+        // disallowed environment variables from `spawn.env`; passing the
+        // original `public_env` here would reintroduce those values through
+        // bwrap's `--setenv` arguments while the outer process remains
+        // correctly filtered.
+        sandbox_command.public_env = spawn.env.clone();
         let sandbox_wrapper = if matches!(
             profile.network,
             terminus_sandbox::NetworkAccess::ProxyRequired
@@ -2564,6 +2571,11 @@ impl ProcessService {
             #[cfg(unix)]
             {
                 let broker = self.start_egress_broker().await?;
+                let broker_socket = ActiveEgressBroker::guest_socket_path();
+                spawn
+                    .env
+                    .insert("TERMINUS_EGRESS_BROKER_SOCKET".to_string(), broker_socket);
+                sandbox_command.public_env = spawn.env.clone();
                 let wrapper = broker.broker_dir.as_deref().and_then(|broker_dir| {
                     sandbox_backend.as_ref().and_then(|backend| {
                         backend.spawn_wrapper_with_egress_broker(
@@ -2745,10 +2757,6 @@ impl ProcessService {
             );
             #[cfg(unix)]
             if let Some(broker) = egress_broker {
-                spawn.env.insert(
-                    "TERMINUS_EGRESS_BROKER_SOCKET".to_string(),
-                    ActiveEgressBroker::guest_socket_path(),
-                );
                 process_manager
                     .spawn_wrapped_with_lease_for_task(
                         wrapper_bin,

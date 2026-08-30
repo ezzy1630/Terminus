@@ -716,6 +716,67 @@ async fn process_start_strips_disallowed_env_from_token_constraints() {
     // disallowed_env constraints are applied.
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn enforced_workspace_development_wrapper_uses_constrained_environment() {
+    let (_dir, kernel) = make_kernel();
+    if !matches!(
+        kernel.sandboxes.enforcement_report().status,
+        terminus_sandbox::EnforcementStatus::Enforced
+    ) {
+        // This host cannot prove the Linux namespace path. The production
+        // assertion below is exercised on a runner with enforced bwrap.
+        return;
+    }
+
+    let token = mint_workspace_development_exec_token(&kernel.token_issuer);
+    let ctx = ctx_with_token(&token);
+    let command = CommandSpec {
+        program: "/usr/bin/env".to_string(),
+        cwd: WorkspacePath::new("ws-1", "."),
+        public_env: [
+            (
+                "AWS_SECRET_ACCESS_KEY".to_string(),
+                "must-not-enter-sandbox".to_string(),
+            ),
+            ("PUBLIC_VAR".to_string(), "survives".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        timeout_ms: 30_000,
+        ..Default::default()
+    };
+
+    let mut events = kernel
+        .processes
+        .start_in_profile(
+            &ctx,
+            &workspace_development_intent(),
+            command,
+            "secure-local-default",
+        )
+        .await
+        .expect("enforced workspace-development process starts");
+    let mut stdout = Vec::new();
+    while let Some(event) = events.recv().await {
+        match event {
+            terminus_kernel_protocol::ProcessEvent::Stdout(chunk) => {
+                stdout.extend_from_slice(&chunk.bytes)
+            }
+            terminus_kernel_protocol::ProcessEvent::Exited(exit) => {
+                assert_eq!(exit.exit_code, 0);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let stdout = String::from_utf8(stdout).expect("env output is UTF-8");
+    assert!(stdout.lines().any(|line| line == "PUBLIC_VAR=survives"));
+    assert!(!stdout
+        .lines()
+        .any(|line| line.starts_with("AWS_SECRET_ACCESS_KEY=")));
+}
+
 // ---------- Fix #7: audit.persist_authorized before effects ----------
 
 #[tokio::test]
