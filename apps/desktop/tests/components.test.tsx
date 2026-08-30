@@ -1429,7 +1429,7 @@ describe("NewTaskScreen — first turn lifecycle", () => {
   test("keeps the start surface focused on project context and one composer", () => {
     render(<NewTaskScreen />);
 
-    expect(screen.getByRole("heading", { name: "What should we build in Terminus?" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "New task in Terminus" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change project" })).toHaveTextContent("Terminus");
     expect(screen.getAllByRole("textbox", { name: "Message composer" })).toHaveLength(1);
     expect(screen.queryByText("Map the codebase")).not.toBeInTheDocument();
@@ -1477,11 +1477,11 @@ describe("Sidebar — navigation destinations", () => {
     expect(screen.getByRole("button", { name: /^New (session|task)/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^(Board|Kanban|Sessions)/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Needs you/ })).not.toBeInTheDocument();
-    // "Agents" joins this list: it rendered a directory of departments,
-    // operators and rooms that no route supplies.
-    for (const unsupported of ["Agents", "Scheduled", "Plugins", "Pull requests", "Sites"]) {
+    // These product routes still have no authoritative surface in this build.
+    for (const unsupported of ["Scheduled", "Plugins", "Pull requests", "Sites"]) {
       expect(screen.queryByRole("button", { name: unsupported })).not.toBeInTheDocument();
     }
+    expect(screen.getByRole("button", { name: "Agents" })).toBeInTheDocument();
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /^(Board|Kanban|Sessions)/ }));

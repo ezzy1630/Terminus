@@ -1136,11 +1136,11 @@ html[data-vibrancy="on"] .model-picker-surface {
 }
 
 .ui-button-primary:hover:not(:disabled) {
-  background-color: var(--accent-hover);
+  background-color: color-mix(in srgb, var(--action-primary) 84%, #ffffff);
 }
 
 .ui-button-primary:active:not(:disabled) {
-  background-color: var(--accent-pressed);
+  background-color: color-mix(in srgb, var(--action-primary) 78%, #000000);
 }
 
 /* ────────────────────────── Syntax Highlighting Tokens ──────────────────── */

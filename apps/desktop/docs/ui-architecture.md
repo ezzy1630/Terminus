@@ -15,8 +15,8 @@ chat + selected task             → Conversation + Composer
 chat + Changes                   → ResizableReviewLayout
 board                            → canonical task board/list
 agents                           → directory + operator detail tabs
-task_details                     → Overview | Evidence | Usage
-activity                         → Activity | Changes | Replay
+task_details                     → Session | Changes
+Activity (sidebar projection)    → attention queue + recent work
 ```
 
 The sidebar exposes product destinations, not subsystem pages. Organization,
@@ -32,7 +32,7 @@ task's accessible actions menu.
 Non-interactive operational records may remain unassigned and open in Task
 details. No client title-matches or fabricates conversation history.
 
-The shell has a 40px native title bar, a 224px default resizable sidebar,
+The shell has a 40px native title bar, a 276px default resizable sidebar,
 primary surface, and resizable docked inspector, hidden by default and
 remembered per task. Overlays are Command Palette,
 Settings, onboarding, Attention Center, and structured interventions. The
@@ -71,6 +71,14 @@ trusted lease and preview stream; they do not capture this Mac's display.
 Interactive controls use shared Radix tabs, menus, and tooltips for keyboard
 behavior and accessible names. A delegated tooltip layer serves truncated non-interactive text,
 without a DOM mutation observer or continuously repainting animation.
+
+The task inspector is intentionally tabbed: `Run` contains the current
+lifecycle, event tail, delegation, approvals, and material questions;
+`Context` contains the reported model, effort, route, permission profile,
+contract, workspace, and change source; `Proof` contains only explicit
+verification evidence and artifacts. It does not manufacture cache hit rates,
+computer-use state, or effect receipts when the control plane did not report
+them. Cache metrics are shown only when a raw count is available.
 
 ## State ownership
 
@@ -118,6 +126,13 @@ the Rust kernel and control-plane contracts. The Electron main process owns
 only native window presentation, notifications, theme preference, the system
 directory picker, validated bounds/title updates, fixed menu commands, and a
 validated dropped-directory path through a trusted preload bridge.
+
+Provider account discovery is consent-gated and account rows are read back from
+the control plane. OpenCode connections can be used when explicitly connected;
+a local ChatGPT/Codex subscription is shown as an unsupported native route
+until an official Codex App Server adapter is selected. The desktop must never
+silently import raw subscription tokens or present that external loop as a
+Terminus-native run.
 
 ## Live event flow
 

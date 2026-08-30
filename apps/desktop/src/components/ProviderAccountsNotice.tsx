@@ -1,11 +1,11 @@
 /**
- * Terminus Desktop — "we found your credentials" notice.
+ * Terminus Desktop — available provider connections notice.
  *
- * The control plane imports every usable credential from the operator's own
- * stores at startup, silently and without a prompt. Silence is right for the
- * import; it is wrong for the *fact* of it. An app that quietly acquires seven
- * provider accounts on first launch owes the operator one sentence saying so
- * and a way to see what it took.
+ * The control plane reports only connections the operator explicitly admitted.
+ * Discovery is not an implicit import, and a local ChatGPT/Codex subscription
+ * is not a Terminus-native route. The notice is therefore about available
+ * connections, with the authoritative details and unsupported boundaries in
+ * Settings.
  *
  * So: one hairline strip under the title bar, in the same calm register as the
  * connection banner. Not a modal, not a toast queue, not a card. It states the
@@ -125,7 +125,7 @@ function ProviderAccountsNoticeImpl(): JSX.Element | null {
     <div
       role="status"
       aria-live="polite"
-      aria-label="Connected provider accounts"
+      aria-label="Available provider connections"
       data-testid="provider-accounts-notice"
       className="flex h-7 flex-shrink-0 items-center gap-2 border-b border-subtle bg-canvas px-4 text-xs"
     >

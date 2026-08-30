@@ -196,7 +196,8 @@ function OnboardingImpl({
   // The first turn of a brand-new project is a turn like any other: it has to
   // name the model it runs on. There is no session yet to carry a default, so
   // the inventory's first available model is what it gets.
-  const modelSelection = useModelSelection(useModelInventory());
+  const modelInventory = useModelInventory();
+  const modelSelection = useModelSelection(modelInventory);
   const inFlightRecoveryRef = useRef<{ operationKey: string; session: Session | null } | null>(null);
   const [partialRecovery, setPartialRecovery] = useState<{ operationKey: string; session: Session } | null>(null);
 
@@ -315,7 +316,13 @@ function OnboardingImpl({
     const objective = initialPrompt.trim();
     try {
       const { session, operationKey } = await createWorkspaceSession(objective);
-      if (objective && session.active_thread_id) {
+      const preserveDraft = objective.length > 0 && !modelSelection.selected;
+      if (preserveDraft) {
+        // Opening a project must not discard a useful first-task draft just
+        // because model discovery is empty or temporarily unavailable. The
+        // composer can resume it once a model is connected in Settings.
+        setDraft("__new__", initialPrompt);
+      } else if (objective && session.active_thread_id) {
         const resumed = onboardingMutation.acquire(JSON.stringify({ projectPath, objective }));
         if (
           (resumed.completedSteps.task_started || resumed.completedSteps.turn_started)
@@ -371,7 +378,7 @@ function OnboardingImpl({
       }
       onboardingMutation.settle(operationKey);
       inFlightRecoveryRef.current = null;
-      clearCompletedDraft();
+      if (!preserveDraft) clearCompletedDraft();
       onComplete({ projectPath: projectPath || null, initialPrompt, session, skipped: false });
     } catch (err) {
       const recovery = inFlightRecoveryRef.current;
@@ -408,6 +415,7 @@ function OnboardingImpl({
     onboardingMutation,
     projectPath,
     selectTask,
+    setDraft,
   ]);
 
   const continueWithPartialProject = useCallback((): void => {
@@ -470,6 +478,11 @@ function OnboardingImpl({
   // Only complain once there is something to complain about — an empty field
   // on first paint is not a mistake the operator has made yet.
   const showsPathError = projectPath.length > 0 && !isAbsoluteLocalPath(projectPath);
+  const modelSummary = modelInventory.status === "loading"
+    ? "Checking model access…"
+    : modelSelection.selected
+      ? `${modelSelection.selected.label} ready`
+      : "No model connected yet — your project and draft will be preserved";
 
   return (
     <DialogSurface
@@ -535,6 +548,13 @@ function OnboardingImpl({
               Enter an absolute path, starting with “/”.
             </p>
           ) : null}
+          {isAbsoluteLocalPath(projectPath) ? (
+            <p className="ui-meta mt-2 flex flex-wrap gap-x-3 gap-y-1 text-secondary" role="status">
+              <span>Route: local workspace</span>
+              <span>Access: untrusted until approved</span>
+              <span>{modelSummary}</span>
+            </p>
+          ) : null}
 
           {!projectOnly ? (
             <section className="mt-6" aria-labelledby="setup-task-heading">
@@ -576,7 +596,7 @@ function OnboardingImpl({
 
           <footer className="mt-6 flex items-center justify-between gap-3">
             <Button size="lg" variant="ghost" onClick={skip} disabled={creating}>
-              {projectOnly ? "Cancel" : "Not now"}
+              {projectOnly ? "Cancel" : "Skip setup"}
             </Button>
             <Button
               size="lg"
