@@ -417,11 +417,22 @@ import {
 import { CacheRatioMonitor } from "./agent/cache-telemetry.js";
 import {
   runSessionRecall,
+  sessionRecallTextCache,
+  SESSION_RECALL_SOURCE_MAX_CHARS,
   SESSION_RECALL_SOURCE_MAX_BYTES,
   type SessionRecallResult,
   type SessionRecallStore,
   type SessionRecallTurn,
 } from "./agent/session-recall.js";
+import {
+  runCompactionRecallTool,
+  type CompactionRecallToolResult,
+} from "./agent/compaction-recall-tool.js";
+import { createExactCompactionRecallStore } from "./agent/compaction-recall-store.js";
+import {
+  SessionRecallFtsIndex,
+  type SessionRecallIndexDocument,
+} from "./agent/session-recall-index.js";
 import { ProviderTransportError, withProviderRetry } from "./providers/provider-retry.js";
 import { boundedStreamOutputReserve } from "./providers/provider-response-budget.js";
 import { createNativeDirectExecutor } from "./providers/native-direct-executor.js";
@@ -441,8 +452,6 @@ import {
   DEFAULT_COMPACT_THRESHOLD_TOKENS,
   runCompaction,
   SUMMARY_SYSTEM_INSTRUCTIONS,
-  type CompactionRecallRequest,
-  type CompactionRecallResult,
   type CompactionStore,
   type Summarizer,
 } from "./agent/compaction-service.js";
@@ -865,6 +874,7 @@ const db = new PrismaClient({
 });
 
 const scopedDelegationDatabase = new Database(sqliteDatabasePath(DATABASE_URL));
+const sessionRecallIndex = new SessionRecallFtsIndex(scopedDelegationDatabase);
 const scopedDelegationRepository = new SqliteDurableTaskRepository(
   new SqliteDatabaseAdapter({
     exec: (sql) => scopedDelegationDatabase.exec(sql),
@@ -15273,6 +15283,16 @@ async function projectSessionRecallTurns(
 }
 
 function createSessionRecallStore(artifacts: ArtifactClient): SessionRecallStore {
+  const readArtifactText = async (uri: string): Promise<string> => {
+    const hash = artifactUriHash(uri);
+    if (hash === null) throw new Error(`session recall source is not a content-addressed artifact: ${uri}`);
+    const metadata = await artifacts.metadata(hash as ContentHash);
+    if (metadata.bytes > BigInt(SESSION_RECALL_SOURCE_MAX_BYTES)) {
+      throw new Error(`session recall source exceeds the ${SESSION_RECALL_SOURCE_MAX_BYTES}-byte read bound`);
+    }
+    const bytes = await artifacts.get(hash as ContentHash);
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  };
   return {
     listCompletedTurns: async ({ taskId, threadId, beforeSequence, limit }) => {
       const rows = await db.turn.findMany({
@@ -15310,17 +15330,155 @@ function createSessionRecallStore(artifacts: ArtifactClient): SessionRecallStore
       if (row === null) return null;
       return (await projectSessionRecallTurns([row]))[0] ?? null;
     },
-    readArtifactText: async (uri) => {
-      const hash = artifactUriHash(uri);
-      if (hash === null) throw new Error(`session recall source is not a content-addressed artifact: ${uri}`);
-      const metadata = await artifacts.metadata(hash as ContentHash);
-      if (metadata.bytes > BigInt(SESSION_RECALL_SOURCE_MAX_BYTES)) {
-        throw new Error(`session recall source exceeds the ${SESSION_RECALL_SOURCE_MAX_BYTES}-byte read bound`);
+    searchCompletedTurns: async ({
+      taskId,
+      threadId,
+      beforeSequence,
+      scanLimit,
+      query,
+      cacheObserver,
+    }) => {
+      const rows = await db.turn.findMany({
+        where: {
+          taskId,
+          threadId,
+          state: "COMPLETED",
+          sequence: { lt: beforeSequence },
+        },
+        orderBy: { sequence: "desc" },
+        take: scanLimit + 1,
+        select: {
+          id: true,
+          taskId: true,
+          threadId: true,
+          sequence: true,
+          completedAt: true,
+          initiatingInputArtifact: true,
+        },
+      });
+      const candidateRows = rows.slice(0, scanLimit);
+      const candidates = await projectSessionRecallTurns(candidateRows);
+      if (candidates.length === 0) {
+        return {
+          turns: [],
+          scannedTurns: 0,
+          nextBeforeSequence: null,
+          backfilledTurns: 0,
+          sourceFailures: 0,
+        };
       }
-      const bytes = await artifacts.get(hash as ContentHash);
-      return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      const states = sessionRecallIndex.currentStates(candidates.map((turn) => turn.id));
+      const stale = candidates.flatMap((turn) => {
+        const sourceIdentity = computeContentHash(canonicalJson({
+          schema: "terminus.session-recall-fts-source.v1",
+          user_artifact: turn.userArtifactUri,
+          assistant_artifact: turn.assistantArtifactUri,
+          assistant_summary: turn.assistantSummary,
+          max_chars_per_source: SESSION_RECALL_SOURCE_MAX_CHARS,
+        }));
+        const current = states.get(turn.id);
+        return current?.sourceIdentity === sourceIdentity && current.complete
+          ? []
+          : [{ turn, sourceIdentity }];
+      });
+      const documents: SessionRecallIndexDocument[] = [];
+      let sourceFailures = 0;
+      for (let offset = 0; offset < stale.length; offset += 4) {
+        const batch = stale.slice(offset, offset + 4);
+        const projected = await Promise.all(batch.map(async ({ turn, sourceIdentity }) => {
+          let failures = 0;
+          const readIndexText = async (uri: string | null, fallback: string): Promise<string> => {
+            if (uri === null) return fallback;
+            try {
+              return (await sessionRecallTextCache.read(uri, readArtifactText, cacheObserver)).text;
+            } catch {
+              failures += 1;
+              return fallback;
+            }
+          };
+          const [userText, assistantText] = await Promise.all([
+            readIndexText(turn.userArtifactUri, ""),
+            readIndexText(turn.assistantArtifactUri, turn.assistantSummary),
+          ]);
+          return {
+            failures,
+            document: {
+              turnId: turn.id,
+              taskId: turn.taskId,
+              threadId: turn.threadId,
+              sequence: turn.sequence,
+              completedAt: turn.completedAt,
+              userText,
+              assistantText: assistantText.length > 0 ? assistantText : turn.assistantSummary,
+              sourceIdentity,
+              complete: failures === 0,
+            } satisfies SessionRecallIndexDocument,
+          };
+        }));
+        for (const result of projected) {
+          sourceFailures += result.failures;
+          documents.push(result.document);
+        }
+      }
+      sessionRecallIndex.upsertMany(documents);
+      const oldestSequence = candidates.at(-1)?.sequence;
+      if (oldestSequence === undefined) throw new Error("session recall index lost its candidate window");
+      const hits = sessionRecallIndex.search({
+        taskId,
+        threadId,
+        query,
+        beforeSequence,
+        fromSequenceInclusive: oldestSequence,
+        limit: scanLimit,
+      });
+      const byId = new Map(candidates.map((turn) => [turn.id, turn]));
+      return {
+        turns: hits.flatMap((hit) => {
+          const turn = byId.get(hit.turnId);
+          return turn === undefined ? [] : [turn];
+        }),
+        scannedTurns: candidates.length,
+        nextBeforeSequence: rows.length > candidateRows.length ? oldestSequence : null,
+        backfilledTurns: documents.length,
+        sourceFailures,
+      };
     },
+    readArtifactText,
   };
+}
+
+function createCurrentTurnCompactionRecallStore(
+  turnId: string,
+  artifacts: ArtifactClient,
+) {
+  return createExactCompactionRecallStore({
+    expectedTurnId: turnId,
+    persistence: {
+      listCurrentTurnSummaryRows: async ({ turnId: summaryTurnId }) => db.episode.findMany({
+        where: { turnId: summaryTurnId, kind: "summary" },
+        orderBy: [{ sequence: "desc" }, { id: "desc" }],
+        select: {
+          id: true,
+          turnId: true,
+          sequence: true,
+          sourceVersionsJson: true,
+        },
+      }),
+      listSourceEpisodeRows: async ({ turnId: sourceTurnId, episodeIds }) => db.episode.findMany({
+        where: { turnId: sourceTurnId, id: { in: [...episodeIds] } },
+        orderBy: [{ sequence: "asc" }, { id: "asc" }],
+        select: {
+          id: true,
+          turnId: true,
+          kind: true,
+          sequence: true,
+          toolCallId: true,
+          contentArtifact: true,
+        },
+      }),
+      readCasBytes: async ({ contentHash }) => artifacts.get(contentHashSchema.parse(contentHash)),
+    },
+  });
 }
 
 function sessionRecallSourceVersions(result: SessionRecallResult): Readonly<Record<string, string>> {
@@ -15341,6 +15499,31 @@ function sessionRecallSummary(result: SessionRecallResult): string {
     ? ""
     : `; continue before turn ${result.next_before_sequence}`;
   return `Recalled ${result.results.length} completed ${noun}${scanned} in this task/thread${continuation}`;
+}
+
+function compactionRecallSourceVersions(
+  result: CompactionRecallToolResult,
+): Readonly<Record<string, string>> {
+  return Object.fromEntries(result.results.map((entry) => [entry.source_uri, entry.source_sha256]));
+}
+
+function compactionRecallSummary(result: CompactionRecallToolResult): string {
+  const noun = result.results.length === 1 ? "source episode" : "source episodes";
+  return `Expanded ${result.results.length} exact ${noun} from the current turn's compaction summary`;
+}
+
+function compactionRecallContinuation(result: CompactionRecallToolResult): string | null {
+  if (result.continuation !== null) {
+    return `recall compaction_browse with summary_hash ${result.summary_hash} and continuation ${result.continuation}`;
+  }
+  const truncated = result.results.find((entry) => entry.content_truncated);
+  if (truncated === undefined) return null;
+  const offset = result.action === "compaction_read"
+    ? truncated.next_offset_chars ?? truncated.previous_offset_chars
+    : truncated.previous_offset_chars ?? truncated.next_offset_chars;
+  return offset === null
+    ? null
+    : `recall compaction_read with summary_hash ${result.summary_hash}, episode_id ${truncated.episode_id}, and offset_chars ${offset}`;
 }
 
 async function settleStandaloneProviderTool(
@@ -15471,6 +15654,70 @@ async function settleStandaloneProviderTool(
   // still crosses the kernel boundary, but this query creates no workspace
   // side effect, approval, or durable semantic memory claim.
   if (call.toolId === "recall") {
+    if (call.arguments.action === "compaction_browse" || call.arguments.action === "compaction_read") {
+      const startedAt = performance.now();
+      try {
+        const recalled = await runCompactionRecallTool({
+          turnId: input.turnId,
+          request: call.arguments,
+          store: createCurrentTurnCompactionRecallStore(input.turnId, input.artifactClient),
+        });
+        const elapsed = performance.now() - startedAt;
+        const base = okResult(recalled, {
+          toolCallId,
+          traceId: input.turnId,
+          summary: compactionRecallSummary(recalled),
+          sourceVersions: compactionRecallSourceVersions(recalled),
+          timing: { executionMs: elapsed, totalMs: elapsed },
+        });
+        const continuation = compactionRecallContinuation(recalled);
+        const result: ToolResult<unknown> = continuation === null
+          ? base
+          : {
+              ...base,
+              status: "partial",
+              truncation: {
+                occurred: true,
+                reason: recalled.continuation !== null
+                  ? "more exact source episodes remain outside this bounded page"
+                  : "the exact source episode was excerpted within the requested character budget",
+                continuation,
+              },
+            };
+        return persistSettledToolResult({
+          input,
+          call,
+          toolCallId,
+          callTranscriptArtifactUri: callTranscriptArtifact.uri,
+          sideEffectId: null,
+          result,
+          workspaceRevisionBefore,
+          workspaceRevisionAfter: workspaceRevisionBefore,
+          ...operationContext,
+        });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        const elapsed = performance.now() - startedAt;
+        const result = errorResult(message, {
+          toolCallId,
+          traceId: input.turnId,
+          status: "error",
+          summary: `Compaction recall failed: ${message}`,
+          timing: { executionMs: elapsed, totalMs: elapsed },
+        });
+        return persistSettledToolResult({
+          input,
+          call,
+          toolCallId,
+          callTranscriptArtifactUri: callTranscriptArtifact.uri,
+          sideEffectId: null,
+          result,
+          workspaceRevisionBefore,
+          workspaceRevisionAfter: workspaceRevisionBefore,
+          ...operationContext,
+        });
+      }
+    }
     const startedAt = performance.now();
     const recalled = await runSessionRecall({
       taskId: input.taskId,
@@ -15480,6 +15727,7 @@ async function settleStandaloneProviderTool(
       store: createSessionRecallStore(input.artifactClient),
     });
     const elapsed = performance.now() - startedAt;
+    const { telemetry: _telemetry, ...modelVisibleRecall } = recalled;
     const base = okResult(recalled, {
       toolCallId,
       traceId: input.turnId,
@@ -15525,6 +15773,7 @@ async function settleStandaloneProviderTool(
       callTranscriptArtifactUri: callTranscriptArtifact.uri,
       sideEffectId: null,
       result,
+      modelVisibleData: modelVisibleRecall,
       workspaceRevisionBefore,
       workspaceRevisionAfter: workspaceRevisionBefore,
       ...operationContext,
@@ -16318,6 +16567,8 @@ async function persistSettledToolResult(input: {
   readonly callTranscriptArtifactUri: string;
   readonly sideEffectId: string | null;
   readonly result: ToolResult<unknown>;
+  /** Optional data projection; the full result artifact retains result.data. */
+  readonly modelVisibleData?: unknown;
   readonly workspaceRevisionBefore?: string | null | undefined;
   readonly workspaceRevisionAfter?: string | null | undefined;
   readonly verificationDelta?: string | null | undefined;
@@ -16335,7 +16586,10 @@ async function persistSettledToolResult(input: {
   // Dual-path projection (ADR-0039 §11): the model-visible transcript carries
   // a minimal view of the same settled result; ceremony stays in the
   // observability artifact ingested above.
-  const modelVisibleRecord = projectModelVisibleResult(input.result);
+  const modelVisibleRecord = projectModelVisibleResult(
+    input.result,
+    input.modelVisibleData === undefined ? undefined : { data: input.modelVisibleData },
+  );
   const projectedResult = fullResultBytes <= MAX_TOOL_MODEL_RESULT_BYTES
     ? modelVisibleRecord
     : z.record(z.string(), z.unknown()).parse(canonicalJson({
@@ -17909,108 +18163,7 @@ async function agentLoop(turnId: string): Promise<void> {
           });
         });
       },
-      recallCompaction: async (input: CompactionRecallRequest): Promise<CompactionRecallResult> => {
-        if (input.turnId !== turnId) {
-          throw new Error(`compaction recall turn mismatch for ${input.turnId}`);
-        }
-        if (!Number.isSafeInteger(input.maxEpisodes) || input.maxEpisodes <= 0) {
-          throw new Error("compaction recall maxEpisodes must be a positive safe integer");
-        }
-
-        const summaryRows = await db.episode.findMany({
-          where: { turnId: input.turnId, kind: "summary" },
-          orderBy: [{ sequence: "desc" }, { id: "desc" }],
-          select: { sourceVersionsJson: true },
-        });
-        const summaryMetadata = summaryRows
-          .map((row) => safeParse<Record<string, unknown> | null>(row.sourceVersionsJson, null))
-          .find((metadata) => metadata?.summaryHash === input.summaryHash);
-        if (summaryMetadata === undefined || summaryMetadata === null) {
-          throw new Error(`compaction summary ${input.summaryHash} is unavailable`);
-        }
-        const sourceEpisodeIds = Array.isArray(summaryMetadata.sourceEpisodeIds)
-          ? summaryMetadata.sourceEpisodeIds.filter((value): value is string => typeof value === "string")
-          : [];
-        if (sourceEpisodeIds.length === 0) {
-          throw new Error(`compaction summary ${input.summaryHash} has no source episodes`);
-        }
-        const sourceIds = new Set(sourceEpisodeIds);
-        const requestedIds = [...new Set(input.episodeIds)];
-        if (requestedIds.some((id) => !sourceIds.has(id))) {
-          throw new Error("compaction recall requested an episode outside the summary source set");
-        }
-        const selectedIds = requestedIds.length > 0 ? requestedIds : sourceEpisodeIds;
-        const rows = await db.episode.findMany({
-          where: { turnId: input.turnId, id: { in: selectedIds } },
-          orderBy: [{ sequence: "asc" }, { id: "asc" }],
-          select: { id: true, kind: true, sequence: true, toolCallId: true, contentArtifact: true },
-        });
-        if (rows.length !== selectedIds.length) {
-          throw new Error(`compaction recall source set is incomplete for ${input.summaryHash}`);
-        }
-        const sourceArtifacts = summaryMetadata.sourceArtifacts;
-        const decoder = new TextDecoder("utf-8", { fatal: true });
-        const episodes = [] as Array<{
-          readonly id: string;
-          readonly kind: string;
-          readonly sequence: number;
-          readonly toolCallId: string | null;
-          readonly contentJson: string;
-          readonly contentArtifact: string;
-          readonly byteSize: number;
-        }>;
-        for (const row of rows) {
-          const artifactUri = row.contentArtifact;
-          const artifactHash = artifactUriHash(artifactUri);
-          if (artifactUri === null || artifactHash === null) {
-            throw new Error(`compaction source ${row.id} has no immutable artifact`);
-          }
-          if (
-            typeof sourceArtifacts !== "object"
-            || sourceArtifacts === null
-            || Array.isArray(sourceArtifacts)
-            || (sourceArtifacts as Record<string, unknown>)[row.id] !== artifactUri
-          ) {
-            throw new Error(`compaction source ${row.id} artifact identity changed`);
-          }
-          const bytes = await artifactClient.get(contentHashSchema.parse(artifactHash));
-          episodes.push({
-            id: row.id,
-            kind: row.kind,
-            sequence: row.sequence,
-            toolCallId: row.toolCallId,
-            contentJson: decoder.decode(bytes),
-            contentArtifact: artifactUri,
-            byteSize: bytes.byteLength,
-          });
-        }
-        const query = input.query?.trim().toLocaleLowerCase() ?? "";
-        const matchingEpisodes = query.length === 0
-          ? episodes
-          : episodes.filter((episode) => episode.contentJson.toLocaleLowerCase().includes(query));
-        const continuationPrefix = `compaction:${encodeURIComponent(input.summaryHash)}:`;
-        let offset = 0;
-        if (input.continuation !== null) {
-          if (!input.continuation.startsWith(continuationPrefix)) {
-            throw new Error("compaction recall continuation does not match the summary");
-          }
-          const parsedOffset = Number(input.continuation.slice(continuationPrefix.length));
-          if (!Number.isSafeInteger(parsedOffset) || parsedOffset < 0) {
-            throw new Error("compaction recall continuation offset is invalid");
-          }
-          offset = parsedOffset;
-        }
-        const page = matchingEpisodes.slice(offset, offset + input.maxEpisodes);
-        const nextOffset = offset + page.length;
-        return {
-          schemaVersion: "terminus.compaction-recall.v1",
-          summaryHash: input.summaryHash,
-          episodes: page,
-          continuation: nextOffset < matchingEpisodes.length
-            ? `${continuationPrefix}${nextOffset}`
-            : null,
-        };
-      },
+      recallCompaction: createCurrentTurnCompactionRecallStore(turnId, artifactClient).recallCompaction,
     });
     // R4: one dedicated provider turn producing the structured handoff
     // summary. Rendered WITHOUT cache breakpoints (one-off call) and with a

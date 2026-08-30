@@ -12,7 +12,7 @@ export const TERMINUS_MINIMAL_PROFILE_VERSION = "1" as const;
  * independent promotion gates pass.
  */
 export const TERMINUS_ADAPTIVE_PROFILE_ID = "terminus-adaptive" as const;
-export const TERMINUS_ADAPTIVE_PROFILE_VERSION = "3" as const;
+export const TERMINUS_ADAPTIVE_PROFILE_VERSION = "5" as const;
 /**
  * The always-on coding surface. Every id here is declared to the provider,
  * accepted by the dispatch guard, and executable.

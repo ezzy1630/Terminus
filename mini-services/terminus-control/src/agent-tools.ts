@@ -549,6 +549,21 @@ export const standaloneRecallInputSchema = z.discriminatedUnion("action", [
     turn_sequence: z.number().int().min(1),
     max_chars: z.number().int().min(512).max(16_000).default(6_000),
   }).strict(),
+  z.object({
+    action: z.literal("compaction_browse"),
+    summary_hash: sha256Schema.optional(),
+    query: z.string().trim().min(1).max(256).optional(),
+    continuation: z.string().min(1).max(512).optional(),
+    limit: z.number().int().min(1).max(10).default(3),
+    max_chars: z.number().int().min(512).max(16_000).default(6_000),
+  }).strict(),
+  z.object({
+    action: z.literal("compaction_read"),
+    summary_hash: sha256Schema,
+    episode_id: z.string().trim().min(1).max(255),
+    offset_chars: z.number().int().min(0).default(0),
+    max_chars: z.number().int().min(512).max(16_000).default(6_000),
+  }).strict(),
 ]);
 
 export type StandaloneReadInput = z.infer<typeof standaloneReadInputSchema>;
@@ -560,6 +575,10 @@ export type StandaloneGrepInput = z.infer<typeof standaloneGrepInputSchema>;
 export type StandaloneGlobInput = z.infer<typeof standaloneGlobInputSchema>;
 export type StandaloneInspectInput = z.infer<typeof standaloneInspectInputSchema>;
 export type StandaloneRecallInput = z.infer<typeof standaloneRecallInputSchema>;
+export type StandaloneSessionRecallInput = Extract<
+  StandaloneRecallInput,
+  { readonly action: "browse" | "search" | "read" }
+>;
 
 /**
  * The workspace-relative form of a model-supplied path.
@@ -657,7 +676,7 @@ export type ParsedStandaloneToolCall =
   | { readonly providerCallId: string; readonly toolId: "grep"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneGrepInput }
   | { readonly providerCallId: string; readonly toolId: "glob"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneGlobInput }
   | { readonly providerCallId: string; readonly toolId: "inspect"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneInspectInput }
-  | { readonly providerCallId: string; readonly toolId: "recall"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneRecallInput };
+  | { readonly providerCallId: string; readonly toolId: "recall"; readonly toolVersion: "standalone-v3"; readonly arguments: StandaloneRecallInput };
 
 export type StandaloneWebFetchInput = z.infer<typeof standaloneWebFetchInputSchema>;
 export type StandaloneExecPollInput = z.infer<typeof standaloneExecPollInputSchema>;
@@ -974,8 +993,8 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
   },
   {
     id: "recall",
-    version: "standalone-v1",
-    summary: "Browse, search, or read exact completed turns from this task and thread. Results come from immutable user/assistant artifacts with source URIs and explicit continuation. This does not access other tasks, infer durable memories, or change the prompt automatically.",
+    version: "standalone-v3",
+    summary: "Browse, search, or read exact completed turns in this task/thread, or expand exact source episodes behind the current turn's compaction summary. Results use immutable artifacts, bounded excerpts, source offsets, and explicit continuations. This does not access other tasks, infer durable memories, or change the prompt automatically.",
     inputSchema: {
       oneOf: [
         {
@@ -986,6 +1005,31 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
             action: { const: "browse" },
             before_sequence: { type: "integer", minimum: 1 },
             limit: { type: "integer", minimum: 1, maximum: 10, default: 5 },
+            max_chars: { type: "integer", minimum: 512, maximum: 16_000, default: 6_000 },
+          },
+        },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["action"],
+          properties: {
+            action: { const: "compaction_browse" },
+            summary_hash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+            query: { type: "string", minLength: 1, maxLength: 256 },
+            continuation: { type: "string", minLength: 1, maxLength: 512 },
+            limit: { type: "integer", minimum: 1, maximum: 10, default: 3 },
+            max_chars: { type: "integer", minimum: 512, maximum: 16_000, default: 6_000 },
+          },
+        },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["action", "summary_hash", "episode_id"],
+          properties: {
+            action: { const: "compaction_read" },
+            summary_hash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+            episode_id: { type: "string", minLength: 1, maxLength: 255 },
+            offset_chars: { type: "integer", minimum: 0, default: 0 },
             max_chars: { type: "integer", minimum: 512, maximum: 16_000, default: 6_000 },
           },
         },
@@ -1203,7 +1247,7 @@ export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStan
     case "inspect":
       return { providerCallId: call.toolCallId, toolId: "inspect", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneInspectInputSchema) };
     case "recall":
-      return { providerCallId: call.toolCallId, toolId: "recall", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneRecallInputSchema) };
+      return { providerCallId: call.toolCallId, toolId: "recall", toolVersion: "standalone-v3", arguments: parseArguments(call, standaloneRecallInputSchema) };
     default:
       throw new InvalidToolCallError({
         toolName: call.toolName,
@@ -1422,12 +1466,16 @@ const MODEL_VISIBLE_RESULT_STATUSES = new Set(["success", "partial"]);
  */
 export function projectModelVisibleResult(
   result: ToolResult<unknown>,
+  options?: { readonly data?: unknown },
 ): Readonly<Record<string, unknown>> {
   const ok = MODEL_VISIBLE_RESULT_STATUSES.has(result.status);
   // Payload survives a non-success status. Dropping it deleted the stdout and
   // stderr of every failing command, every failing test run and every
   // no-match search — the exact bytes the model needs to fix the thing.
-  const data = projectModelVisibleData(result) ?? null;
+  const projectionSource = options !== undefined && "data" in options
+    ? { ...result, data: options.data }
+    : result;
+  const data = projectModelVisibleData(projectionSource) ?? null;
   const projection: Record<string, unknown> = {
     status: result.status,
     summary: result.summary,

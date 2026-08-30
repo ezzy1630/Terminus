@@ -41,6 +41,7 @@ compatibility and emits this note so `codegen-check` can detect drift.
 | `0027_turn_requested_budget.sql` |
 | `0028_provider_attempt_finish_reason.sql` |
 | `0029_provider_account_secret_saga.sql` |
+| `0030_session_recall_fts.sql` |
 
 If a future Rust crate adopts SQLx, replace this script with
 `cargo sqlx prepare --workspace --check` and emit the resulting

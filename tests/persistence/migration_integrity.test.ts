@@ -238,6 +238,65 @@ describe("Database Migration Integrity & Corruption Detection", () => {
     }
   });
 
+  test("session recall FTS migration upgrades an existing database and cascades index cleanup", async () => {
+    const testDir = join(tmpdir(), `terminus-mig-recall-${Date.now()}`);
+    mkdirSync(testDir, { recursive: true });
+    const dbPath = join(testDir, "test.db");
+
+    try {
+      const legacy = new Database(dbPath);
+      legacy.exec("PRAGMA foreign_keys = ON");
+      applyMigrationsThrough(legacy, 29);
+      const now = Date.now();
+      legacy.query(
+        "INSERT INTO workspaces (id, kind, root_uri, canonical_root, trust, policy_profile_id, created_at, last_opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("workspace-recall", "local_directory", "file:///workspace", "/workspace-recall", "trusted", "default", now, now);
+      legacy.query(
+        "INSERT INTO sessions (id, workspace_id, owner_principal, title, status, default_model_profile, default_permission_profile, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("session-recall", "workspace-recall", "tester", "recall", "active", "default", "default", "{}", now, now);
+      legacy.query(
+        "INSERT INTO threads (id, session_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      ).run("thread-recall", "session-recall", "active", now, now);
+      legacy.query(
+        "INSERT INTO tasks (id, session_id, thread_id, status, phase, budget_json, scope_digest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("task-recall", "session-recall", "thread-recall", "COMPLETED", "FINALIZE", "{}", "sha256:scope", now, now);
+      legacy.query(
+        "INSERT INTO turns (id, thread_id, task_id, sequence, state, initiating_actor, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run("turn-recall", "thread-recall", "task-recall", 1, "COMPLETED", "agent", now);
+      legacy.close();
+
+      expect(await runMigrations(dbPath, { TERMINUS_MIGRATION_TEST_FAIL_AFTER: "30:1" })).not.toBe(0);
+      const rolledBack = new Database(dbPath);
+      expect(rolledBack.query(
+        "SELECT name FROM sqlite_master WHERE name = 'session_turn_fts'",
+      ).get()).toBeNull();
+      expect(rolledBack.query(
+        "SELECT version FROM schema_migrations WHERE version = 30",
+      ).get()).toBeNull();
+      expect(rolledBack.query("SELECT id FROM turns WHERE id = ?").get("turn-recall")).not.toBeNull();
+      rolledBack.close();
+
+      expect(await runMigrations(dbPath)).toBe(0);
+      const upgraded = new Database(dbPath);
+      upgraded.exec("PRAGMA foreign_keys = ON");
+      expect(upgraded.query("SELECT version FROM schema_migrations WHERE version = 30").get()).not.toBeNull();
+      expect(upgraded.query("SELECT id FROM turns WHERE id = ?").get("turn-recall")).not.toBeNull();
+
+      upgraded.query(
+        "INSERT INTO session_turn_fts (task_id, thread_id, turn_id, turn_sequence, completed_at, user_text, assistant_text) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run("task-recall", "thread-recall", "turn-recall", 1, String(now), "recall me", "found it");
+      upgraded.query(
+        "INSERT INTO session_turn_fts_state (turn_id, task_id, thread_id, turn_sequence, source_identity, complete, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run("turn-recall", "task-recall", "thread-recall", 1, "sha256:source", 1, now);
+      upgraded.query("DELETE FROM turns WHERE id = ?").run("turn-recall");
+      expect(upgraded.query("SELECT turn_id FROM session_turn_fts_state").all()).toEqual([]);
+      expect(upgraded.query("SELECT turn_id FROM session_turn_fts").all()).toEqual([]);
+      upgraded.close();
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   test("A mid-migration failure rolls back schema and can be retried", async () => {
     const testDir = join(tmpdir(), `terminus-mig-retry-${Date.now()}`);
     mkdirSync(testDir, { recursive: true });

@@ -93,6 +93,7 @@ describe("terminus-minimal profile", () => {
     expect(minimal.profileId).toBe("terminus-minimal");
     expect(minimal.subagentsEnabled).toBe(false);
     expect(adaptive.profileId).toBe(TERMINUS_ADAPTIVE_PROFILE_ID);
+    expect(adaptive.version).toBe("5");
     expect(adaptive.subagentsEnabled).toBe(true);
     expect(adaptive.routerEnabled).toBe(false);
     expect(adaptive.memoryEnabled).toBe(false);

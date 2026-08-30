@@ -114,6 +114,34 @@ describe("standalone provider tools", () => {
       scan_limit: 30,
       max_chars: 6_000,
     });
+    expect(recall.toolVersion).toBe("standalone-v3");
+    const summaryHash = `sha256:${"a".repeat(64)}`;
+    const compactionBrowse = parseStandaloneToolCall({
+      toolCallId: "recall-compaction-browse",
+      toolName: "recall",
+      arguments: { action: "compaction_browse" },
+    });
+    expect(compactionBrowse.arguments).toEqual({
+      action: "compaction_browse",
+      limit: 3,
+      max_chars: 6_000,
+    });
+    const compactionRead = parseStandaloneToolCall({
+      toolCallId: "recall-compaction-read",
+      toolName: "recall",
+      arguments: {
+        action: "compaction_read",
+        summary_hash: summaryHash,
+        episode_id: "episode-1",
+      },
+    });
+    expect(compactionRead.arguments).toEqual({
+      action: "compaction_read",
+      summary_hash: summaryHash,
+      episode_id: "episode-1",
+      offset_chars: 0,
+      max_chars: 6_000,
+    });
     expect(toolEffectMetadata(recall)).toMatchObject({
       effectType: "READ_LOCAL",
       resourceUri: "session://history",
@@ -125,6 +153,11 @@ describe("standalone provider tools", () => {
       toolCallId: "recall-bad",
       toolName: "recall",
       arguments: { action: "search", query: "", scan_limit: 500 },
+    })).toThrow(/invalid/);
+    expect(() => parseStandaloneToolCall({
+      toolCallId: "recall-compaction-bad",
+      toolName: "recall",
+      arguments: { action: "compaction_read", summary_hash: "sha256:nope", episode_id: "episode-1" },
     })).toThrow(/invalid/);
     expect(() => parseStandaloneToolCall({ toolCallId: "x", toolName: "exec", arguments: { program: "sh; exit" } })).toThrow(/invalid/);
   });
@@ -755,6 +788,20 @@ describe("dual-path model-visible projection (ADR-0039 §11)", () => {
     })) as Record<string, unknown>;
     const validations = ((projected.data as Record<string, unknown>).validations as unknown[]).length;
     expect(validations).toBe(1);
+  });
+
+  test("a settlement can persist private data while overriding the model projection", () => {
+    const full = makeResult({
+      data: {
+        results: [{ turn_id: "turn-1" }],
+        telemetry: { retrieval_method: "fts5", cache_hits: 1 },
+      },
+    });
+    const projected = projectModelVisibleResult(full, {
+      data: { results: [{ turn_id: "turn-1" }] },
+    }) as Record<string, unknown>;
+    expect(projected.data).toEqual({ results: [{ turn_id: "turn-1" }] });
+    expect((full.data as Record<string, unknown>).telemetry).toBeDefined();
   });
 
   test("model-visible transcript stays far below the per-call byte cap", () => {
