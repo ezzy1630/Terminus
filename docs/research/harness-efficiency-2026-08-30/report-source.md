@@ -181,7 +181,7 @@ The test suite includes explicit assertions for:
 - cache-write usage decoding, provider-specific write pricing, and runtime budget reconciliation.
 - full latest-breakpoint span propagation, explicit cold-write admission, and automatic-cache cold-miss admission.
 
-The complete repository gate is reported separately in the branch handoff. A clean worktree initially lacked Prisma output; after local client generation, `typecheck:scripts` reached one unrelated existing error in `mini-services/terminus-control/src/permission-profiles.ts:110` (`TS2366`). This branch does not modify that file.
+The complete repository gate is reported separately in the branch handoff. A clean worktree initially lacked Prisma output; after local client generation, `typecheck:scripts` reached one unrelated existing error in `mini-services/terminus-control/src/permission-profiles.ts:110` (`TS2366`). This branch does not modify that file. `just codegen` refreshed the generated inventory, but the final `just codegen-check` retry was blocked at its second `buf generate proto` by the external BSR `resource_exhausted: too many requests` rate limit.
 
 ## Recommended next experiments
 
