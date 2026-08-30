@@ -241,8 +241,10 @@ def test_legacy_identity_decodes_as_incomplete_and_routing_is_hashed() -> None:
     )
     routed = build_evaluation_identity(request, environment_digest="sha256:env")
     serialized = routed.to_dict()
-    assert serialized["provider_endpoint_hash"].startswith("sha256:")
-    assert serialized["provider_account_hash"].startswith("sha256:")
+    endpoint_hash = serialized["provider_endpoint_hash"]
+    account_hash = serialized["provider_account_hash"]
+    assert isinstance(endpoint_hash, str) and endpoint_hash.startswith("sha256:")
+    assert isinstance(account_hash, str) and account_hash.startswith("sha256:")
     assert "provider.invalid" not in str(serialized)
     assert "account-secret-like-id" not in str(serialized)
 
@@ -282,4 +284,5 @@ def test_campaign_persists_error_row_when_harness_raises(tmp_path: Path) -> None
     assert failing.outcome is Outcome.ERROR
     assert "harness setup exploded" in failing.notes
     assert any(artifact.get("kind") == "cell_error" for artifact in failing.artifacts)
+    assert plan.output_dir is not None
     assert len(RunRecord.from_jsonl(plan.output_dir / "runs.jsonl")) == 2
