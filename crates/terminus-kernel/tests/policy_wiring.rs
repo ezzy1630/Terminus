@@ -308,9 +308,8 @@ async fn workspace_development_requires_a_profile_bound_capability() {
     assert_eq!(error.category(), ErrorCategory::Permission);
 }
 
-#[cfg(target_os = "macos")]
 #[tokio::test]
-async fn workspace_development_runs_arbitrary_local_programs_when_bound() {
+async fn workspace_development_rejects_native_secure_profile_even_when_bound() {
     let (_dir, kernel) = make_kernel();
     let token = mint_workspace_development_exec_token(&kernel.token_issuer);
     let ctx = ctx_with_token(&token);
@@ -320,7 +319,7 @@ async fn workspace_development_runs_arbitrary_local_programs_when_bound() {
         timeout_ms: 5_000,
         ..Default::default()
     };
-    kernel
+    let error = kernel
         .processes
         .start_in_profile(
             &ctx,
@@ -329,7 +328,9 @@ async fn workspace_development_runs_arbitrary_local_programs_when_bound() {
             "secure-local-default",
         )
         .await
-        .expect("profile-bound local program starts under the enforced macOS sandbox");
+        .expect_err("workspace-development must not run under the native secure profile");
+    assert_eq!(error.code(), ErrorCode::SandboxUnavailable);
+    assert_eq!(error.category(), ErrorCategory::SandboxUnavailable);
 }
 
 #[tokio::test]
@@ -353,7 +354,33 @@ async fn workspace_development_rejects_a_degraded_sandbox() {
         )
         .await
         .expect_err("workspace-development must never use the degraded sandbox");
-    assert_eq!(error.code(), ErrorCode::PermissionDenied);
+    assert_eq!(error.code(), ErrorCode::SandboxUnavailable);
+    assert_eq!(error.category(), ErrorCategory::SandboxUnavailable);
+}
+
+#[tokio::test]
+async fn workspace_development_isolated_profile_is_typed_unavailable_until_shipped() {
+    let (_dir, kernel) = make_kernel();
+    let token = mint_workspace_development_exec_token(&kernel.token_issuer);
+    let ctx = ctx_with_token(&token);
+    let command = CommandSpec {
+        program: "/usr/bin/true".to_string(),
+        cwd: WorkspacePath::new("ws-1", "."),
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    let error = kernel
+        .processes
+        .start_in_profile(
+            &ctx,
+            &workspace_development_intent(),
+            command,
+            "workspace-development-isolated",
+        )
+        .await
+        .expect_err("the isolated workspace profile is not shipped yet");
+    assert_eq!(error.code(), ErrorCode::SandboxUnavailable);
+    assert_eq!(error.category(), ErrorCategory::SandboxUnavailable);
 }
 
 #[tokio::test]
@@ -386,7 +413,7 @@ async fn workspace_development_rejects_a_narrow_workspace_scope() {
 }
 
 #[tokio::test]
-async fn workspace_development_still_denies_classified_raw_network_commands() {
+async fn workspace_development_native_profile_gate_precedes_raw_network_policy() {
     let (_dir, kernel) = make_kernel();
     let token = mint_workspace_development_exec_token(&kernel.token_issuer);
     let ctx = ctx_with_token(&token);
@@ -407,7 +434,8 @@ async fn workspace_development_still_denies_classified_raw_network_commands() {
         )
         .await
         .expect_err("workspace development must not grant raw network access");
-    assert_eq!(error.code(), ErrorCode::PolicyDenied);
+    assert_eq!(error.code(), ErrorCode::SandboxUnavailable);
+    assert_eq!(error.category(), ErrorCategory::SandboxUnavailable);
 }
 
 #[tokio::test]
@@ -749,14 +777,9 @@ async fn enforced_workspace_development_wrapper_uses_constrained_environment() {
 
     let mut events = kernel
         .processes
-        .start_in_profile(
-            &ctx,
-            &workspace_development_intent(),
-            command,
-            "secure-local-default",
-        )
+        .start_in_profile(&ctx, &empty_intent(), command, "secure-local-default")
         .await
-        .expect("enforced workspace-development process starts");
+        .expect("enforced default policy process starts");
     let mut stdout = Vec::new();
     while let Some(event) = events.recv().await {
         match event {

@@ -1676,13 +1676,17 @@ fn workspace_storage_key(workspace_id: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// The exact profile id required by the capability-bound workspace policy.
+/// This profile is intentionally not resolved until an isolated backend is
+/// shipped; accepting a native default here would turn a policy expansion
+/// into an unsandboxed authority expansion.
+const WORKSPACE_DEVELOPMENT_ISOLATED_SANDBOX_PROFILE_ID: &str = "workspace-development-isolated";
+
 /// Resolve a sandbox profile id to a `SandboxProfile`. The kernel currently
 /// ships one enforced profile (`default-restrictive`); `secure-local-default`
-/// (the config profile name) maps to it. Unknown ids fall back to the
-/// restrictive default so a stale or attacker-supplied id never widens
-/// permissions (SPEC §13.3: a named secure profile MUST exist and be the
-/// default). When multiple profiles are added, this MUST consult a profile
-/// registry keyed by id.
+/// (the config profile name) maps to it. Unknown ids are rejected rather than
+/// substituted with a weaker profile. When multiple profiles are added, this
+/// MUST consult a profile registry keyed by id.
 fn resolve_sandbox_profile(profile_id: &str) -> KernelResult<SandboxProfile> {
     match profile_id {
         "secure-local-default" | "default-restrictive" => {
@@ -1707,6 +1711,12 @@ fn resolve_sandbox_profile(profile_id: &str) -> KernelResult<SandboxProfile> {
             profile.network = terminus_sandbox::NetworkAccess::ProxyRequired;
             Ok(profile)
         }
+        WORKSPACE_DEVELOPMENT_ISOLATED_SANDBOX_PROFILE_ID => Err(KernelError::new(
+            terminus_kernel_protocol::ErrorCode::SandboxUnavailable,
+            terminus_kernel_protocol::ErrorCategory::SandboxUnavailable,
+            format!("sandbox profile `{profile_id}` is not available on this kernel"),
+            false,
+        )),
         _ => Err(KernelError::new(
             terminus_kernel_protocol::ErrorCode::InvalidArgument,
             terminus_kernel_protocol::ErrorCategory::Validation,
@@ -2109,14 +2119,13 @@ impl ProcessService {
                         false,
                     ));
                 }
-                if !matches!(
-                    sandbox_profile_id,
-                    "secure-local-default" | "default-restrictive"
-                ) {
+                if sandbox_profile_id != WORKSPACE_DEVELOPMENT_ISOLATED_SANDBOX_PROFILE_ID {
                     return Err(KernelError::new(
-                        terminus_kernel_protocol::ErrorCode::PermissionDenied,
-                        terminus_kernel_protocol::ErrorCategory::Permission,
-                        "workspace-development policy requires an enforced secure sandbox profile",
+                        terminus_kernel_protocol::ErrorCode::SandboxUnavailable,
+                        terminus_kernel_protocol::ErrorCategory::SandboxUnavailable,
+                        format!(
+                            "workspace-development policy requires sandbox profile `{WORKSPACE_DEVELOPMENT_ISOLATED_SANDBOX_PROFILE_ID}`"
+                        ),
                         false,
                     ));
                 }
