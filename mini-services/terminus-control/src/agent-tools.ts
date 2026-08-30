@@ -1150,13 +1150,20 @@ export const STANDALONE_ADAPTIVE_TOOL_IDS = ["inspect", "recall"] as const;
 /** The only tool exposed before the model decides workspace access is needed. */
 export const STANDALONE_INITIAL_TOOL_IDS = ["capability"] as const;
 
+const standaloneCapabilityToolSchema = STANDALONE_TOOL_SCHEMAS.find(
+  (schema) => schema.id === "capability",
+);
+if (standaloneCapabilityToolSchema === undefined) {
+  throw new Error("standalone capability schema is missing");
+}
+
 /**
  * The initial response has one effectful decision: activate the workspace or
  * answer directly. Hiding discovery actions here makes that phase impossible
  * to confuse with the post-activation capability catalog.
  */
 export const STANDALONE_WORKSPACE_ACTIVATION_TOOL_SCHEMA: ProviderToolSchema = {
-  ...STANDALONE_TOOL_SCHEMAS[0],
+  ...standaloneCapabilityToolSchema,
   summary: "Activate the task-scoped workspace context and built-in coding tools when the request depends on workspace facts, changes, or command execution.",
   inputSchema: {
     type: "object",
