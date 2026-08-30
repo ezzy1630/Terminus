@@ -86,7 +86,31 @@ EVENT_TYPES: tuple[str, ...] = (
     "agent.reviewed",
     "turn.finalizing",
     "turn.completed",
+    # Adapter-local lifecycle events are recorded by the offline runner while
+    # it drives the live control plane. They are evidence, not failures.
+    "harness.contract_admitted",
+    "harness.session_created",
+    "harness.session_defaults_applied",
+    "harness.task_created",
+    "harness.task_started",
+    "harness.turn_created",
+    "harness.metrics_reconciled",
+    "turn.response_validating",
+    "turn.provider_text_delta",
+    "turn.failed",
+    "tool.failed",
+    "task.repair_scheduled",
+    "turn.repair_pending",
+    "turn.repairing",
+    "verification.admitted",
+    "verification.no_runnable_checks",
+    "task.verification_not_runnable",
+    "turn.verification_not_applicable",
     "error.uncaught",
+    # Unknown future event names are wrapped here with their original name in
+    # the payload. This keeps the vocabulary queryable without misclassifying
+    # forward-compatible evidence as an uncaught exception.
+    "event.unknown",
 )
 
 
@@ -161,12 +185,13 @@ class TrajectoryRecorder:
         if self._closed:
             raise RuntimeError("recorder is finalized")
         if event_type not in EVENT_TYPES:
-            # We accept unknown types but record them under error.uncaught to
-            # keep the on-disk vocabulary closed. Production callers should
-            # only emit known types.
+            # Keep the on-disk vocabulary closed while making the original
+            # event name explicit. An unknown event is not evidence of an
+            # uncaught exception; callers can inspect and update the vocabulary
+            # independently of the run's failure state.
             payload = dict(payload or {})
-            payload["_unknown_event_type"] = event_type
-            event_type = "error.uncaught"
+            payload["unknown_event_type"] = event_type
+            event_type = "event.unknown"
         self._seq += 1
         ev = TrajectoryEvent(
             seq=self._seq,
