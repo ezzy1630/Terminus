@@ -69,8 +69,8 @@ impl EgressPolicy {
                 // IPv4-mapped IPv6 addresses can otherwise bypass the IPv4
                 // private-range checks when a resolver returns `::ffff:x.y.z.w`.
                 let segments = v6.segments();
-                let is_ipv4_mapped = segments[..5].iter().all(|segment| *segment == 0)
-                    && segments[5] == 0xffff;
+                let is_ipv4_mapped =
+                    segments[..5].iter().all(|segment| *segment == 0) && segments[5] == 0xffff;
                 if is_ipv4_mapped {
                     if let Some(v4) = v6.to_ipv4() {
                         return is_private_ipv4(v4);
