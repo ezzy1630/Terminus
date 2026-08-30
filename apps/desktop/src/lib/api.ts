@@ -62,6 +62,8 @@ import type {
   ProviderAccountMetadata,
   ProviderAccountsResponse,
   CodexLaneAccountResponse,
+  CodexLaneEventsResponse,
+  CodexLaneEvent,
   CodexLaneIdentity,
   CodexLaneModel,
   CodexLaneModelsResponse,
@@ -1192,6 +1194,37 @@ export class TerminusApiClient {
           hidden: responseBoolean(model.hidden, `Codex lane models.models[${index}].hidden`),
         };
       }),
+    };
+  }
+
+  /** Read only the bounded external transcript ring; it never starts Codex. */
+  async getCodexLaneEvents(
+    identity: CodexLaneIdentity,
+    cursor: string | null = null,
+    signal?: AbortSignal | null,
+  ): Promise<CodexLaneEventsResponse> {
+    const raw = responseObject(await this.request<unknown>("GET", "/v1/external/codex/events", {
+      query: { session_id: identity.session_id, workspace_id: identity.workspace_id, cursor },
+      signal,
+    }), "Codex lane events");
+    const events = raw.events;
+    if (!Array.isArray(events)) throw new TerminusApiError(502, "Codex lane events.events was not an array", null);
+    return {
+      external_harness: responseString(raw.external_harness, "Codex lane events.external_harness") as "codex",
+      events: events.map((entry, index): CodexLaneEvent => {
+        const event = responseObject(entry, `Codex lane events.events[${index}]`);
+        return {
+          cursor: responseString(event.cursor, `Codex lane events.events[${index}].cursor`),
+          sequence: responseNonNegativeInteger(event.sequence, `Codex lane events.events[${index}].sequence`),
+          kind: responseString(event.kind, `Codex lane events.events[${index}].kind`),
+          text: responseNullableString(event.text, `Codex lane events.events[${index}].text`),
+        };
+      }),
+      next_cursor: responseString(raw.next_cursor, "Codex lane events.next_cursor"),
+      cursor_expired: responseBoolean(raw.cursor_expired, "Codex lane events.cursor_expired"),
+      ...(raw.cursor_expired_signal === undefined || raw.cursor_expired_signal === null
+        ? {}
+        : { cursor_expired_signal: responseString(raw.cursor_expired_signal, "Codex lane events.cursor_expired_signal") }),
     };
   }
 

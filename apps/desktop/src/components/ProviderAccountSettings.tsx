@@ -196,7 +196,11 @@ function CodexLaneSettings(): JSX.Element {
   const session = sessions.find((candidate) => candidate.id === selectedSessionId) ?? sessions[0] ?? null;
   const identity = session === null ? null : { session_id: session.id, workspace_id: session.workspace_id };
   const codex = useCodexLane(identity);
+  const [turnText, setTurnText] = useState("");
   const connected = codex.lane?.available === true && codex.status === "ready";
+  const canStop = connected || codex.lane?.state === "expired" || codex.lane?.state === "unknown_settlement";
+  const threadOpen = connected && codex.threadId !== null;
+  const hasSessionProjection = codex.threadId !== null || codex.events.length > 0;
   const accountMeta = codex.account === null
     ? null
     : [codex.account.email, codex.account.plan_type].filter((value): value is string => value !== null && value.length > 0).join(" · ");
@@ -210,9 +214,19 @@ function CodexLaneSettings(): JSX.Element {
           <p className="ui-meta mt-0.5">External Codex lane · Codex owns the agent loop</p>
         </div>
         <div className="flex items-center gap-1.5">
-          {connected ? (
+          {canStop ? (
             <Button variant="ghost" size="sm" disabled={codex.refreshing} onClick={() => { void codex.stop(); }}>
               Stop
+            </Button>
+          ) : null}
+          {connected ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={codex.refreshing}
+              onClick={() => { void codex.openThread(); }}
+            >
+              {codex.threadId === null ? "Open external Codex session" : "Resume external Codex session"}
             </Button>
           ) : null}
           <Button
@@ -230,11 +244,11 @@ function CodexLaneSettings(): JSX.Element {
           <div className="min-w-0">
             <p className="ui-body text-primary">Status</p>
             <p className="ui-meta truncate">
-              {codex.status === "loading" ? "Detecting Codex CLI…" : connected ? "Connected to Codex App Server" : codex.detail ?? "Not connected"}
+              {codex.status === "loading" ? "Detecting Codex CLI…" : connected ? "Connected to Codex App Server" : codex.lane?.state === "expired" ? "Session expired — reconnect to resume" : codex.lane?.state === "unknown_settlement" ? "Settlement unknown — reconcile before retrying" : codex.detail ?? "Not connected"}
             </p>
           </div>
           <span className={cn("ui-meta shrink-0", connected ? "text-secondary" : "text-tertiary")} role="status">
-            {connected ? "Ready" : codex.status === "unconfigured" ? "Needs project" : "Unavailable"}
+            {connected ? (threadOpen ? "Session open" : "Ready") : codex.lane?.state === "expired" ? "Expired" : codex.lane?.state === "unknown_settlement" ? "Unknown" : codex.status === "unconfigured" ? "Needs project" : "Unavailable"}
           </span>
         </div>
         {accountMeta ? (
@@ -247,6 +261,66 @@ function CodexLaneSettings(): JSX.Element {
           <div className="flex min-h-10 items-start justify-between gap-3 py-2">
             <span className="ui-body text-primary">Models</span>
             <span className="ui-meta max-w-[65%] text-right">{visibleModels.map((model) => model.display_name ?? model.id).join(" · ")}</span>
+          </div>
+        ) : null}
+        {connected || hasSessionProjection ? (
+          <div className="space-y-2 py-2" aria-label="External Codex session">
+            <div className="flex items-center justify-between gap-3">
+              <span className="ui-body text-primary">External session</span>
+              <span className="ui-meta text-right">{threadOpen ? `Thread ${codex.threadId}` : "No thread open"}</span>
+            </div>
+            <p className="ui-meta">
+              Codex owns the tools, agent loop, and evidence. Terminus only brokers this external session.
+            </p>
+            {threadOpen ? (
+              <>
+                <form
+                  className="flex items-end gap-2"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const text = turnText.trim();
+                    if (text.length === 0 || codex.refreshing) return;
+                    setTurnText("");
+                    void codex.sendTurn(text);
+                  }}
+                >
+                  <textarea
+                    className="min-h-8 min-w-0 flex-1 resize-y rounded-md border border-subtle bg-elevated px-2 py-1.5 text-sm text-primary outline-none placeholder:text-tertiary focus:border-strong"
+                    aria-label="Message external Codex session"
+                    placeholder="Send a turn to Codex…"
+                    value={turnText}
+                    onChange={(event) => setTurnText(event.target.value)}
+                    maxLength={16_384}
+                    rows={2}
+                  />
+                  <Button variant="primary" size="sm" type="submit" disabled={codex.refreshing || turnText.trim().length === 0}>
+                    Send
+                  </Button>
+                </form>
+                {codex.turnId !== null ? (
+                  <Button variant="ghost" size="sm" disabled={codex.refreshing} onClick={() => { void codex.interrupt(); }}>
+                    Interrupt turn
+                  </Button>
+                ) : null}
+                {codex.cursorExpired ? (
+                  <p className="ui-meta text-warning" role="status">Some earlier events expired from the reconnect window; showing the current projection.</p>
+                ) : null}
+                {codex.events.length > 0 ? (
+                  <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border border-subtle bg-canvas px-2 py-1.5" role="log" aria-label="Codex session events" aria-live="polite">
+                    {codex.events.slice(-40).map((event) => (
+                      <div className="flex gap-2 text-xs" key={event.cursor}>
+                        <span className="shrink-0 text-tertiary">{event.kind}</span>
+                        <span className="min-w-0 whitespace-pre-wrap break-words text-secondary">{event.text ?? "Event received"}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </>
+            ) : codex.threadId !== null ? (
+              <p className="ui-meta">The external session is currently unavailable. {codex.detail ?? "Reconnect when Codex is available to resume this thread."}</p>
+            ) : (
+              <p className="ui-meta">Open the external session to resume a persisted Codex thread or start a new one.</p>
+            )}
           </div>
         ) : null}
         <p className="ui-meta py-2">

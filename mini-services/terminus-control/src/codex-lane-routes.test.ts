@@ -7,6 +7,7 @@ describe("external Codex control-plane contract", () => {
       '"/v1/external/codex/status"',
       '"/v1/external/codex/account"',
       '"/v1/external/codex/models"',
+      '"/v1/external/codex/events"',
       '"/v1/external/codex/thread/start"',
       '"/v1/external/codex/thread/resume"',
       '"/v1/external/codex/turn/start"',
@@ -17,6 +18,13 @@ describe("external Codex control-plane contract", () => {
     }
     expect(source).toContain('if (!checkAuth(req))');
     expect(source).toContain('external_harness: CODEX_EXTERNAL_HARNESS');
+    expect(source).toContain("cursor_expired");
+    expect(source).toContain("codexLaneEventBuffers.get(codexLaneKey");
+    const eventsStart = source.indexOf('route("GET", "/v1/external/codex/events"');
+    const accountStart = source.indexOf('route("GET", "/v1/external/codex/account"');
+    expect(eventsStart).toBeGreaterThanOrEqual(0);
+    expect(accountStart).toBeGreaterThan(eventsStart);
+    expect(source.slice(eventsStart, accountStart)).not.toContain("getCodexLaneSession");
   });
 
   test("keeps OpenCode connect consent and credential identity bounded", async () => {
