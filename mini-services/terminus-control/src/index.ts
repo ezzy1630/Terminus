@@ -435,6 +435,7 @@ import {
   type EvidenceTerminalOutcome,
   type TerminusExecutionProfile,
 } from "./agent/minimal-profile.js";
+import { turnEvidenceBundleWire } from "./agent/evidence-bundle-wire.js";
 import {
   classifyLoopError,
   type LoopErrorEnvelope,
@@ -6313,15 +6314,7 @@ const routes: Route[] = [
           },
       evidence_bundle: evidenceBundle === null
         ? null
-        : {
-            schema_version: evidenceBundle.schemaVersion,
-            identity_hash: evidenceBundle.identityHash,
-            artifact: evidenceBundle.bundleArtifact,
-            terminal_outcome: evidenceBundle.terminalOutcome,
-            admission_state: evidenceBundle.admissionState,
-            base_workspace_revision: evidenceBundle.baseWorkspaceRevision,
-            final_workspace_revision: evidenceBundle.finalWorkspaceRevision,
-          },
+        : turnEvidenceBundleWire(evidenceBundle),
       budget_ledger: latestBudgetLedger === null
         ? null
         : {
@@ -20106,13 +20099,16 @@ async function agentLoop(turnId: string): Promise<void> {
       }));
     }
 
-    const finalizeTurn = async (expectedState: "RESPONSE_VALIDATING" | "VERIFIED"): Promise<void> => {
+    const finalizeTurn = async (
+      expectedState: "RESPONSE_VALIDATING" | "VERIFIED",
+      after: "verification_admitted" | "verification_not_applicable" | "verification_unavailable" | "taskless_turn",
+    ): Promise<void> => {
       await mutateAgentState(() => emit({
         eventType: "turn.finalizing",
         aggregateType: "turn",
         aggregateId: turnId,
         correlationId: turn.taskId ?? undefined,
-        payload: { phase: "finalizing", after: "verification_admitted" },
+        payload: { phase: "finalizing", after },
       }, async (tx) => {
         const update = await tx.turn.updateMany({
           where: { id: turnId, state: expectedState },
@@ -20244,7 +20240,7 @@ async function agentLoop(turnId: string): Promise<void> {
           artifactRefs: [finalResponseArtifactUri],
         }));
         await persistEvidenceForCurrentTurn("COMPLETED");
-        await finalizeTurn("RESPONSE_VALIDATING");
+        await finalizeTurn("RESPONSE_VALIDATING", "verification_not_applicable");
         return;
       }
       if (task && (enteringVerification || continuingVerification)) {
@@ -20617,7 +20613,7 @@ async function agentLoop(turnId: string): Promise<void> {
             skipped_nodes: skipReasons.map((entry) => entry.node_id),
             evidence_artifact: skipEvidence.uri,
           });
-          await finalizeTurn("VERIFIED");
+          await finalizeTurn("VERIFIED", "verification_unavailable");
           return;
         }
 
@@ -21057,7 +21053,7 @@ async function agentLoop(turnId: string): Promise<void> {
           correlationId: task.id,
           payload: { plan_id: plan.id, phase: "VERIFIED" },
         }));
-        await finalizeTurn("VERIFIED");
+        await finalizeTurn("VERIFIED", "verification_admitted");
       } else {
         throw new Error(
           `task ${turn.taskId} no longer accepts completion proposal${task === null ? " because it was deleted" : ` in status ${task.status}`}`,
@@ -21066,7 +21062,7 @@ async function agentLoop(turnId: string): Promise<void> {
     } else {
       // Taskless turns have no acceptance DAG; they still publish a proposal
       // first, then use the ordinary terminal turn transition.
-      await finalizeTurn("RESPONSE_VALIDATING");
+      await finalizeTurn("RESPONSE_VALIDATING", "taskless_turn");
     }
   } catch (err) {
     console.error("agentLoop error", err);
