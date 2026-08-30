@@ -19,6 +19,7 @@ import {
   type OperationEffectMetadata,
   type TurnBudgetOptions,
 } from "./turn-budget.js";
+import type { ToolDenialMetadata } from "../agent-tools.js";
 
 /**
  * CodingTurnEngine (deep-audit Rank 1 / PR1 skeleton extraction).
@@ -173,6 +174,8 @@ export interface EngineToolSettlement {
   readonly hypothesisId?: string | null | undefined;
   readonly criterionIds?: readonly string[] | undefined;
   readonly objectiveStep?: string | null | undefined;
+  /** Structured provenance for a denied operation. */
+  readonly denial?: ToolDenialMetadata | undefined;
 }
 
 export interface CompletionClaim {
@@ -189,6 +192,7 @@ interface ToolSettlementObservation {
   readonly observation: OperationObservation;
   readonly failed: boolean;
   readonly denied: boolean;
+  readonly terminalDenial: ToolDenialMetadata | null;
   readonly error: unknown;
 }
 
@@ -478,6 +482,7 @@ export class CodingTurnEngine {
       const batches = planToolExecution(toolCalls, effectMetadataOf);
       let operationIndex = 0;
       let policyDenied = false;
+      let terminalPolicyDenial: ToolDenialMetadata | null = null;
       for (const batch of batches) {
         if (this.dependencies.signal?.aborted) {
           return { kind: "interrupted" };
@@ -511,10 +516,17 @@ export class CodingTurnEngine {
         for (const outcome of outcomes) {
           await this.observeOperation(outcome.observation);
           if (outcome.denied) policyDenied = true;
+          if (outcome.terminalDenial !== null) terminalPolicyDenial = outcome.terminalDenial;
           if (!outcome.failed) continue;
           const stop = await this.stopForToolError(outcome.error);
           if (stop !== null) return stop;
           throw outcome.error;
+        }
+        if (terminalPolicyDenial !== null) {
+          // The kernel has already made the authoritative decision. The
+          // observation above is durable; do not recompile or make another
+          // provider request without a new admission.
+          return this.policyStopForDenial(terminalPolicyDenial);
         }
         operationIndex += outcomes.length;
         // A policy denial is already a complete model-visible result. Do not
@@ -628,6 +640,26 @@ export class CodingTurnEngine {
     return null;
   }
 
+  private policyStopForDenial(denial: ToolDenialMetadata): EngineStop {
+    return {
+      kind: "policy_stop",
+      error: {
+        code: "KERNEL_POLICY_DENIED",
+        category: "policy_denied",
+        message: denial.explanation,
+        retryable: false,
+        suggestedAction: "request a policy exception or change the operation",
+        details: {
+          origin: denial.origin,
+          disposition: denial.disposition,
+          decision: denial.decision,
+          decision_id: denial.decisionId,
+          explanation: denial.explanation,
+        },
+      },
+    };
+  }
+
   private async settleToolCallObservation(input: {
     readonly call: ProviderToolCallChunk;
     readonly attemptNumber: number;
@@ -640,6 +672,9 @@ export class CodingTurnEngine {
       return {
         failed: false,
         denied: settlementRecord?.status === "denied" || settlementRecord?.errorClass === "policy_denied",
+        terminalDenial: settlementRecord?.denial?.disposition === "terminal"
+          ? settlementRecord.denial
+          : null,
         error: undefined,
         observation: buildOperationObservation({
           taskId: this.dependencies.taskId,
@@ -669,6 +704,7 @@ export class CodingTurnEngine {
       return {
         failed: true,
         denied: classified.kind === "policy_denied",
+        terminalDenial: null,
         error,
         observation: buildOperationObservation({
           taskId: this.dependencies.taskId,

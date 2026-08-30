@@ -184,6 +184,8 @@ import {
   semanticIdempotencyGateApplies,
   toolEffectMetadata,
   ToolAbortedError,
+  type ToolDenialMetadata,
+  type ExecutedToolResult,
   type ParsedStandaloneToolCall,
   type ProviderCallIdentity,
   type StandaloneToolEffectMetadata,
@@ -15831,6 +15833,13 @@ async function settleStandaloneProviderTool(
       callTranscriptArtifactUri: callTranscriptArtifact.uri,
       sideEffectId: null,
       result,
+      denial: {
+        origin: "contract",
+        disposition: "recoverable",
+        decision: "deny",
+        decisionId: policyDecisionId,
+        explanation: denialText,
+      },
       workspaceRevisionBefore,
       workspaceRevisionAfter: workspaceRevisionBefore,
       ...operationContext,
@@ -15895,6 +15904,13 @@ async function settleStandaloneProviderTool(
       callTranscriptArtifactUri: callTranscriptArtifact.uri,
       sideEffectId: null,
       result,
+      denial: {
+        origin: "contract",
+        disposition: "recoverable",
+        decision: "deny",
+        decisionId: policyDecisionId,
+        explanation,
+      },
       workspaceRevisionBefore,
       workspaceRevisionAfter: workspaceRevisionBefore,
       ...operationContext,
@@ -15950,6 +15966,13 @@ async function settleStandaloneProviderTool(
         callTranscriptArtifactUri: callTranscriptArtifact.uri,
         sideEffectId: null,
         result: deniedResult,
+        denial: {
+          origin: "user",
+          disposition: "recoverable",
+          decision: "deny",
+          decisionId: deniedPolicyDecisionId,
+          explanation,
+        },
         workspaceRevisionBefore,
         workspaceRevisionAfter: workspaceRevisionBefore,
         ...operationContext,
@@ -15998,7 +16021,7 @@ async function settleStandaloneProviderTool(
   }
 
   let dispatched = false;
-  let result: ToolResult<unknown>;
+  let result: ExecutedToolResult;
   try {
     dispatched = true;
     result = await executeStandaloneTool({
@@ -16069,6 +16092,7 @@ async function settleStandaloneProviderTool(
     callTranscriptArtifactUri: callTranscriptArtifact.uri,
     sideEffectId,
     result,
+    denial: result.denial,
     workspaceRevisionBefore,
     workspaceRevisionAfter,
     ...operationContext,
@@ -16571,6 +16595,8 @@ async function persistSettledToolResult(input: {
   readonly callTranscriptArtifactUri: string;
   readonly sideEffectId: string | null;
   readonly result: ToolResult<unknown>;
+  /** Structured provenance retained in the full result artifact and loop. */
+  readonly denial?: ToolDenialMetadata | undefined;
   /** Optional data projection; the full result artifact retains result.data. */
   readonly modelVisibleData?: unknown;
   readonly workspaceRevisionBefore?: string | null | undefined;
@@ -16580,7 +16606,12 @@ async function persistSettledToolResult(input: {
   readonly criterionIds?: readonly string[] | undefined;
   readonly objectiveStep?: string | null | undefined;
 }): Promise<EngineToolSettlement> {
-  const fullResultText = canonicalJson(input.result);
+  // Keep the model-facing projection minimal, while the authoritative result
+  // artifact retains denial provenance and the kernel decision identity.
+  const durableResult: ExecutedToolResult = input.denial === undefined
+    ? input.result
+    : { ...input.result, denial: input.denial };
+  const fullResultText = canonicalJson(durableResult);
   const fullResultArtifact = await input.input.artifactClient.ingest(
     new TextEncoder().encode(fullResultText),
     { mediaType: "application/json", custom: { purpose: "tool-result", toolCallId: input.toolCallId } },
@@ -16648,8 +16679,13 @@ async function persistSettledToolResult(input: {
       ? status
       : "unknown",
     resultHash: fullResultArtifact.hash,
-    errorCode: status === "success" || status === "partial" ? null : `TOOL_RESULT_${status.toUpperCase()}`,
-    errorClass: status === "success" || status === "partial" ? null : status,
+    errorCode: status === "success" || status === "partial"
+      ? null
+      : input.denial?.decisionId ?? input.denial?.decision ?? `TOOL_RESULT_${status.toUpperCase()}`,
+    errorClass: status === "success" || status === "partial"
+      ? null
+      : input.denial?.origin === "kernel" ? "kernel_policy_denied" : status,
+    denial: input.denial,
     workspaceRevisionBefore: input.workspaceRevisionBefore ?? null,
     workspaceRevisionAfter: input.workspaceRevisionAfter ?? null,
     verificationDelta: input.verificationDelta ?? null,

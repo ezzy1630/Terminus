@@ -1079,7 +1079,7 @@ describe("R11 web_fetch URL guards", () => {
       connectors: {
         MintGrant: () => ({ encodedGrant: new Uint8Array([1]), grantId: "g", expiresAtUnix: 0n }),
         Execute: () => {
-          throw new Error("egress policy denied destination");
+          throw Object.assign(new Error("connector refused the destination"), { code: 7 });
         },
       },
     } as unknown as Parameters<typeof executeStandaloneTool>[0]["clients"];
@@ -1091,6 +1091,24 @@ describe("R11 web_fetch URL guards", () => {
     expect(result.status).toBe("denied");
     expect(result.diagnostics[0]?.code).toBe("WEB_FETCH_EGRESS_DENIED");
     expect(result.diagnostics[0]?.message).toMatch(/allowlist/);
+    expect(result.denial).toMatchObject({ origin: "kernel", disposition: "terminal", decision: "deny" });
+  });
+
+  test("connector prose mentioning policy does not become a kernel denial", async () => {
+    const clients = {
+      connectors: {
+        MintGrant: () => ({ encodedGrant: new Uint8Array([1]), grantId: "g", expiresAtUnix: 0n }),
+        Execute: () => { throw new Error("upstream response mentioned its policy"); },
+      },
+    } as unknown as Parameters<typeof executeStandaloneTool>[0]["clients"];
+    const result = await executeStandaloneTool({
+      ...base,
+      clients,
+      call: parseStandaloneToolCall({ toolCallId: "wf-policy-text", toolName: "web_fetch", arguments: { url: "https://example.com/" } }) as Extract<ParsedStandaloneToolCall, { toolId: "web_fetch" }>,
+    });
+    expect(result.status).toBe("error");
+    expect(result.diagnostics[0]?.code).toBe("WEB_FETCH_FAILED");
+    expect(result.denial).toBeUndefined();
   });
 
   test("successful fetch marks content untrusted, bounds the excerpt, spills to artifact", async () => {
@@ -1419,6 +1437,13 @@ describe("C1 exec always returns its output", () => {
     expect(result.status).toBe("denied");
     expect(result.diagnostics[0]?.code).toBe("PERMISSION_DENIED");
     expect(result.diagnostics[0]?.message).toMatch(/Do not retry/);
+    expect(result.denial).toEqual({
+      origin: "kernel",
+      disposition: "terminal",
+      decision: "deny",
+      decisionId: null,
+      explanation: "policy denied: no matching rule",
+    });
   });
 
   test("output is capped 50/50 head/tail with an inline elision marker", async () => {

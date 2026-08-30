@@ -166,13 +166,63 @@ describe("CodingTurnEngine", () => {
         { text: "The tool was unavailable, so I stopped and answered directly." },
       ],
       settleAs: {
-        denied: { status: "denied", errorCode: "PERMISSION_DENIED", errorClass: "policy_denied" },
+        denied: {
+          status: "denied",
+          errorCode: "PERMISSION_DENIED",
+          errorClass: "policy_denied",
+          denial: {
+            origin: "contract",
+            disposition: "recoverable",
+            decision: "deny",
+            decisionId: "contract-decision-1",
+            explanation: "The task contract does not admit this operation.",
+          },
+        },
       },
     });
     expect(trace).toContain("settle:exec:denied");
     expect(trace).not.toContain("settle:read:speculative");
     expect(trace).toContain("begin:2");
     expect(stop.kind).toBe("completion_proposal");
+  });
+
+  test("a kernel policy denial records its observation and stops without another provider attempt", async () => {
+    const observations: OperationObservation[] = [];
+    const { stop, trace } = await runHarness({
+      responses: [{ calls: [toolCall("denied", "exec"), toolCall("speculative", "read")] }, { text: "must not be requested" }],
+      settleAs: {
+        denied: {
+          status: "denied",
+          errorCode: "TOOL_RESULT_DENIED",
+          errorClass: "denied",
+          denial: {
+            origin: "kernel",
+            disposition: "terminal",
+            decision: "deny",
+            decisionId: "kernel-decision-7",
+            explanation: "The kernel denied this process by policy.",
+          },
+        },
+      },
+      onOperationObserved: (observation) => { observations.push(observation); },
+    });
+
+    expect(stop).toMatchObject({
+      kind: "policy_stop",
+      error: {
+        code: "KERNEL_POLICY_DENIED",
+        details: {
+          origin: "kernel",
+          decision: "deny",
+          decision_id: "kernel-decision-7",
+        },
+      },
+    });
+    expect(trace).toContain("settle:exec:denied");
+    expect(trace).not.toContain("settle:read:speculative");
+    expect(trace).not.toContain("begin:2");
+    expect(observations).toHaveLength(1);
+    expect(observations[0]?.status).toBe("denied");
   });
 
   test("multi-call responses are all settled before the next compile", async () => {

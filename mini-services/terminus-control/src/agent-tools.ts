@@ -33,6 +33,26 @@ import {
 } from "./kernel-request-context.js";
 
 /**
+ * Structured denial provenance carried from tool execution to the loop.
+ *
+ * A kernel policy decision is terminal: retrying it without a new admission
+ * cannot change the decision. Model, user, and task-contract denials are
+ * model-visible corrections and get one adaptive recompile instead.
+ */
+export interface ToolDenialMetadata {
+  readonly origin: "kernel" | "model" | "user" | "contract";
+  readonly disposition: "terminal" | "recoverable";
+  readonly decision: string;
+  readonly decisionId: string | null;
+  readonly explanation: string;
+}
+
+export type ExecutedToolResult = ToolResult<unknown> & {
+  /** Private control metadata; the model-visible projection omits it. */
+  readonly denial?: ToolDenialMetadata | undefined;
+};
+
+/**
  * Tool cycles are the *batches* of tool calls a turn may settle. The step
  * budget (`HARD_MAX_STEPS`) bounds provider attempts; this bounds tool work
  * inside them. Both were sized for a four-cycle prototype loop and starved a
@@ -1854,7 +1874,7 @@ function projectedLineCount(text: string): number {
 
 export async function executeStandaloneTool(
   input: ExecuteStandaloneToolInput,
-): Promise<ToolResult<unknown>> {
+): Promise<ExecutedToolResult> {
   assertNotAborted(input.signal);
   // One capability per tool operation. A turn may run much longer than the
   // token TTL, so resolving here lets the existing mint/cache path renew at
@@ -2265,6 +2285,13 @@ export async function executeStandaloneTool(
           ...base,
           status: "denied",
           policyDecisionId: input.policyDecisionId,
+          denial: {
+            origin: "contract",
+            disposition: "recoverable",
+            decision: "deny",
+            decisionId: input.policyDecisionId,
+            explanation: "shell mode is disabled by operator policy; use argv exec",
+          },
           diagnostics: [{
             severity: "error",
             code: "SHELL_MODE_DISABLED",
@@ -2550,7 +2577,10 @@ async function executeWebFetch(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const elapsed = performance.now() - startedAt;
-    const policyDenied = /permission|policy|egress|allowlist|denied/i.test(message);
+    // Connector policy refusals carry a typed kernel status. Never infer
+    // authorization from provider-controlled human text: a destination can
+    // mention "policy" in an ordinary transport failure.
+    const policyDenied = classifyLoopError(error).kind === "policy_denied";
     const base = okResult(null, {
       toolCallId: input.internalToolCallId,
       traceId: input.traceId,
@@ -2561,8 +2591,17 @@ async function executeWebFetch(
     });
     return {
       ...base,
-      status: "denied",
+      status: policyDenied ? "denied" : "error",
       policyDecisionId: input.policyDecisionId,
+      ...(policyDenied ? {
+        denial: {
+          origin: "kernel" as const,
+          disposition: "terminal" as const,
+          decision: "deny",
+          decisionId: null,
+          explanation: message,
+        },
+      } : {}),
       diagnostics: [{
         severity: "error",
         code: policyDenied ? "WEB_FETCH_EGRESS_DENIED" : "WEB_FETCH_FAILED",
@@ -2827,7 +2866,7 @@ function processDispatchFailure(
   input: ExecuteStandaloneToolInput,
   error: unknown,
   startedAt: number,
-): ToolResult<unknown> {
+): ExecutedToolResult {
   const message = error instanceof Error ? error.message : String(error);
   const classified = classifyLoopError(error);
   const denied = classified.kind === "policy_denied";
@@ -2842,6 +2881,15 @@ function processDispatchFailure(
     ...base,
     status: denied ? "denied" : "error",
     policyDecisionId: input.policyDecisionId,
+    ...(denied ? {
+      denial: {
+        origin: "kernel" as const,
+        disposition: "terminal" as const,
+        decision: "deny",
+        decisionId: null,
+        explanation: message,
+      },
+    } : {}),
     diagnostics: [{
       severity: "error",
       code: denied ? classified.envelope.code : "PROCESS_DISPATCH_FAILED",
@@ -2883,7 +2931,7 @@ async function settleProcessOutcome(
   input: ExecuteStandaloneToolInput,
   events: ReturnType<KernelUdsClients["process"]["Start"]>,
   startedAt: number,
-): Promise<ToolResult<unknown>> {
+): Promise<ExecutedToolResult> {
   const outputBudget = input.call.toolId === "exec"
     ? Math.min(EXEC_OUTPUT_MAX_BYTES, (input.call.arguments.max_output_tokens ?? EXEC_OUTPUT_MAX_TOKENS) * 4)
     : EXEC_OUTPUT_MAX_BYTES;
@@ -2912,6 +2960,13 @@ async function settleProcessOutcome(
       ...base,
       status: "denied",
       policyDecisionId: input.policyDecisionId,
+      denial: {
+        origin: "kernel",
+        disposition: "terminal",
+        decision: outcome.policy.decision || "deny",
+        decisionId: outcome.policy.decisionId || null,
+        explanation: outcome.policy.explanation || `kernel policy decision: ${outcome.policy.decision}`,
+      },
       diagnostics: [{
         severity: "error",
         code: outcome.policy.decisionId || null,
