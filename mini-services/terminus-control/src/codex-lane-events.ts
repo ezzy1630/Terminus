@@ -21,21 +21,57 @@ export interface CodexLaneEventRead {
 const CODEX_MAX_TEXT = 64 * 1_024;
 const CODEX_VISIBLE_EVENT_METHODS = new Set([
   "item/agentMessage/delta",
-  "item/agentMessage/completed",
+  "item/started",
+  "item/completed",
   "turn/started",
   "turn/completed",
-  "turn/failed",
+  "turn/plan/updated",
+  "turn/diff/updated",
+  "thread/tokenUsage/updated",
   "error",
-  "account/status",
+  "warning",
 ]);
 
-function eventText(method: string, params: Record<string, unknown>): string | null {
-  if (method === "turn/failed" || method === "error") return "Codex reported an error";
-  for (const key of ["delta", "text", "message"] as const) {
-    const value = params[key];
-    if (typeof value === "string" && value.length > 0) return value.slice(0, CODEX_MAX_TEXT);
+const CODEX_ITEM_LABELS: Readonly<Record<string, string>> = {
+  agentMessage: "Assistant message",
+  userMessage: "User message",
+  commandExecution: "Command",
+  fileChange: "File changes",
+  mcpToolCall: "Tool call",
+  dynamicToolCall: "Tool call",
+  webSearch: "Web search",
+  contextCompaction: "Context compaction",
+};
+
+/** `undefined` drops the event; `null` keeps a lifecycle event with no text. */
+function eventText(method: string, params: Record<string, unknown>): string | null | undefined {
+  if (method === "error") return "Codex reported an error";
+  if (method === "warning") return "Codex reported a warning";
+  if (method === "item/agentMessage/delta") {
+    const delta = params.delta;
+    return typeof delta === "string" && delta.length > 0 ? delta.slice(0, CODEX_MAX_TEXT) : undefined;
   }
-  if (method === "turn/completed") return "Turn completed";
+  if (method === "item/started" || method === "item/completed") {
+    const item = params.item;
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return undefined;
+    const type = (item as Record<string, unknown>).type;
+    if (type === "reasoning") return undefined;
+    const label = typeof type === "string" ? CODEX_ITEM_LABELS[type] ?? "Work item" : "Work item";
+    return `${label} ${method === "item/started" ? "started" : "completed"}`;
+  }
+  if (method === "turn/started") return "Turn started";
+  if (method === "turn/completed") {
+    const turn = params.turn;
+    const status = turn !== null && typeof turn === "object" && !Array.isArray(turn)
+      ? (turn as Record<string, unknown>).status
+      : null;
+    return status === "interrupted" ? "Turn interrupted"
+      : status === "failed" ? "Turn failed"
+        : "Turn completed";
+  }
+  if (method === "turn/plan/updated") return "Plan updated";
+  if (method === "turn/diff/updated") return "Changes updated";
+  if (method === "thread/tokenUsage/updated") return "Usage updated";
   return null;
 }
 
@@ -48,6 +84,7 @@ export class CodexLaneEventBuffer {
     if (!CODEX_VISIBLE_EVENT_METHODS.has(method)) return;
     const params = message.params;
     const text = eventText(method, params !== null && typeof params === "object" ? params as Record<string, unknown> : {});
+    if (text === undefined) return;
     this.nextCursor += 1;
     this.events.push({ cursor: String(this.nextCursor), sequence: this.nextCursor, kind: method, text });
     if (this.events.length > CODEX_EVENT_RING_LIMIT) this.events.shift();

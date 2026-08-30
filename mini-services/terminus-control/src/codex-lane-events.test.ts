@@ -22,11 +22,30 @@ describe("Codex external event projection", () => {
   test("ignores non-user-facing notifications and sanitizes errors", () => {
     const buffer = new CodexLaneEventBuffer();
     buffer.append({ method: "item/reasoning/delta", params: { delta: "private reasoning" } });
+    buffer.append({ method: "item/completed", params: { item: { type: "reasoning", text: "private reasoning" } } });
     buffer.append({ method: "error", params: { message: "provider secret", accessToken: "never" } });
-    buffer.append({ method: "turn/completed", params: { output: "raw protocol" } });
+    buffer.append({ method: "turn/completed", params: { turn: { status: "failed", error: { message: "raw protocol" } } } });
     expect(buffer.read(null).events).toEqual([
       { cursor: "1", sequence: 1, kind: "error", text: "Codex reported an error" },
-      { cursor: "2", sequence: 2, kind: "turn/completed", text: "Turn completed" },
+      { cursor: "2", sequence: 2, kind: "turn/completed", text: "Turn failed" },
     ]);
+  });
+
+  test("projects documented v2 item lifecycle without command, diff, or reasoning payloads", () => {
+    const buffer = new CodexLaneEventBuffer();
+    buffer.append({ method: "item/started", params: { item: { type: "commandExecution", command: "print-secret" } } });
+    buffer.append({ method: "item/completed", params: { item: { type: "fileChange", changes: ["private.patch"] } } });
+    buffer.append({ method: "turn/plan/updated", params: { plan: [{ step: "private plan" }] } });
+    buffer.append({ method: "turn/diff/updated", params: { diff: "private diff" } });
+    buffer.append({ method: "thread/tokenUsage/updated", params: { tokenUsage: { totalTokens: 42 } } });
+
+    expect(buffer.read(null).events.map(({ kind, text }) => ({ kind, text }))).toEqual([
+      { kind: "item/started", text: "Command started" },
+      { kind: "item/completed", text: "File changes completed" },
+      { kind: "turn/plan/updated", text: "Plan updated" },
+      { kind: "turn/diff/updated", text: "Changes updated" },
+      { kind: "thread/tokenUsage/updated", text: "Usage updated" },
+    ]);
+    expect(JSON.stringify(buffer.read(null))).not.toContain("private");
   });
 });
