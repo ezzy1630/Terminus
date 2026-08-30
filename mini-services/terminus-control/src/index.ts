@@ -55,6 +55,7 @@ import {
 } from "@terminus/task-runtime";
 import { createKernelUdsClients, type KernelUdsClients } from "./kernel-uds.js";
 import { canResumeSession } from "./session-lifecycle.js";
+import { CodexLaneEventBuffer } from "./codex-lane-events.js";
 import { createKernelArtifactClient, PrismaContextStore } from "./context-store.js";
 import {
   executeLocalProviderCommand,
@@ -4582,6 +4583,17 @@ interface PersistedCodexLaneState {
   readonly updated_at: string;
 }
 
+const codexLaneEventBuffers = new Map<string, CodexLaneEventBuffer>();
+const emptyCodexLaneEventBuffer = new CodexLaneEventBuffer();
+
+function getCodexLaneEventBuffer(key: string): CodexLaneEventBuffer {
+  const existing = codexLaneEventBuffers.get(key);
+  if (existing !== undefined) return existing;
+  const created = new CodexLaneEventBuffer();
+  codexLaneEventBuffers.set(key, created);
+  return created;
+}
+
 function codexLaneKey(workspaceId: string, sessionId: string): string {
   return `${workspaceId}:${sessionId}`;
 }
@@ -4657,6 +4669,7 @@ async function codexKernelContext(
 }
 
 function codexSessionOptions(session: PrismaSession): CodexAppServerSessionOptions {
+  const key = codexLaneKey(session.workspaceId, session.id);
   return {
     clients: requireKernelUds(),
     context: () => codexKernelContext(session, "rpc"),
@@ -4665,6 +4678,7 @@ function codexSessionOptions(session: PrismaSession): CodexAppServerSessionOptio
     // own supported App Server flow; Terminus never reads or forwards auth
     // store material.
     public_env: {},
+    on_event: (event) => getCodexLaneEventBuffer(key).append(event.message),
   };
 }
 
@@ -8320,6 +8334,30 @@ const routes: Route[] = [
         reason: error instanceof CodexAppServerError ? error.message : "Codex App Server availability is unknown",
       }, persisted));
     }
+  }),
+  route("GET", "/v1/external/codex/events", async (req, res) => {
+    const query = new URL(req.url ?? "/", "http://terminus.local").searchParams;
+    const sessionId = query.get("session_id");
+    const workspaceId = query.get("workspace_id");
+    const cursor = query.get("cursor");
+    if (sessionId === null || workspaceId === null) {
+      return sendError(res, 400, "CODEX_LANE_IDENTITY_REQUIRED", "session_id and workspace_id are required", "validation");
+    }
+    if (cursor !== null && (!/^(0|[1-9][0-9]*)$/.test(cursor) || cursor.length > 16 || !Number.isSafeInteger(Number(cursor)))) {
+      return sendError(res, 400, "CODEX_LANE_CURSOR_INVALID", "cursor must be a non-negative decimal sequence", "validation");
+    }
+    const session = await codexSessionIdentity(workspaceId, sessionId);
+    if (session === null) return sendError(res, 404, "SESSION_NOT_FOUND", "session was not found in workspace", "not_found");
+    // Observational by design: this route reads only the bounded event window
+    // and therefore cannot spawn a process merely because the desktop polls.
+    const result = (codexLaneEventBuffers.get(codexLaneKey(workspaceId, sessionId)) ?? emptyCodexLaneEventBuffer).read(cursor);
+    sendJson(res, 200, {
+      external_harness: CODEX_EXTERNAL_HARNESS,
+      events: result.events,
+      next_cursor: result.next_cursor,
+      cursor_expired: result.cursor_expired,
+      ...(result.cursor_expired ? { cursor_expired_signal: "replay window expired; resync from the current cursor" } : {}),
+    });
   }),
   route("GET", "/v1/external/codex/account", async (req, res) => {
     const query = new URL(req.url ?? "/", "http://terminus.local").searchParams;

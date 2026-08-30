@@ -25,6 +25,7 @@ const MAX_SANITIZED_STRING = 64 * 1_024;
 const MAX_SANITIZED_KEYS = 128;
 const MAX_SANITIZED_ARRAY = 128;
 const MAX_SANITIZED_DEPTH = 8;
+const CODEX_PUBLIC_ENV_ALLOWLIST = new Set(["TERM", "LANG", "LC_ALL", "COLORTERM"]);
 
 const ALLOWED_REQUESTS = new Set([
   "account/read",
@@ -170,8 +171,8 @@ export class CodexAppServerSession {
       throw new Error("Codex App Server requires a concrete workspace id");
     }
     for (const [name, value] of Object.entries(options.public_env)) {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || /token|secret|password|authorization|cookie/i.test(name)) {
-        throw new Error(`Codex App Server public environment contains a prohibited variable: ${name}`);
+      if (!CODEX_PUBLIC_ENV_ALLOWLIST.has(name)) {
+        throw new Error(`Codex App Server public environment is not allowlisted: ${name}`);
       }
       if (/[\0\r\n]/.test(value)) {
         throw new Error(`Codex App Server public environment contains a control delimiter: ${name}`);
@@ -430,7 +431,7 @@ export class CodexAppServerSession {
         if (newline < 0) break;
         const line = this.inputBuffer.slice(0, newline).trim();
         this.inputBuffer = this.inputBuffer.slice(newline + 1);
-        if (line.length > 0) this.handleLine(line);
+        if (line.length > 0) this.handleLine(line, event.sequence);
       }
       return;
     }
@@ -448,7 +449,7 @@ export class CodexAppServerSession {
     }
   }
 
-  private handleLine(line: string): void {
+  private handleLine(line: string, sequence: number): void {
     let decoded: unknown;
     try {
       decoded = JSON.parse(line) as unknown;
@@ -473,7 +474,7 @@ export class CodexAppServerSession {
     this.options.on_event?.({
       external_harness: CODEX_EXTERNAL_HARNESS,
       job_id: this.jobId ?? "",
-      sequence: 0,
+      sequence,
       message: isRecord(sanitized) ? sanitized : {},
     });
     if (id !== null) void this.answerServerRequest({ id, method, params: message.params });

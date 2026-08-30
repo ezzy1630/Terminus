@@ -16,6 +16,8 @@
  * No credential material appears anywhere in this file, and every id is
  * obviously fake.
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -41,6 +43,15 @@ vi.mock("../src/lib/api", async () => {
       connectProviderAccount: vi.fn(async () => response([])),
       disconnectProviderAccount: vi.fn(async () => undefined),
       setDefaultProviderAccount: vi.fn(async () => undefined),
+      getCodexLaneStatus: vi.fn(),
+      getCodexLaneAccount: vi.fn(),
+      getCodexLaneModels: vi.fn(),
+      getCodexLaneEvents: vi.fn(),
+      startCodexLaneThread: vi.fn(),
+      resumeCodexLaneThread: vi.fn(),
+      startCodexLaneTurn: vi.fn(),
+      interruptCodexLaneTurn: vi.fn(),
+      stopCodexLane: vi.fn(),
     },
   };
 });
@@ -96,6 +107,18 @@ beforeEach(() => {
 });
 
 afterEach(cleanup);
+
+describe("the external Codex session surface", () => {
+  test("keeps the external controls and ownership label explicit", async () => {
+    const source = readFileSync(resolve(process.cwd(), "src/components/ProviderAccountSettings.tsx"), "utf8");
+    expect(source).toContain("Open external Codex session");
+    expect(source).toContain("Resume external Codex session");
+    expect(source).toContain("Message external Codex session");
+    expect(source).toContain("Codex owns the tools, agent loop, and evidence");
+    expect(source).toContain("Interrupt turn");
+    expect(source).not.toContain("Terminus completed");
+  });
+});
 
 describe("the connected accounts section", () => {
   test("requires explicit consent before connecting a disconnected OpenCode account", async () => {

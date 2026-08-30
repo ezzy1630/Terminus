@@ -24,6 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, createIdempotencyKey } from "../lib/api";
 import type {
   CodexLaneAccountResponse,
+  CodexLaneEvent,
   CodexLaneIdentity,
   CodexLaneModelsResponse,
   CodexLaneStatus,
@@ -78,8 +79,15 @@ export interface CodexLaneState {
   lane: CodexLaneStatus | null;
   account: CodexLaneAccountResponse["account"] | null;
   models: CodexLaneModelsResponse["models"];
+  threadId: string | null;
+  turnId: string | null;
+  events: readonly CodexLaneEvent[];
+  cursorExpired: boolean;
   refreshing: boolean;
   refresh: () => Promise<void>;
+  openThread: () => Promise<void>;
+  sendTurn: (text: string) => Promise<void>;
+  interrupt: () => Promise<void>;
   stop: () => Promise<void>;
 }
 
@@ -295,17 +303,57 @@ export function useProviderAccounts(): ProviderAccountsState {
  * workspace and session; there is no process-wide Codex singleton to guess at.
  */
 export function useCodexLane(identity: CodexLaneIdentity | null): CodexLaneState {
-  const [state, setState] = useState<Omit<CodexLaneState, "refresh" | "stop">>({
+  type CodexLaneSnapshot = Omit<CodexLaneState, "refresh" | "stop" | "openThread" | "sendTurn" | "interrupt">;
+  const [state, setState] = useState<CodexLaneSnapshot>({
     status: identity === null ? "unconfigured" : "loading",
     detail: identity === null ? "Open a project to connect a Codex subscription." : null,
     lane: null,
     account: null,
     models: [],
+    threadId: null,
+    turnId: null,
+    events: [],
+    cursorExpired: false,
     refreshing: false,
   });
   const mounted = useRef(true);
+  const eventCursor = useRef<string | null>(null);
 
   useEffect(() => () => { mounted.current = false; }, []);
+
+  useEffect(() => {
+    eventCursor.current = null;
+    setState((current) => ({
+      ...current,
+      status: identity === null ? "unconfigured" : "loading",
+      detail: identity === null ? "Open a project to connect a Codex subscription." : null,
+      lane: null,
+      account: null,
+      models: [],
+      threadId: null,
+      turnId: null,
+      events: [],
+      cursorExpired: false,
+    }));
+  }, [identity]);
+
+  const readEvents = useCallback(async (): Promise<void> => {
+    if (identity === null) return;
+    try {
+      const response = await api.getCodexLaneEvents(identity, eventCursor.current);
+      if (!mounted.current) return;
+      eventCursor.current = response.next_cursor;
+      setState((current) => ({
+        ...current,
+        events: response.cursor_expired
+          ? response.events
+          : [...current.events, ...response.events].slice(-80),
+        cursorExpired: response.cursor_expired,
+      }));
+    } catch (error) {
+      if (mounted.current) setState((current) => ({ ...current, detail: messageFor(error, "Codex external events could not be read.") }));
+    }
+  }, [identity]);
 
   const refresh = useCallback(async (): Promise<void> => {
     if (identity === null) {
@@ -316,7 +364,7 @@ export function useCodexLane(identity: CodexLaneIdentity | null): CodexLaneState
     try {
       const lane = await api.getCodexLaneStatus(identity);
       if (!lane.available) {
-        if (mounted.current) setState((current) => ({ ...current, status: "unavailable", lane, detail: lane.reason ?? "Codex CLI is unavailable." }));
+        if (mounted.current) setState((current) => ({ ...current, status: "unavailable", lane, detail: lane.reason ?? "Codex CLI is unavailable.", refreshing: false, threadId: lane.persisted_thread_id ?? current.threadId }));
         return;
       }
       // A fresh control-plane process can report a ready App Server while the
@@ -334,7 +382,8 @@ export function useCodexLane(identity: CodexLaneIdentity | null): CodexLaneState
         api.getCodexLaneModels(identity),
       ]);
       if (!mounted.current) return;
-      setState({ status: "ready", detail: null, lane, account: account.account, models: models.models, refreshing: false });
+      setState((current) => ({ status: "ready", detail: null, lane, account: account.account, models: models.models, refreshing: false, threadId: lane.persisted_thread_id, turnId: current.turnId, events: current.events, cursorExpired: current.cursorExpired }));
+      await readEvents();
     } catch (error) {
       if (!mounted.current) return;
       setState((current) => ({
@@ -344,25 +393,68 @@ export function useCodexLane(identity: CodexLaneIdentity | null): CodexLaneState
         refreshing: false,
       }));
     }
-  }, [identity]);
+  }, [identity, readEvents]);
 
   useEffect(() => {
     if (identity === null) return;
     void refresh();
   }, [identity, refresh]);
 
+  useEffect(() => {
+    if (identity === null || state.status !== "ready") return;
+    const timer = setInterval(() => { void readEvents(); }, 1_200);
+    return () => clearInterval(timer);
+  }, [identity, readEvents, state.status]);
+
+  const openThread = useCallback(async (): Promise<void> => {
+    if (identity === null) return;
+    setState((current) => ({ ...current, refreshing: true, detail: null }));
+    try {
+      const thread = state.threadId === null
+        ? await api.startCodexLaneThread(identity, { idempotencyKey: createIdempotencyKey("codex-lane-thread") })
+        : await api.resumeCodexLaneThread({ ...identity, thread_id: state.threadId }, { idempotencyKey: createIdempotencyKey("codex-lane-thread-resume") });
+      if (mounted.current) setState((current) => ({ ...current, threadId: thread.thread_id, refreshing: false }));
+      await readEvents();
+    } catch (error) {
+      if (mounted.current) setState((current) => ({ ...current, detail: messageFor(error, "Codex thread could not be opened."), refreshing: false }));
+    }
+  }, [identity, readEvents, state.threadId]);
+
+  const sendTurn = useCallback(async (text: string): Promise<void> => {
+    if (identity === null || state.threadId === null || text.trim().length === 0) return;
+    setState((current) => ({ ...current, refreshing: true, detail: null }));
+    try {
+      const turn = await api.startCodexLaneTurn({ ...identity, thread_id: state.threadId, text }, { idempotencyKey: createIdempotencyKey("codex-lane-turn") });
+      if (mounted.current) setState((current) => ({ ...current, turnId: turn.turn_id, refreshing: false }));
+      await readEvents();
+    } catch (error) {
+      if (mounted.current) setState((current) => ({ ...current, detail: messageFor(error, "Codex turn could not be started."), refreshing: false }));
+    }
+  }, [identity, readEvents, state.threadId]);
+
+  const interrupt = useCallback(async (): Promise<void> => {
+    if (identity === null || state.threadId === null || state.turnId === null) return;
+    try {
+      await api.interruptCodexLaneTurn({ ...identity, thread_id: state.threadId, turn_id: state.turnId }, { idempotencyKey: createIdempotencyKey("codex-lane-interrupt") });
+      if (mounted.current) setState((current) => ({ ...current, turnId: null }));
+      await readEvents();
+    } catch (error) {
+      if (mounted.current) setState((current) => ({ ...current, detail: messageFor(error, "Codex turn could not be interrupted.") }));
+    }
+  }, [identity, readEvents, state.threadId, state.turnId]);
+
   const stop = useCallback(async (): Promise<void> => {
     if (identity === null) return;
     setState((current) => ({ ...current, refreshing: true, detail: null }));
     try {
       await api.stopCodexLane(identity, { idempotencyKey: createIdempotencyKey("codex-lane-stop") });
-      if (mounted.current) setState((current) => ({ ...current, status: "unavailable", detail: "Codex lane stopped.", refreshing: false, lane: current.lane ? { ...current.lane, available: false, state: "stopped", job_id: null } : null }));
+      if (mounted.current) setState((current) => ({ ...current, status: "unavailable", detail: "Codex lane stopped.", refreshing: false, turnId: null, lane: current.lane ? { ...current.lane, available: false, state: "stopped", job_id: null } : null }));
     } catch (error) {
       if (mounted.current) setState((current) => ({ ...current, detail: messageFor(error, "Codex lane could not be stopped."), refreshing: false }));
     }
   }, [identity]);
 
-  return useMemo(() => ({ ...state, refresh, stop }), [refresh, state, stop]);
+  return useMemo(() => ({ ...state, refresh, openThread, sendTurn, interrupt, stop }), [interrupt, openThread, refresh, sendTurn, state, stop]);
 }
 
 // ────────────────────────── Presentation helpers ────────────────────────────

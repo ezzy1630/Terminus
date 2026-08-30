@@ -265,6 +265,21 @@ export interface CodexLaneModelsResponse {
   models: CodexLaneModel[];
 }
 
+export interface CodexLaneEvent {
+  cursor: string;
+  sequence: number;
+  kind: string;
+  text: string | null;
+}
+
+export interface CodexLaneEventsResponse {
+  external_harness: "codex";
+  events: CodexLaneEvent[];
+  next_cursor: string;
+  cursor_expired: boolean;
+  cursor_expired_signal?: string;
+}
+
 export interface CodexLaneIdentity {
   session_id: string;
   workspace_id: string;

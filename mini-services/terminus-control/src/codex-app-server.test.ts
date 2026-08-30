@@ -77,7 +77,7 @@ describe("Codex App Server external lane", () => {
       clients: fake.clients as never,
       context,
       workspace_id: "workspace",
-      public_env: { PATH: "/usr/bin", HOME: "/Users/test" },
+      public_env: { LANG: "en_US.UTF-8", TERM: "dumb" },
       on_event: (event) => events.push(event.message),
     });
 
@@ -102,6 +102,21 @@ describe("Codex App Server external lane", () => {
     await expect((session as unknown as { request: (method: string, params: unknown) => Promise<unknown> }).request("getAuthStatus", { includeToken: true })).rejects.toMatchObject({ code: "CODEX_APP_SERVER_METHOD_UNSUPPORTED" });
     expect(fake.methods).toEqual(["initialize", "initialized"]);
     await session.stop();
+  });
+
+  test("forwards only the tiny public environment allowlist", () => {
+    expect(() => new CodexAppServerSession({
+      clients: fakeKernel().clients as never,
+      context,
+      workspace_id: "workspace",
+      public_env: { OPENAI_API_KEY: "secret" },
+    })).toThrow("not allowlisted");
+    expect(() => new CodexAppServerSession({
+      clients: fakeKernel().clients as never,
+      context,
+      workspace_id: "workspace",
+      public_env: { HOME: "/Users/test" },
+    })).toThrow("not allowlisted");
   });
 
   test("redacts sensitive event fields and reports unknown job settlement", async () => {

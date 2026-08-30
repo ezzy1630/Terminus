@@ -194,7 +194,9 @@ describe("TerminusApiClient — external Codex subscription lane", () => {
           ? { external_harness: "codex", account: { type: "chatgpt", email: "user@example.com", plan_type: "plus", requires_openai_auth: false } }
           : url.pathname.endsWith("/models")
             ? { external_harness: "codex", models: [{ id: "gpt-5.6-luna", model: "gpt-5.6-luna", display_name: "GPT-5.6 Luna", reasoning_efforts: ["medium"], default_reasoning_effort: "medium", hidden: false }] }
-            : url.pathname.endsWith("/thread/start")
+            : url.pathname.endsWith("/events")
+              ? { external_harness: "codex", events: [{ cursor: "7", sequence: 7, kind: "item/agentMessage/delta", text: "safe output" }], next_cursor: "7", cursor_expired: false }
+              : url.pathname.endsWith("/thread/start")
               ? { external_harness: "codex", thread_id: "thread-external" }
               : url.pathname.endsWith("/thread/resume")
                 ? { external_harness: "codex", thread_id: "thread-external" }
@@ -211,6 +213,7 @@ describe("TerminusApiClient — external Codex subscription lane", () => {
     await expect(client.getCodexLaneStatus(identity)).resolves.toMatchObject({ external_harness: "codex", executable: "codex" });
     await expect(client.getCodexLaneAccount(identity)).resolves.toMatchObject({ account: { plan_type: "plus" } });
     await expect(client.getCodexLaneModels(identity)).resolves.toMatchObject({ models: [{ id: "gpt-5.6-luna" }] });
+    await expect(client.getCodexLaneEvents(identity, "6")).resolves.toMatchObject({ events: [{ cursor: "7", text: "safe output" }], next_cursor: "7", cursor_expired: false });
     await expect(client.startCodexLaneThread(identity, mutationOptions("codex-thread"))).resolves.toMatchObject({ thread_id: "thread-external", external_harness: "codex" });
     await expect(client.resumeCodexLaneThread({ ...identity, thread_id: "thread-external" }, mutationOptions("codex-resume"))).resolves.toMatchObject({ thread_id: "thread-external" });
     await expect(client.startCodexLaneTurn({ ...identity, thread_id: "thread-external", text: "inspect" }, mutationOptions("codex-turn"))).resolves.toMatchObject({ turn_id: "turn-external" });
@@ -218,12 +221,12 @@ describe("TerminusApiClient — external Codex subscription lane", () => {
     await expect(client.stopCodexLane(identity, mutationOptions("codex-stop"))).resolves.toMatchObject({ stopped: true, external_harness: "codex" });
 
     expect(calls.map((call) => call.path)).toEqual([
-      "/v1/external/codex/status", "/v1/external/codex/account", "/v1/external/codex/models",
+      "/v1/external/codex/status", "/v1/external/codex/account", "/v1/external/codex/models", "/v1/external/codex/events",
       "/v1/external/codex/thread/start", "/v1/external/codex/thread/resume",
       "/v1/external/codex/turn/start", "/v1/external/codex/turn/interrupt", "/v1/external/codex/stop",
     ]);
-    expect(calls.slice(3).every((call) => call.method === "POST")).toBe(true);
-    expect(calls[5]?.body).toMatchObject({ session_id: identity.session_id, workspace_id: identity.workspace_id, thread_id: "thread-external" });
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(5);
+    expect(calls.find((call) => call.path.endsWith("/turn/interrupt"))?.body).toMatchObject({ session_id: identity.session_id, workspace_id: identity.workspace_id, thread_id: "thread-external" });
   });
 });
 
