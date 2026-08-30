@@ -5,6 +5,8 @@ import { canonicalJson, computeContentHash } from "@terminus/context-ir";
 const MAX_CAPABILITY_CARDS = 512;
 const MAX_CARD_TEXT_CHARS = 1_024;
 const MAX_CARD_LIST_ITEMS = 32;
+const MAX_CATALOG_COST_TOKENS = 100_000_000;
+const MAX_ACTIVATION_LATENCY_MS = 86_400_000;
 
 export type CapabilityDiscoveryCommand =
   | {
@@ -38,6 +40,61 @@ export interface CapabilityDiscoveryData {
   readonly next_cursor?: number | null | undefined;
 }
 
+export interface CapabilityDiscoveryExecutionOptions {
+  /** Measured by the caller; this module never reads a clock. */
+  readonly activationLatencyMs?: number | undefined;
+}
+
+/**
+ * Opt-in, in-memory counters for one discovery session. This is intentionally
+ * not part of CapabilityDiscoveryOutcome, so it cannot add prompt tokens or
+ * become a model-visible protocol field.
+ */
+export interface CapabilityDiscoveryObservationSnapshot {
+  readonly admitted_card_count: number;
+  readonly admitted_catalog_cost_tokens: number;
+  readonly admitted_full_schema_cost_tokens: number;
+  readonly initial_active_schema_cost_tokens: number;
+  readonly initial_deferred_schema_cost_tokens: number;
+  readonly list_attempts: number;
+  readonly search_attempts: number;
+  readonly describe_attempts: number;
+  readonly activate_attempts: number;
+  readonly deactivate_attempts: number;
+  readonly successful_selections: number;
+  readonly failed_selections: number;
+  readonly activation_latency_ms_total: number;
+  readonly activation_latency_samples: number;
+  readonly active_tool_set_hash: ContentHash;
+  readonly final_active_schema_cost_tokens: number;
+}
+
+export type CapabilityDiscoverySessionOptions =
+  | { readonly observe?: false | undefined }
+  | {
+      /** Allocate the observation counters only when explicitly requested. */
+      readonly observe: true;
+      /** Tokenizer-derived cost of the compact admitted-card catalog. */
+      readonly admittedCatalogCostTokens: number;
+    };
+
+interface CapabilityDiscoveryObservationState {
+  readonly admitted_card_count: number;
+  readonly admitted_catalog_cost_tokens: number;
+  readonly admitted_full_schema_cost_tokens: number;
+  readonly initial_active_schema_cost_tokens: number;
+  readonly initial_deferred_schema_cost_tokens: number;
+  list_attempts: number;
+  search_attempts: number;
+  describe_attempts: number;
+  activate_attempts: number;
+  deactivate_attempts: number;
+  successful_selections: number;
+  failed_selections: number;
+  activation_latency_ms_total: number;
+  activation_latency_samples: number;
+}
+
 export type CapabilityDiscoveryOutcome =
   | { readonly ok: true; readonly data: CapabilityDiscoveryData; readonly summary: string }
   | { readonly ok: false; readonly message: string };
@@ -52,8 +109,13 @@ export type CapabilityDiscoveryOutcome =
 export class CapabilityDiscoverySession {
   private readonly cards: ReadonlyMap<string, CapabilityCard>;
   private readonly active = new Set<string>();
+  private readonly observation: CapabilityDiscoveryObservationState | null;
 
-  constructor(cards: readonly CapabilityCard[], initiallyActive: readonly string[]) {
+  constructor(
+    cards: readonly CapabilityCard[],
+    initiallyActive: readonly string[],
+    options: CapabilityDiscoverySessionOptions = {},
+  ) {
     if (cards.length > MAX_CAPABILITY_CARDS) {
       throw new Error(`capability card count exceeds ${MAX_CAPABILITY_CARDS}`);
     }
@@ -70,14 +132,48 @@ export class CapabilityDiscoverySession {
       }
       this.active.add(capabilityId);
     }
+    this.observation = options.observe === true
+      ? initialObservation(
+          [...this.cards.values()],
+          this.activeCards(),
+          options.admittedCatalogCostTokens,
+        )
+      : null;
   }
 
-  execute(command: CapabilityDiscoveryCommand): CapabilityDiscoveryOutcome {
+  execute(command: CapabilityDiscoveryCommand): CapabilityDiscoveryOutcome;
+  execute(
+    command: Extract<CapabilityDiscoveryCommand, { action: "activate" }>,
+    options: CapabilityDiscoveryExecutionOptions,
+  ): CapabilityDiscoveryOutcome;
+  execute(
+    command: CapabilityDiscoveryCommand,
+    options: CapabilityDiscoveryExecutionOptions = {},
+  ): CapabilityDiscoveryOutcome {
     switch (command.action) {
       case "list":
       case "search":
+        if (this.observation !== null) {
+          if (command.action === "list") {
+            this.observation.list_attempts = incrementCounter(
+              this.observation.list_attempts,
+              "list attempts",
+            );
+          } else {
+            this.observation.search_attempts = incrementCounter(
+              this.observation.search_attempts,
+              "search attempts",
+            );
+          }
+        }
         return this.list(command);
       case "describe": {
+        if (this.observation !== null) {
+          this.observation.describe_attempts = incrementCounter(
+            this.observation.describe_attempts,
+            "describe attempts",
+          );
+        }
         const card = this.cards.get(command.capability_id);
         if (card === undefined) return missingCapability(command.capability_id);
         return {
@@ -91,8 +187,50 @@ export class CapabilityDiscoverySession {
         };
       }
       case "activate": {
+        if (this.observation !== null) {
+          const latencyMs = options.activationLatencyMs;
+          if (
+            latencyMs !== undefined
+            && (!Number.isSafeInteger(latencyMs) || latencyMs < 0 || latencyMs > MAX_ACTIVATION_LATENCY_MS)
+          ) {
+            throw new Error(
+              `activation latency must be an integer between 0 and ${MAX_ACTIVATION_LATENCY_MS} milliseconds`,
+            );
+          }
+          this.observation.activate_attempts = incrementCounter(
+            this.observation.activate_attempts,
+            "activate attempts",
+          );
+          // Selection counts exact-ID activation outcomes. Re-activating an
+          // admitted ID is successful even though the active set is unchanged.
+          if (latencyMs !== undefined) {
+            this.observation.activation_latency_ms_total = checkedAdd(
+              this.observation.activation_latency_ms_total,
+              latencyMs,
+              "activation latency total",
+            );
+            this.observation.activation_latency_samples = incrementCounter(
+              this.observation.activation_latency_samples,
+              "activation latency samples",
+            );
+          }
+        }
         const card = this.cards.get(command.capability_id);
-        if (card === undefined) return missingCapability(command.capability_id);
+        if (card === undefined) {
+          if (this.observation !== null) {
+            this.observation.failed_selections = incrementCounter(
+              this.observation.failed_selections,
+              "failed selections",
+            );
+          }
+          return missingCapability(command.capability_id);
+        }
+        if (this.observation !== null) {
+          this.observation.successful_selections = incrementCounter(
+            this.observation.successful_selections,
+            "successful selections",
+          );
+        }
         this.active.add(card.id);
         return {
           ok: true,
@@ -105,6 +243,12 @@ export class CapabilityDiscoverySession {
         };
       }
       case "deactivate": {
+        if (this.observation !== null) {
+          this.observation.deactivate_attempts = incrementCounter(
+            this.observation.deactivate_attempts,
+            "deactivate attempts",
+          );
+        }
         const card = this.cards.get(command.capability_id);
         if (card === undefined) return missingCapability(command.capability_id);
         this.active.delete(card.id);
@@ -135,6 +279,15 @@ export class CapabilityDiscoverySession {
 
   activeCapabilityIds(): readonly string[] {
     return [...this.active].sort();
+  }
+
+  observationSnapshot(): CapabilityDiscoveryObservationSnapshot | null {
+    if (this.observation === null) return null;
+    return {
+      ...this.observation,
+      active_tool_set_hash: this.activeToolSetHash(),
+      final_active_schema_cost_tokens: sumSchemaCostTokens(this.activeCards()),
+    };
   }
 
   private list(command: Extract<CapabilityDiscoveryCommand, { action: "list" | "search" }>): CapabilityDiscoveryOutcome {
@@ -190,6 +343,59 @@ export class CapabilityDiscoverySession {
       definition_hash: card.definitionHash,
     }))));
   }
+}
+
+function initialObservation(
+  cards: readonly CapabilityCard[],
+  initiallyActiveCards: readonly CapabilityCard[],
+  admittedCatalogCostTokens: number,
+): CapabilityDiscoveryObservationState {
+  if (
+    !Number.isSafeInteger(admittedCatalogCostTokens)
+    || admittedCatalogCostTokens < 0
+    || admittedCatalogCostTokens > MAX_CATALOG_COST_TOKENS
+  ) {
+    throw new Error(
+      `admitted catalog cost must be an integer between 0 and ${MAX_CATALOG_COST_TOKENS} tokens`,
+    );
+  }
+  const admittedSchemaCostTokens = sumSchemaCostTokens(cards);
+  const initialActiveSchemaCostTokens = sumSchemaCostTokens(initiallyActiveCards);
+  return {
+    admitted_card_count: cards.length,
+    admitted_catalog_cost_tokens: admittedCatalogCostTokens,
+    admitted_full_schema_cost_tokens: admittedSchemaCostTokens,
+    initial_active_schema_cost_tokens: initialActiveSchemaCostTokens,
+    initial_deferred_schema_cost_tokens: admittedSchemaCostTokens - initialActiveSchemaCostTokens,
+    list_attempts: 0,
+    search_attempts: 0,
+    describe_attempts: 0,
+    activate_attempts: 0,
+    deactivate_attempts: 0,
+    successful_selections: 0,
+    failed_selections: 0,
+    activation_latency_ms_total: 0,
+    activation_latency_samples: 0,
+  };
+}
+
+function sumSchemaCostTokens(cards: readonly CapabilityCard[]): number {
+  return cards.reduce(
+    (total, card) => checkedAdd(total, card.schemaCostTokens, "schema token total"),
+    0,
+  );
+}
+
+function incrementCounter(value: number, label: string): number {
+  return checkedAdd(value, 1, label);
+}
+
+function checkedAdd(left: number, right: number, label: string): number {
+  const result = left + right;
+  if (!Number.isSafeInteger(result) || result < 0) {
+    throw new Error(`${label} exceeds the safe integer range`);
+  }
+  return result;
 }
 
 function missingCapability(capabilityId: string): CapabilityDiscoveryOutcome {

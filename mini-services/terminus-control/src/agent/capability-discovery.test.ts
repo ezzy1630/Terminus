@@ -33,6 +33,7 @@ describe("CapabilityDiscoverySession", () => {
 
   test("searches compact cards deterministically and exposes real continuation", () => {
     const session = new CapabilityDiscoverySession(cards, []);
+    expect(session.observationSnapshot()).toBeNull();
     const first = session.execute({ action: "list", limit: 2, cursor: 0 });
     expect(first.ok).toBe(true);
     if (!first.ok) throw new Error(first.message);
@@ -107,5 +108,131 @@ describe("CapabilityDiscoverySession", () => {
     expect(() => new CapabilityDiscoverySession([
       { ...cards[0]!, definitionHash: "not-a-hash" as CapabilityCard["definitionHash"] },
     ], [])).toThrow(/definition hash/);
+  });
+
+  test("records deterministic discovery counters without exposing them in outcomes", () => {
+    const session = new CapabilityDiscoverySession(cards, ["tool.database"], {
+      observe: true,
+      admittedCatalogCostTokens: 45,
+    });
+    const listed = session.execute({ action: "list", limit: 8, cursor: 0 });
+    const searched = session.execute({ action: "search", query: "HTTPS", limit: 8, cursor: 0 });
+    const described = session.execute({ action: "describe", capability_id: "standalone.web_fetch" });
+    const activated = session.execute(
+      { action: "activate", capability_id: "standalone.web_fetch" },
+      { activationLatencyMs: 12 },
+    );
+    expect(listed.ok && searched.ok && described.ok && activated.ok).toBe(true);
+    expect(activated.ok && "observation" in activated.data).toBe(false);
+    expect(session.observationSnapshot()).toMatchObject({
+      admitted_card_count: 3,
+      admitted_catalog_cost_tokens: 45,
+      admitted_full_schema_cost_tokens: 500,
+      initial_active_schema_cost_tokens: 240,
+      initial_deferred_schema_cost_tokens: 260,
+      list_attempts: 1,
+      search_attempts: 1,
+      describe_attempts: 1,
+      activate_attempts: 1,
+      deactivate_attempts: 0,
+      successful_selections: 1,
+      failed_selections: 0,
+      activation_latency_ms_total: 12,
+      activation_latency_samples: 1,
+      final_active_schema_cost_tokens: 420,
+    });
+    expect(session.observationSnapshot()?.active_tool_set_hash).toBe(session.activeToolSetHash());
+  });
+
+  test("counts failed exact-id activation and leaves the active set unchanged", () => {
+    const session = new CapabilityDiscoverySession(cards, [], {
+      observe: true,
+      admittedCatalogCostTokens: 45,
+    });
+    expect(session.execute({ action: "activate", capability_id: "standalone.missing" }).ok).toBe(false);
+    expect(session.activeCapabilityIds()).toEqual([]);
+    expect(session.observationSnapshot()).toMatchObject({
+      activate_attempts: 1,
+      successful_selections: 0,
+      failed_selections: 1,
+      final_active_schema_cost_tokens: 0,
+    });
+  });
+
+  test("counts repeated activation and deactivation attempts while keeping set semantics", () => {
+    const session = new CapabilityDiscoverySession(cards, [], {
+      observe: true,
+      admittedCatalogCostTokens: 45,
+    });
+    session.execute({ action: "activate", capability_id: "standalone.web_fetch" });
+    session.execute({ action: "activate", capability_id: "standalone.web_fetch" });
+    session.execute({ action: "deactivate", capability_id: "standalone.web_fetch" });
+    session.execute({ action: "deactivate", capability_id: "standalone.web_fetch" });
+    expect(session.activeCapabilityIds()).toEqual([]);
+    expect(session.observationSnapshot()).toMatchObject({
+      activate_attempts: 2,
+      deactivate_attempts: 2,
+      successful_selections: 2,
+      failed_selections: 0,
+      final_active_schema_cost_tokens: 0,
+    });
+  });
+
+  test("calculates deferred schema tokens as admitted minus initially active", () => {
+    const session = new CapabilityDiscoverySession(
+      cards,
+      ["standalone.web_fetch", "skill.release_notes"],
+      { observe: true, admittedCatalogCostTokens: 45 },
+    );
+    expect(session.observationSnapshot()).toMatchObject({
+      admitted_catalog_cost_tokens: 45,
+      admitted_full_schema_cost_tokens: 500,
+      initial_active_schema_cost_tokens: 260,
+      initial_deferred_schema_cost_tokens: 240,
+    });
+  });
+
+  test("ignores observation metadata when observation is disabled", () => {
+    const session = new CapabilityDiscoverySession(cards, []);
+    const outcome = session.execute(
+      { action: "activate", capability_id: "standalone.web_fetch" },
+      { activationLatencyMs: Number.NaN },
+    );
+    expect(outcome.ok).toBe(true);
+    expect(session.activeCapabilityIds()).toEqual(["standalone.web_fetch"]);
+    expect(session.observationSnapshot()).toBeNull();
+  });
+
+  test("rejects unsafe observation inputs before recording them", () => {
+    expect(() => new CapabilityDiscoverySession(cards, [], {
+      observe: true,
+      admittedCatalogCostTokens: 100_000_001,
+    })).toThrow(/admitted catalog cost/);
+    const maximumSafeCostCard = {
+      ...cards[0]!,
+      schemaCostTokens: Number.MAX_SAFE_INTEGER,
+    };
+    expect(() => new CapabilityDiscoverySession([maximumSafeCostCard], [])).not.toThrow();
+    expect(() => new CapabilityDiscoverySession([
+      maximumSafeCostCard,
+      { ...cards[1]!, schemaCostTokens: 1 },
+    ], [], {
+      observe: true,
+      admittedCatalogCostTokens: 45,
+    })).toThrow(/schema token total/);
+
+    const session = new CapabilityDiscoverySession(cards, [], {
+      observe: true,
+      admittedCatalogCostTokens: 45,
+    });
+    expect(() => session.execute(
+      { action: "activate", capability_id: "standalone.web_fetch" },
+      { activationLatencyMs: 86_400_001 },
+    )).toThrow(/activation latency/);
+    expect(session.observationSnapshot()).toMatchObject({
+      activate_attempts: 0,
+      activation_latency_ms_total: 0,
+      activation_latency_samples: 0,
+    });
   });
 });
