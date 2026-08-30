@@ -34,6 +34,7 @@ import {
 import type { TokenCount } from "@terminus/domain";
 
 export { ReasoningReplayLedger };
+export { CodexTurnState, chatGptCodexRequestHeaders } from "./codex_turn_state.js";
 
 // ────────────────────────── OpenAI wire shapes ───────────────────────────────
 
@@ -843,5 +844,3 @@ export type { ProviderRenderer, ProviderResponseChunk };
 
 export * from "./model_profiles.js";
 export * from "./stream.js";
-export * from "./codex_turn_state.js";
-export * from "./chatgpt_codex.js";

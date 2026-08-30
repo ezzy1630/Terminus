@@ -6,8 +6,7 @@
 //!    the rest of the file;
 //! 2. a store that is group/world readable, oversized, or malformed produces
 //!    a warning and no credentials — the read fails closed;
-//! 3. a Codex ChatGPT login yields expiry, account id, plan type, and email
-//!    from the JWT payload without any signature being trusted;
+//! 3. a Codex auth store is never opened or imported, even when present;
 //! 4. absent stores are silent, not an error;
 //! 5. `import_local` writes through the `provider-account` keyring namespace
 //!    and refuses any other destination;
@@ -40,7 +39,6 @@ struct Fixture {
     _stores: TempDir,
     kernel: KernelHandle,
     opencode_store: std::path::PathBuf,
-    codex_store: std::path::PathBuf,
 }
 
 /// A kernel whose credential stores are temp directories and whose `PATH`
@@ -50,9 +48,8 @@ fn fixture() -> Fixture {
     let data_dir = tempdir().unwrap();
     let stores = tempdir().unwrap();
     let opencode_dir = stores.path().join("opencode-data");
-    let codex_dir = stores.path().join("codex-home");
     let empty_path = stores.path().join("empty-bin");
-    for dir in [&opencode_dir, &codex_dir, &empty_path] {
+    for dir in [&opencode_dir, &empty_path] {
         std::fs::create_dir_all(dir).unwrap();
     }
     let kernel = KernelHandle::new(data_dir.path().to_path_buf())
@@ -60,7 +57,6 @@ fn fixture() -> Fixture {
         .with_local_credential_roots(
             LocalCredentialRoots::empty()
                 .with_opencode_dir(&opencode_dir)
-                .with_codex_dir(&codex_dir)
                 .with_path_override(empty_path.as_os_str()),
         );
     Fixture {
@@ -68,7 +64,6 @@ fn fixture() -> Fixture {
         _stores: stores,
         kernel,
         opencode_store: opencode_dir.join("auth.json"),
-        codex_store: codex_dir.join("auth.json"),
     }
 }
 
@@ -131,39 +126,6 @@ fn set_owner_only(path: &Path) {
     }
     #[cfg(not(unix))]
     let _ = path;
-}
-
-/// Base64url without padding — used only to build synthetic JWTs here.
-fn base64url(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for chunk in input.chunks(3) {
-        let b0 = u32::from(chunk[0]);
-        let b1 = chunk.get(1).copied().map_or(0, u32::from);
-        let b2 = chunk.get(2).copied().map_or(0, u32::from);
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        let indices = [
-            (triple >> 18) & 0x3F,
-            (triple >> 12) & 0x3F,
-            (triple >> 6) & 0x3F,
-            triple & 0x3F,
-        ];
-        for (position, index) in indices.iter().enumerate() {
-            if position <= chunk.len() {
-                out.push(char::from(ALPHABET[*index as usize]));
-            }
-        }
-    }
-    out
-}
-
-/// A synthetic, unsigned JWT: header, the given payload, and an empty
-/// signature. Nothing in the kernel verifies the signature — it only reads
-/// non-secret claims out of a token it already holds.
-fn unsigned_jwt(payload: &serde_json::Value) -> String {
-    let header = base64url(br#"{"alg":"none","typ":"JWT"}"#);
-    let body = base64url(payload.to_string().as_bytes());
-    format!("{header}.{body}.")
 }
 
 fn fingerprint_of(secret: &str) -> String {
@@ -396,78 +358,13 @@ fn a_malformed_store_is_refused_without_echoing_its_contents() {
 // ---------- Codex auth store ----------
 
 #[test]
-fn a_codex_chatgpt_login_decodes_the_jwt_payload() {
+fn a_codex_auth_store_is_never_opened_or_imported() {
     let fixture = fixture();
-    let access_token = unsigned_jwt(&serde_json::json!({
-        "exp": 2_000_000_000_u64,
-        "https://api.openai.com/auth": {
-            "chatgpt_account_id": "fixture-claim-account",
-            "chatgpt_plan_type": "fixture-plan"
-        }
-    }));
-    let id_token = unsigned_jwt(&serde_json::json!({ "email": "fixture@example.invalid" }));
+    let codex_store = fixture._stores.path().join("codex-home/auth.json");
+    std::fs::create_dir_all(codex_store.parent().unwrap()).unwrap();
     write_store(
-        &fixture.codex_store,
-        &serde_json::json!({
-            "auth_mode": "chatgpt",
-            "tokens": {
-                "id_token": id_token,
-                "access_token": access_token,
-                "refresh_token": "fixture-not-a-real-refresh-token",
-                "account_id": "fixture-tokens-account"
-            },
-            "last_refresh": "2026-08-28T00:00:00Z"
-        })
-        .to_string(),
-    );
-
-    let discovery = fixture
-        .kernel
-        .provider_accounts
-        .discover_local(&ctx(&discover_token(&fixture.kernel)))
-        .expect("discovery succeeds");
-
-    assert!(
-        discovery.warnings.is_empty(),
-        "unexpected warnings: {:?}",
-        discovery.warnings
-    );
-    assert_eq!(discovery.credentials.len(), 1);
-    let credential = &discovery.credentials[0];
-    assert_eq!(credential.source, "codex-chatgpt");
-    assert_eq!(credential.auth_kind, LocalAuthKind::Chatgpt);
-    assert_eq!(credential.store, LocalCredentialStore::CodexAuthStore);
-    assert_eq!(credential.expires_at_unix, 2_000_000_000);
-    assert_eq!(
-        credential.metadata.account_id.as_deref(),
-        Some("fixture-tokens-account"),
-        "tokens.account_id wins over the JWT claim"
-    );
-    assert_eq!(
-        credential.metadata.plan_type.as_deref(),
-        Some("fixture-plan")
-    );
-    assert_eq!(
-        credential.metadata.email.as_deref(),
-        Some("fixture@example.invalid")
-    );
-    assert_eq!(credential.fingerprint, fingerprint_of(&access_token));
-    // The wire encoding carries identity only.
-    let metadata_json = credential.metadata.to_json();
-    assert!(!metadata_json.contains(&access_token));
-    assert!(!metadata_json.contains("refresh"));
-}
-
-#[test]
-fn a_codex_api_key_login_is_reported_rather_than_imported() {
-    let fixture = fixture();
-    write_store(
-        &fixture.codex_store,
-        &serde_json::json!({
-            "auth_mode": "apikey",
-            "OPENAI_API_KEY": "fixture-not-a-real-openai-key"
-        })
-        .to_string(),
+        &codex_store,
+        r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fixture-token"}}"#,
     );
 
     let discovery = fixture
@@ -477,43 +374,21 @@ fn a_codex_api_key_login_is_reported_rather_than_imported() {
         .expect("discovery succeeds");
 
     assert!(discovery.credentials.is_empty());
-    assert_eq!(discovery.warnings.len(), 1);
-    assert!(
-        discovery.warnings[0].starts_with("codex-auth-store: "),
-        "unexpected warning: {}",
-        discovery.warnings[0]
-    );
-    assert!(
-        !discovery.warnings[0].contains("fixture-not-a-real-openai-key"),
-        "a warning must never carry credential material"
-    );
+    assert!(discovery.warnings.is_empty());
 }
 
 #[test]
-fn an_expired_chatgpt_token_is_reported_with_its_expiry() {
+fn importing_the_codex_source_is_rejected_before_any_store_read_or_write() {
     let fixture = fixture();
-    let access_token = unsigned_jwt(&serde_json::json!({ "exp": 1_000_000_000_u64 }));
-    write_store(
-        &fixture.codex_store,
-        &serde_json::json!({
-            "auth_mode": "chatgpt",
-            "tokens": { "access_token": access_token }
-        })
-        .to_string(),
-    );
-
-    let discovery = fixture
+    let broker = stub_provider_account_keyring(&fixture.kernel);
+    let token = token_for(&fixture.kernel, vec![OperationClass::Secret], ACCOUNT_URI);
+    let denied = fixture
         .kernel
         .provider_accounts
-        .discover_local(&ctx(&discover_token(&fixture.kernel)))
-        .expect("discovery succeeds");
-
-    assert_eq!(discovery.credentials.len(), 1);
-    assert_eq!(discovery.credentials[0].expires_at_unix, 1_000_000_000);
-    assert!(
-        discovery.warnings.is_empty(),
-        "v1 does not refresh: an expired token is reported, not an error"
-    );
+        .import_local(&ctx(&token), "codex-chatgpt", ACCOUNT_URI)
+        .expect_err("Codex subscription credentials are not a Terminus provider source");
+    assert_eq!(denied.code_name(), "INVALID_REQUEST");
+    assert!(broker.request(ACCOUNT_URI, "codex-import-test").is_err());
 }
 
 // ---------- absent stores ----------

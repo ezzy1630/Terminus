@@ -9,7 +9,7 @@
 //!    `<data dir>/secrets/<namespace>/<account>`;
 //! 3. the stored credential then resolves through the broker — synchronously
 //!    and through the non-blocking async path the gRPC handlers use — so a
-//!    fresh dev run with the file backend ends with the `ChatGPT` Codex account
+//!    fresh dev run with the file backend ends with the OpenCode account
 //!    resolvable;
 //! 4. `SecretService::delete` removes it and the URI stops resolving;
 //! 5. `TERMINUS_SECRETS_BACKEND=file` WITHOUT `TERMINUS_DEV=1` refuses kernel
@@ -19,9 +19,8 @@
 //! environment variables, and cargo runs each integration-test file in its
 //! own process, so there is no other thread to race with.
 //!
-//! The fixture credential is an obviously fake unsigned JWT written into a
-//! temp directory. No real auth store is read and nothing touches the login
-//! keychain.
+//! The fixture credential is an obviously fake API key written into a temp
+//! directory. No real auth store is read and nothing touches the login keychain.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(test)]
@@ -42,30 +41,17 @@ async fn file_backend_carries_a_provider_account_from_import_to_resolve() {
 
     let data_dir = tempfile::tempdir().unwrap();
     let stores = tempfile::tempdir().unwrap();
-    let codex_dir = stores.path().join("codex-home");
+    let opencode_dir = stores.path().join("opencode-data");
     let empty_path = stores.path().join("empty-bin");
-    for dir in [&codex_dir, &empty_path] {
+    for dir in [&opencode_dir, &empty_path] {
         std::fs::create_dir_all(dir).unwrap();
     }
 
-    let access_token = unsigned_jwt(&serde_json::json!({
-        "exp": 4_000_000_000_u64,
-        "https://api.openai.com/auth": {
-            "chatgpt_account_id": "fixture-claim-account",
-            "chatgpt_plan_type": "fixture-plan"
-        }
-    }));
+    let access_token = "fixture-not-a-real-opencode-key";
     write_owner_only(
-        &codex_dir.join("auth.json"),
+        &opencode_dir.join("auth.json"),
         &serde_json::json!({
-            "auth_mode": "chatgpt",
-            "tokens": {
-                "id_token": unsigned_jwt(&serde_json::json!({ "email": "fixture@example.invalid" })),
-                "access_token": access_token,
-                "refresh_token": "fixture-not-a-real-refresh-token",
-                "account_id": "fixture-tokens-account"
-            },
-            "last_refresh": "2026-08-29T00:00:00Z"
+            "opencode-provider": { "type": "api", "key": access_token }
         })
         .to_string(),
     );
@@ -74,7 +60,7 @@ async fn file_backend_carries_a_provider_account_from_import_to_resolve() {
         .expect("a dev kernel accepts the file secret backend")
         .with_local_credential_roots(
             LocalCredentialRoots::empty()
-                .with_codex_dir(&codex_dir)
+                .with_opencode_dir(&opencode_dir)
                 .with_path_override(empty_path.as_os_str()),
         );
 
@@ -82,8 +68,8 @@ async fn file_backend_carries_a_provider_account_from_import_to_resolve() {
     let token = secret_token(&kernel, ACCOUNT_URI);
     let imported = kernel
         .provider_accounts
-        .import_local(&ctx(&token), "codex-chatgpt", ACCOUNT_URI)
-        .expect("the ChatGPT login imports into the file backend");
+        .import_local(&ctx(&token), "opencode:opencode-provider", ACCOUNT_URI)
+        .expect("the OpenCode login imports into the file backend");
     assert!(imported.stored);
     assert_eq!(imported.capability_uri, ACCOUNT_URI);
 
@@ -228,36 +214,4 @@ fn write_owner_only(path: &std::path::Path, contents: &str) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-}
-
-/// Base64url without padding — used only to build the synthetic JWT here.
-fn base64url(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for chunk in input.chunks(3) {
-        let b0 = u32::from(chunk[0]);
-        let b1 = chunk.get(1).copied().map_or(0, u32::from);
-        let b2 = chunk.get(2).copied().map_or(0, u32::from);
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        let indices = [
-            (triple >> 18) & 0x3F,
-            (triple >> 12) & 0x3F,
-            (triple >> 6) & 0x3F,
-            triple & 0x3F,
-        ];
-        for (position, index) in indices.iter().enumerate() {
-            if position <= chunk.len() {
-                out.push(char::from(ALPHABET[*index as usize]));
-            }
-        }
-    }
-    out
-}
-
-/// A synthetic, unsigned JWT. Nothing in the kernel verifies the signature —
-/// it only reads non-secret claims out of a token it already holds.
-fn unsigned_jwt(payload: &serde_json::Value) -> String {
-    let header = base64url(br#"{"alg":"none","typ":"JWT"}"#);
-    let body = base64url(payload.to_string().as_bytes());
-    format!("{header}.{body}.")
 }

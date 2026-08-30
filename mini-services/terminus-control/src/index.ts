@@ -113,14 +113,12 @@ import {
   type ProviderModelsResult,
 } from "./provider-models.js";
 import {
-  CODEX_HOST,
-  CODEX_PATH_PREFIX,
   ZEN_SOURCE,
   ZEN_VENDOR_ID,
   chooseDefaultAccount,
+  connectLocalProviderAccount,
   discoverAndConnectLocalAccounts,
   mapGatewayConfiguration,
-  parseProviderAccountMetadata,
   providerAccountCapabilityScope,
   providerAccountProviderId,
   providerAccountSecretUri,
@@ -353,13 +351,7 @@ import {
 } from "@terminus/provider-zen";
 import { ANTHROPIC_MODEL_PROFILES } from "@terminus/provider-anthropic";
 import { GOOGLE_MODEL_PROFILES } from "@terminus/provider-google";
-import {
-  ChatGptCodexRenderer,
-  CodexTurnState,
-  OPENAI_MODEL_PROFILES,
-  chatGptCodexRequestHeaders,
-  type ChatGptCodexModelProfile,
-} from "@terminus/provider-openai";
+import { OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
 import {
   CodingTurnEngine,
@@ -8121,6 +8113,55 @@ const routes: Route[] = [
       );
     }
   }),
+  route("POST", "/v1/provider-accounts/:id/connect", async (req, res, params) => {
+    const parsed = providerAccountConnectSchema.safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(
+        res,
+        400,
+        "PROVIDER_ACCOUNT_INPUT_INVALID",
+        "expected_revision and consent: true are required",
+        "validation",
+      );
+    }
+    const account = await db.providerAccount.findUnique({ where: { id: String(params.id) } });
+    if (account === null) {
+      return sendError(res, 404, "PROVIDER_ACCOUNT_NOT_FOUND", "provider account not found", "not_found");
+    }
+    if (account.revision !== parsed.data.expected_revision) {
+      return sendError(
+        res,
+        409,
+        "PROVIDER_ACCOUNT_CONFLICT",
+        "provider account changed; reload it before connecting",
+        "conflict",
+        { expected_revision: parsed.data.expected_revision, actual_revision: account.revision },
+      );
+    }
+    if (!account.source.startsWith("opencode:")) {
+      return sendError(
+        res,
+        409,
+        "PROVIDER_ACCOUNT_UNSUPPORTED",
+        account.statusDetail || "this provider account cannot be connected by Terminus",
+        "conflict",
+      );
+    }
+    try {
+      await connectProviderAccountWithConsent(account, parsed.data.expected_revision);
+      sendJson(res, 200, await providerAccountsResponse());
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "provider account connection failed";
+      const conflict = message.includes("reload it before connecting") || message.includes("no longer available");
+      sendError(
+        res,
+        conflict ? 409 : 502,
+        conflict ? "PROVIDER_ACCOUNT_CONFLICT" : "PROVIDER_ACCOUNT_CONNECT_FAILED",
+        conflict ? message : "the local credential could not be imported into the system keyring",
+        conflict ? "conflict" : "external_dependency",
+      );
+    }
+  }),
   /**
    * Disconnect. The keyring secret goes first: a row without its secret is a
    * visible broken account, a secret without its row is unreachable material
@@ -11553,7 +11594,6 @@ async function executeGatewayProviderRequest(
   // built once at turn start, and the token only exists after a response.
   const extraHeaders = {
     ...(gateway.extraHeaders ?? {}),
-    ...(gateway.codexTurnState?.requestHeaders() ?? {}),
   };
   const transport = new GatewayTransport({
     credentialBindingId: gateway.secretUri,
@@ -11574,12 +11614,7 @@ async function executeGatewayProviderRequest(
     }
   } finally {
     // In `finally` because the head frame carries these on a 429 as well as a
-    // 200 — the quota receipt and the turn-state token are exactly what the
-    // next attempt of this turn needs, and a throw must not discard them.
-    gateway.codexTurnState?.observe(client.responseHeaders());
-    if (gateway.accountId !== undefined) {
-      recordProviderAccountUsageHeaders(gateway.accountId, client.responseHeaders());
-    }
+    // 200 — quota receipts must not be discarded when a request throws.
   }
   const providerError = chunks.find((chunk) => chunk.kind === "error");
   if (providerError?.kind === "error") {
@@ -13287,6 +13322,10 @@ async function runProviderAccountDiscovery(): Promise<{
   readonly opencodeInstalled: boolean;
   readonly lastRunAt: string;
 }> {
+  // Rows from the pre-App-Server implementation may still contain a copied
+  // Codex token. Keep the material untouched for an explicit disconnect, but
+  // make the row and any cached model list non-routable before reconciliation.
+  await demoteUnsupportedCodexAccounts();
   const result = await discoverAndConnectLocalAccounts({
     discoverLocal: async (): Promise<LocalCredentialDiscovery> => {
       const response = await requireKernelUds().providerAccounts.DiscoverLocal({
@@ -13308,20 +13347,6 @@ async function runProviderAccountDiscovery(): Promise<{
         codexInstalled: response.codexInstalled,
         opencodeInstalled: response.opencodeInstalled,
       };
-    },
-    importLocal: async ({ source, capabilityUri, fingerprint }) => {
-      const response = await requireKernelUds().providerAccounts.ImportLocal({
-        // The kernel requires an idempotency key. Keying it on the credential
-        // fingerprint as well as the destination means a rotated key is a new
-        // operation rather than a replay of the import that stored the old one.
-        context: {
-          ...await kernelMaintenanceContext(),
-          idempotencyKey: `provider-account-import:${capabilityUri}:${fingerprint}`,
-        },
-        source,
-        capabilityUri,
-      });
-      return { capabilityUri: response.capabilityUri, stored: response.stored };
     },
     // Metadata-only probe: `SecretService.Mint` resolves the credential in
     // whichever store the kernel is configured with and returns an opaque
@@ -13347,7 +13372,6 @@ async function runProviderAccountDiscovery(): Promise<{
     },
     listAccounts: listProviderAccountRecords,
     upsertAccount: upsertProviderAccountRecord,
-    setDefaultAccount: setDefaultProviderAccountRow,
     readGatewayConfiguration: readGatewayConfigurationSnapshot,
     fetchCatalog: () => fetchModelsDevRaw(),
     newAccountId: () => uuidV7(),
@@ -13362,6 +13386,77 @@ async function runProviderAccountDiscovery(): Promise<{
   return result;
 }
 
+async function demoteUnsupportedCodexAccounts(): Promise<void> {
+  await writerTransaction(async (tx) => {
+    const stale = await tx.providerAccount.findMany({
+      where: {
+        OR: [{ source: "codex-chatgpt" }, { renderProfile: "chatgpt_codex" }],
+        status: "connected",
+      },
+      select: { id: true },
+    });
+    if (stale.length === 0) return;
+    await tx.providerAccount.updateMany({
+      where: { id: { in: stale.map((account) => account.id) } },
+      data: {
+        status: "unsupported",
+        statusDetail: "ChatGPT subscriptions require the separate Codex App Server lane.",
+        baseUrl: "",
+        host: "",
+        connectorId: "",
+        renderProfile: "openai_responses",
+      },
+    });
+    await tx.providerAccountModelDiscovery.deleteMany({
+      where: { accountId: { in: stale.map((account) => account.id) } },
+    });
+  });
+}
+
+/** Import only after the HTTP connect route has validated explicit consent. */
+async function connectProviderAccountWithConsent(
+  account: ProviderAccountRecord,
+  expectedRevision: number,
+): Promise<ProviderAccountRecord> {
+  return connectLocalProviderAccount({
+    account,
+    expectedRevision,
+    userConsent: true,
+    discoverLocal: async (): Promise<LocalCredentialDiscovery> => {
+      const response = await requireKernelUds().providerAccounts.DiscoverLocal({
+        context: await kernelMaintenanceContext(),
+      });
+      return {
+        credentials: response.credentials.map((credential) => ({
+          source: credential.source,
+          authKind: credential.authKind,
+          fingerprint: credential.fingerprint,
+          metadataJson: credential.metadataJson,
+          expiresAtUnix: Number(credential.expiresAtUnix),
+          store: credential.store,
+        })),
+        warnings: response.warnings,
+        codexInstalled: response.codexInstalled,
+        opencodeInstalled: response.opencodeInstalled,
+      };
+    },
+    importLocal: async ({ source, capabilityUri, fingerprint }) => {
+      const response = await requireKernelUds().providerAccounts.ImportLocal({
+        context: {
+          ...await kernelMaintenanceContext(),
+          idempotencyKey: `provider-account-import:${capabilityUri}:${fingerprint}`,
+        },
+        source,
+        capabilityUri,
+      });
+      return { capabilityUri: response.capabilityUri, stored: response.stored };
+    },
+    fetchCatalog: () => fetchModelsDevRaw(),
+    upsertAccount: upsertProviderAccountRecord,
+    now: () => new Date(),
+  });
+}
+
 /**
  * The exact HTTPS surface one account may reach.
  *
@@ -13371,15 +13466,7 @@ async function runProviderAccountDiscovery(): Promise<{
 function providerAccountEndpoint(account: ProviderAccountRecord): KernelConnectorEndpoint {
   const profile = account.renderProfile as ProviderRenderProfile;
   if (profile === "zen_gateway") return ZEN_GATEWAY_ENDPOINT;
-  if (profile === "chatgpt_codex") {
-    return {
-      connectorId: "chatgpt-codex",
-      host: CODEX_HOST,
-      port: 443,
-      allowedPathPrefixes: [CODEX_PATH_PREFIX],
-      label: account.displayName,
-    };
-  }
+  if (profile === "chatgpt_codex") throw new Error("ChatGPT subscriptions require the separate Codex App Server lane");
   const base = new URL(account.baseUrl);
   const prefix = base.pathname === "/" ? "/" : `${base.pathname.replace(/\/+$/, "")}/`;
   return {
@@ -13389,31 +13476,6 @@ function providerAccountEndpoint(account: ProviderAccountRecord): KernelConnecto
     allowedPathPrefixes: [prefix],
     label: account.displayName,
   };
-}
-
-/**
- * Non-credential headers the account's connector admits.
- *
- * The Codex endpoint identifies the caller honestly: `originator: terminus`
- * and a Terminus user agent, never an impersonated Codex CLI.
- */
-function providerAccountRequestHeaders(
-  account: ProviderAccountRecord,
-  sessionId: string | null,
-  threadId?: string | null,
-): Readonly<Record<string, string>> {
-  if ((account.renderProfile as ProviderRenderProfile) !== "chatgpt_codex") return {};
-  const metadata = parseProviderAccountMetadata(account.metadataJson);
-  // No turn state here on purpose: this record is built once per turn, before
-  // any response exists to have supplied a token. The echo is merged per
-  // dispatch in `executeGatewayProviderRequest`.
-  return chatGptCodexRequestHeaders({
-    originator: "terminus",
-    userAgent: `terminus/${CONTROL_BUILD_VERSION}`,
-    accountId: metadata.account_id ?? null,
-    sessionId,
-    threadId: threadId ?? null,
-  });
 }
 
 function providerAccountClient(
@@ -13458,7 +13520,6 @@ async function discoverAndPersistProviderAccountModels(
     client: providerAccountClient(account, context),
     observedAt: now(),
     catalog: (await fetchModelsDevRaw()).catalog,
-    headers: providerAccountRequestHeaders(account, null),
     ...(signal === undefined || signal === null ? {} : { signal }),
     discoverZen: async () => {
       // Account discovery owns its credential binding. Requiring the retired
@@ -13695,10 +13756,9 @@ async function loadThreadReasoningReplay(threadId: string): Promise<readonly Rea
 /**
  * The renderer for one account model.
  *
- * ChatGPT Codex needs its own profile: the endpoint rejects four fields an
- * ordinary Responses request carries, requires `store: false`, and advertises
- * per-model reasoning levels richer than Terminus's four. Everything else
- * reuses `GatewayRenderer`, which already delegates by protocol.
+ * Connected accounts reuse the provider-neutral gateway renderer. Unsupported
+ * external-harness accounts are rejected during account resolution and never
+ * reach this function.
  */
 function providerAccountRenderer(
   routing: {
@@ -13710,63 +13770,17 @@ function providerAccountRenderer(
   reasoningEffort: ReasoningEffort | null,
   promptCacheKey: string,
   reasoningReplay: ReasoningReplayLedger,
-): ChatGptCodexRenderer | GatewayRenderer {
-  if ((routing.account.renderProfile as ProviderRenderProfile) === "chatgpt_codex") {
-    const profile: ChatGptCodexModelProfile = {
-      slug: routing.model.id,
-      reasoningLevels: [...routing.model.reasoningEfforts],
-      defaultReasoningLevel: routing.model.defaultReasoningEffort,
-      supportsParallelToolCalls: routing.model.supportsParallelToolCalls,
-      supportsReasoningSummaries: routing.model.supportsReasoningSummaries,
-    };
-    return new ChatGptCodexRenderer(routing.providerId, {
-      reasoningEffort,
-      promptCacheKey,
-      profile,
-      reasoningReplay,
-    });
-  }
+): GatewayRenderer {
   return new GatewayRenderer([routing.gatewayModel], { reasoningEffort, reasoningReplay });
-}
-
-/**
- * Surface an account's rate-limit receipt on the account itself.
- *
- * A subscription account has no per-token price, so the only honest usage
- * signal is the provider's own quota window. Best effort: a failure here must
- * never fail a turn, and the account's revision does not move — this is
- * observation, not configuration.
- */
-function recordProviderAccountUsageHeaders(
-  accountId: string,
-  headers: Readonly<Record<string, string>>,
-): void {
-  const usedPercent = headers["x-codex-primary-used-percent"];
-  const resetAfterSeconds = headers["x-codex-primary-reset-after-seconds"];
-  if (usedPercent === undefined && resetAfterSeconds === undefined) return;
-  const parts: string[] = [];
-  if (usedPercent !== undefined) parts.push(`${usedPercent}% of the plan window used`);
-  if (resetAfterSeconds !== undefined) {
-    const seconds = Number(resetAfterSeconds);
-    parts.push(
-      Number.isFinite(seconds) && seconds > 0
-        ? `resets in ${Math.max(1, Math.round(seconds / 60))} min`
-        : `resets in ${resetAfterSeconds}s`,
-    );
-  }
-  const detail = parts.join(", ");
-  void writerTransaction((tx) => tx.providerAccount.updateMany({
-    where: { id: accountId, status: "connected" },
-    data: { statusDetail: detail },
-  })).catch((error: unknown) => {
-    console.warn(
-      `[terminus-control] recording provider account usage failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  });
 }
 
 const providerAccountRevisionSchema = z.object({
   expected_revision: z.number().int().nonnegative(),
+}).strict();
+
+const providerAccountConnectSchema = z.object({
+  expected_revision: z.number().int().nonnegative(),
+  consent: z.literal(true),
 }).strict();
 
 /**
@@ -15454,11 +15468,6 @@ async function agentLoop(turnId: string): Promise<void> {
               workspaceAccess,
             }),
             endpoint: providerAccountEndpoint(selectedProviderAccount),
-            extraHeaders: providerAccountRequestHeaders(
-              selectedProviderAccount,
-              turn.thread.sessionId,
-              turn.threadId,
-            ),
             scope: providerAccountCapabilityScope(selectedProviderAccount),
           };
         })();
@@ -15603,11 +15612,8 @@ async function agentLoop(turnId: string): Promise<void> {
         ? (localProviderCommand?.toolsEnabled ?? false)
         : gatewayModel.toolCalling;
     const toolsEnabledForTurn = toolsEnabled;
-    // One per turn, by definition: `x-codex-turn-state` is echoed across the
-    // requests of a single turn and must not leak into the next one.
-    const codexTurnState = new CodexTurnState();
     // The dispatch target for this turn. An account carries its own connector
-    // and the non-credential headers that endpoint requires.
+    // and its non-credential headers.
     const providerGatewayConfig: ProviderGatewayConfig | null = gatewayModel === null
       ? null
       : {
@@ -15617,9 +15623,6 @@ async function agentLoop(turnId: string): Promise<void> {
             ? {}
             : {
                 endpoint: accountRouting.endpoint,
-                extraHeaders: accountRouting.extraHeaders,
-                codexTurnState,
-                accountId: accountRouting.account.id,
               }),
         };
     const requestedToolCapabilities = [...new Set(

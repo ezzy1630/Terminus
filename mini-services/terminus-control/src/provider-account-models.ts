@@ -9,9 +9,8 @@
  *     knows context windows, tool-calling and price, and the account's own
  *     `/models` (when it has one) reports ids and nothing else. A best-effort
  *     `GET {base_url}/models` therefore proves reachability, not identity.
- *   - `chatgpt_codex`: the Codex catalogue, which is authoritative about
- *     per-model reasoning levels and hidden slugs and appears in no public
- *     catalogue at all.
+ *   - `chatgpt_codex`: reserved for the separate Codex App Server lane and
+ *     never queried by the Terminus-owned provider transport.
  *   - `zen_gateway`: the existing gateway discovery, unchanged.
  *
  * The result is persisted per account (`provider_account_model_discoveries`)
@@ -27,15 +26,10 @@ import { resolveMaxOutputTokens, resolveTestedSafeContextTokens } from "@terminu
 import type { CredentialBoundGatewayClient, GatewayModel, GatewayProtocol } from "@terminus/provider-zen";
 import { ProviderTransportError } from "./providers/provider-retry.js";
 import {
-  CODEX_BASE_URL,
   decodeModelsDevProvider,
   type ProviderAccountRecord,
   type ProviderRenderProfile,
 } from "./provider-accounts.js";
-
-/** Pinned by the Codex catalogue endpoint; it is a required query parameter. */
-export const CODEX_CLIENT_VERSION = "0.150.1";
-export const CODEX_MODELS_URL = `${CODEX_BASE_URL}/models?client_version=${CODEX_CLIENT_VERSION}`;
 
 const MAX_CATALOG_BYTES = 1 * 1024 * 1024;
 const PROBE_TIMEOUT_MS = 3_000;
@@ -243,77 +237,6 @@ export function modelsFromCatalog(input: {
   };
 }
 
-// ────────────────────────── Codex catalogue ──────────────────────────────────
-
-/**
- * Decode `GET /backend-api/codex/models`.
- *
- * `visibility` other than `list` marks a slug the endpoint answers for but
- * does not offer (`gpt-reserve`, `codex-auto-review`); they are rejected with
- * that reason rather than hidden without one.
- */
-export function decodeCodexCatalog(raw: unknown): {
-  readonly models: readonly ProviderAccountModel[];
-  readonly rejected: readonly RejectedProviderAccountModel[];
-} {
-  if (!isRecord(raw) || !Array.isArray(raw.models)) {
-    throw new Error("Codex model catalogue must be an object with a models array");
-  }
-  let reportedShape = false;
-  const models: ProviderAccountModel[] = [];
-  const rejected: RejectedProviderAccountModel[] = [];
-  for (const entry of raw.models) {
-    if (!isRecord(entry)) continue;
-    const slug = typeof entry.slug === "string" ? entry.slug.trim() : "";
-    if (slug === "") continue;
-    if (entry.visibility !== "list") {
-      rejected.push({
-        modelId: slug,
-        reason: `the Codex catalogue marks the model ${typeof entry.visibility === "string" ? entry.visibility : "hidden"}`,
-      });
-      continue;
-    }
-    const levels = codexReasoningLevels(entry);
-    if (levels.length === 0 && !reportedShape) {
-      // The first live catalogue answered with entries this decoder could not
-      // read, and an empty effort list is indistinguishable from "this model
-      // does not reason". Name the keys once so the shape is not guessed twice.
-      reportedShape = true;
-      console.warn(
-        `[terminus-control] Codex catalogue entry for ${slug} exposed no reasoning levels; keys: ${Object.keys(entry).sort().join(", ")}`,
-      );
-    }
-    models.push({
-      id: slug,
-      name: typeof entry.display_name === "string" && entry.display_name.trim() !== "" ? entry.display_name : slug,
-      // A subscription turn costs no micros. The quota window, not a price,
-      // is what limits it.
-      free: false,
-      reasoning: levels.length > 0 || entry.supports_reasoning_summaries === true,
-      toolCalling: true,
-      structuredOutput: true,
-      imageInput: Array.isArray(entry.input_modalities) && entry.input_modalities.includes("image"),
-      contextTokens: positiveInteger(entry.context_window),
-      // The Codex catalogue reports no output limit. Serving 0 made every
-      // consumer of /v1/provider-models (the desktop, the eval record) fall
-      // back to its own guess; the family ceiling is what the turn engine
-      // already applies, so the catalogue states it too.
-      outputTokens: resolveMaxOutputTokens({ modelId: slug, outputTokens: positiveInteger(entry.max_output_tokens) }),
-      inputMicrosPerMillion: 0,
-      cachedInputMicrosPerMillion: 0,
-      outputMicrosPerMillion: 0,
-      reasoningEfforts: levels,
-      defaultReasoningEffort: codexDefaultReasoningLevel(entry, levels),
-      supportsParallelToolCalls: entry.supports_parallel_tool_calls === true,
-      supportsReasoningSummaries: entry.supports_reasoning_summaries === true,
-    });
-  }
-  return {
-    models: models.sort((left, right) => left.id.localeCompare(right.id)),
-    rejected: rejected.sort((left, right) => left.modelId.localeCompare(right.modelId)),
-  };
-}
-
 // ────────────────────────── Discovery ────────────────────────────────────────
 
 export interface DiscoverAccountModelsInput {
@@ -367,26 +290,13 @@ export async function discoverAccountModels(
   }
 
   if (profile === "chatgpt_codex") {
-    const body = await readAll(
-      input.client.stream({
-        url: CODEX_MODELS_URL,
-        method: "GET",
-        headers: { accept: "application/json", ...(input.headers ?? {}) },
-        credentialBindingId: input.account.credentialUri,
-        authStyle: input.account.credentialUri === "" ? "none" : "bearer",
-        signal: input.signal ?? null,
-      }),
-      MAX_CATALOG_BYTES,
-      "Codex model catalogue",
-    );
-    const decoded = decodeCodexCatalog(JSON.parse(body) as unknown);
     return {
       accountId: input.account.id,
       observedAt: input.observedAt,
-      models: decoded.models,
-      rejected: decoded.rejected,
-      reachable: true,
-      reachabilityDetail: "",
+      models: [],
+      rejected: [{ modelId: input.account.vendorId, reason: "ChatGPT subscriptions require the separate Codex App Server lane" }],
+      reachable: null,
+      reachabilityDetail: "Terminus does not dispatch raw Codex subscription requests.",
     };
   }
 
@@ -733,65 +643,12 @@ export function accountMark(label: string, fallback: string): string {
 
 // ────────────────────────── Helpers ──────────────────────────────────────────
 
-/**
- * The reasoning levels one Codex catalogue entry advertises.
- *
- * The live catalogue does not answer with a plain string array: an entry is an
- * object naming the level plus its own metadata, and the key it uses has
- * changed across client versions. Both encodings and every key that has been
- * observed are accepted, because the alternative is silently reporting a
- * reasoning model as one that does not reason.
- */
-function codexReasoningLevels(entry: Readonly<Record<string, unknown>>): readonly string[] {
-  const raw = firstArray(entry, [
-    "supported_reasoning_levels",
-    "supported_reasoning_efforts",
-    "reasoning_levels",
-    "reasoning_efforts",
-  ]);
-  const levels: string[] = [];
-  for (const value of raw) {
-    if (typeof value === "string" && value.trim() !== "") {
-      levels.push(value.trim());
-      continue;
-    }
-    if (!isRecord(value)) continue;
-    for (const key of ["effort", "level", "slug", "value", "id", "name"]) {
-      const named = value[key];
-      if (typeof named === "string" && named.trim() !== "") {
-        levels.push(named.trim());
-        break;
-      }
-    }
-  }
-  return [...new Set(levels)];
+function dollarsToMicros(value: number): number {
+  return Math.round(value * 1_000_000);
 }
 
-/** The entry's default level, kept only when the model actually advertises it. */
-function codexDefaultReasoningLevel(
-  entry: Readonly<Record<string, unknown>>,
-  levels: readonly string[],
-): string | null {
-  for (const key of ["default_reasoning_level", "default_reasoning_effort"]) {
-    const value = entry[key];
-    if (typeof value !== "string" || value.trim() === "") continue;
-    const normalized = value.trim();
-    // A default the model does not list is a catalogue inconsistency; sending
-    // it back would be a 400. Fall through to the advertised list.
-    if (levels.length === 0 || levels.includes(normalized)) return normalized;
-  }
-  return levels.includes("medium") ? "medium" : levels[0] ?? null;
-}
-
-function firstArray(
-  entry: Readonly<Record<string, unknown>>,
-  keys: readonly string[],
-): readonly unknown[] {
-  for (const key of keys) {
-    const value = entry[key];
-    if (Array.isArray(value) && value.length > 0) return value;
-  }
-  return [];
+function positiveInteger(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
 async function readAll(
@@ -806,14 +663,6 @@ async function readAll(
     if (text.length > limit) throw new Error(`${what} exceeded ${limit} bytes`);
   }
   return text + decoder.decode();
-}
-
-function dollarsToMicros(value: number): number {
-  return Math.round(value * 1_000_000);
-}
-
-function positiveInteger(value: unknown): number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {

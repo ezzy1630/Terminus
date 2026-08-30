@@ -4,7 +4,6 @@ import { describe, expect, test } from "bun:test";
 import type { Micros, Rfc3339Timestamp } from "@terminus/domain";
 import {
   accountMark,
-  decodeCodexCatalog,
   discoverAccountModels,
   foldReasoningEffort,
   foldReasoningEfforts,
@@ -195,120 +194,6 @@ describe("Zen account discovery", () => {
       modelId: "paid-model",
       reason: "anonymous OpenCode Zen accounts admit free models only",
     });
-  });
-});
-
-describe("decodeCodexCatalog", () => {
-  const raw = {
-    models: [
-      {
-        slug: "gpt-5.6-sol",
-        display_name: "GPT-5.6 Sol",
-        visibility: "list",
-        context_window: 272_000,
-        default_reasoning_level: "medium",
-        supported_reasoning_levels: ["low", "medium", "high", "ultra"],
-        supports_reasoning_summaries: true,
-        supports_parallel_tool_calls: true,
-        input_modalities: ["text", "image"],
-      },
-      {
-        slug: "gpt-reserve",
-        display_name: "Reserve",
-        visibility: "hidden",
-        context_window: 272_000,
-        supported_reasoning_levels: ["medium"],
-      },
-    ],
-  };
-
-  test("keeps listed slugs with their advertised reasoning levels and zero micros", () => {
-    const { models } = decodeCodexCatalog(raw);
-    expect(models).toHaveLength(1);
-    expect(models[0]).toMatchObject({
-      id: "gpt-5.6-sol",
-      name: "GPT-5.6 Sol",
-      contextTokens: 272_000,
-      // The catalogue reports no output limit; the family ceiling is served
-      // rather than 0, which every consumer had to replace with a guess.
-      outputTokens: 128_000,
-      reasoningEfforts: ["low", "medium", "high", "ultra"],
-      defaultReasoningEffort: "medium",
-      supportsParallelToolCalls: true,
-      supportsReasoningSummaries: true,
-      toolCalling: true,
-      imageInput: true,
-      inputMicrosPerMillion: 0,
-      outputMicrosPerMillion: 0,
-      // A subscription turn is not free; it draws on a plan window.
-      free: false,
-    });
-  });
-
-  test("excludes hidden slugs but records why", () => {
-    const { rejected } = decodeCodexCatalog(raw);
-    expect(rejected).toEqual([{ modelId: "gpt-reserve", reason: "the Codex catalogue marks the model hidden" }]);
-  });
-
-  /**
-   * The live catalogue does not answer with a plain string array — the first
-   * real run decoded every model as non-reasoning with an empty effort list.
-   * Object entries are the shape that actually arrives.
-   */
-  test("reads reasoning levels from object entries as well as strings", () => {
-    const { models } = decodeCodexCatalog({
-      models: [{
-        slug: "gpt-5.4-mini",
-        display_name: "GPT-5.4-Mini",
-        visibility: "list",
-        default_reasoning_level: "medium",
-        supported_reasoning_levels: [
-          { effort: "low", display_name: "Low" },
-          { effort: "medium" },
-          { effort: "high" },
-          { effort: "xhigh" },
-        ],
-        supports_reasoning_summaries: true,
-      }],
-    });
-    expect(models[0]?.reasoningEfforts).toEqual(["low", "medium", "high", "xhigh"]);
-    expect(models[0]?.defaultReasoningEffort).toBe("medium");
-    expect(models[0]?.reasoning).toBe(true);
-  });
-
-  test("accepts the alternate key names and the `level`/`slug` fields", () => {
-    const { models } = decodeCodexCatalog({
-      models: [{
-        slug: "gpt-5.5",
-        visibility: "list",
-        supported_reasoning_efforts: [{ level: "medium" }, { slug: "high" }],
-      }],
-    });
-    expect(models[0]?.reasoningEfforts).toEqual(["medium", "high"]);
-  });
-
-  test("a default the model does not advertise is not sent back", () => {
-    const { models } = decodeCodexCatalog({
-      models: [{
-        slug: "gpt-5.5",
-        visibility: "list",
-        default_reasoning_level: "turbo",
-        supported_reasoning_levels: ["low", "medium"],
-      }],
-    });
-    expect(models[0]?.defaultReasoningEffort).toBe("medium");
-  });
-
-  test("summaries alone still mark a model as reasoning", () => {
-    const { models } = decodeCodexCatalog({
-      models: [{ slug: "gpt-5.4", visibility: "list", supports_reasoning_summaries: true }],
-    });
-    expect(models[0]?.reasoning).toBe(true);
-    expect(models[0]?.reasoningEfforts).toEqual([]);
-  });
-
-  test("a document that is not a catalogue fails closed", () => {
-    expect(() => decodeCodexCatalog({ data: [] })).toThrow("models array");
   });
 });
 
@@ -538,12 +423,14 @@ describe("transport projection", () => {
     });
   });
 
-  test("ChatGPT Codex advertises no native continuation, because it stores nothing", () => {
+  test("unsupported Codex accounts expose no native continuation or transport", () => {
     const codex = account({
       source: "codex-chatgpt",
-      protocol: "responses",
+      protocol: "chat_completions",
       renderProfile: "chatgpt_codex",
-      baseUrl: "https://chatgpt.com/backend-api/codex",
+      baseUrl: "",
+      host: "",
+      status: "unsupported",
     });
     const snapshot = providerAccountCapabilitySnapshot({
       account: codex,

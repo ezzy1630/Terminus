@@ -16,9 +16,9 @@
  *      catalogue rather than guessed. An SDK Terminus has no transport for is
  *      stored as `unsupported` with the reason, so it is visible but not
  *      selectable.
- *   2. Auto-connect: ask the kernel what is on this machine, import anything
- *      new or rotated into `secret://provider-account/<uuid-v7>`, migrate the
- *      legacy gateway row into a `zen` account, and pick a default.
+ *   2. Discovery: ask the kernel what supported local sources are present,
+ *      migrate the legacy gateway row into a `zen` account, and never import
+ *      a credential without an explicit user-consent operation.
  *   3. Which account a turn runs on, as a pure decision over already-loaded
  *      rows.
  *
@@ -58,11 +58,6 @@ export const ZEN_SOURCE = "zen";
 export const ZEN_VENDOR_ID = "opencode";
 /** Prefix for a local auth-store entry: `opencode:<providerID>`. */
 export const OPENCODE_SOURCE_PREFIX = `${ZEN_VENDOR_ID}:`;
-
-export const CODEX_HOST = "chatgpt.com";
-export const CODEX_BASE_URL = `https://${CODEX_HOST}/backend-api/codex`;
-/** Paths the `chatgpt-codex` connector may reach. */
-export const CODEX_PATH_PREFIX = "/backend-api/codex/";
 
 /**
  * The persisted account, in the shape Prisma returns. Declared structurally so
@@ -434,23 +429,15 @@ export function mapLocalCredential(input: MapLocalCredentialInput): ProviderAcco
   const authKind = admittedAuthKind(credential.authKind);
 
   if (credential.source === CODEX_SOURCE) {
-    const expired = expiresAt !== null && expiresAt.getTime() <= nowMs;
-    return {
+    return unsupported({
       source: CODEX_SOURCE,
       displayName: "ChatGPT Codex",
       vendorId: "openai",
       authKind: "chatgpt",
-      baseUrl: CODEX_BASE_URL,
-      host: CODEX_HOST,
-      protocol: "responses",
-      connectorId: "chatgpt-codex",
-      renderProfile: "chatgpt_codex",
-      billing: "subscription",
-      status: expired ? "expired" : "connected",
-      statusDetail: expired ? "The ChatGPT login expired. Run `codex` to sign in again." : "",
+      detail: "ChatGPT subscriptions are available through the separate Codex App Server lane; the raw CLI token is not importable",
       metadataJson: canonicalMetadata(metadata),
       expiresAt,
-    };
+    });
   }
 
   if (!credential.source.startsWith(OPENCODE_SOURCE_PREFIX)) {
@@ -706,7 +693,7 @@ export function zenAccountCredentialUri(row: GatewayConfigurationSnapshot): stri
   return anonymous ? "" : row.secretUri;
 }
 
-// ────────────────────────── Auto-connect ─────────────────────────────────────
+// ────────────────────────── Local account discovery ─────────────────────────
 
 export interface LocalCredentialDiscovery {
   readonly credentials: readonly LocalProviderCredential[];
@@ -744,7 +731,7 @@ export interface ProviderAccountDiscoveryDependencies {
    * idempotency token on the *credential*, not just its destination: a
    * rotated key imported to the same URI must not be deduplicated away.
    */
-  readonly importLocal: (input: {
+  readonly importLocal?: (input: {
     readonly source: string;
     readonly capabilityUri: string;
     readonly fingerprint: string;
@@ -767,7 +754,6 @@ export interface ProviderAccountDiscoveryDependencies {
   readonly credentialResolves?: (credentialUri: string) => Promise<boolean>;
   /** Creates the row, or updates the existing row for the same source. */
   readonly upsertAccount: (input: ProviderAccountUpsert) => Promise<ProviderAccountRecord>;
-  readonly setDefaultAccount: (id: string) => Promise<void>;
   readonly readGatewayConfiguration: () => Promise<GatewayConfigurationSnapshot | null>;
   readonly fetchCatalog: () => Promise<{ readonly catalog: unknown; readonly offline: boolean }>;
   readonly newAccountId?: () => string;
@@ -777,7 +763,7 @@ export interface ProviderAccountDiscoveryDependencies {
 
 export interface ProviderAccountDiscoveryResult {
   readonly accounts: readonly ProviderAccountRecord[];
-  /** Accounts created, re-imported, or otherwise changed by this run. */
+  /** Credentials actually imported by an explicit connect operation (always empty during discovery). */
   readonly imported: readonly string[];
   readonly warnings: readonly string[];
   readonly codexInstalled: boolean;
@@ -785,14 +771,84 @@ export interface ProviderAccountDiscoveryResult {
   readonly lastRunAt: string;
 }
 
+export interface ProviderAccountConnectDependencies {
+  readonly account: ProviderAccountRecord;
+  readonly expectedRevision: number;
+  /** The user-visible confirmation must be true; discovery cannot supply it. */
+  readonly userConsent: boolean;
+  readonly discoverLocal: () => Promise<LocalCredentialDiscovery>;
+  readonly importLocal: (input: {
+    readonly source: string;
+    readonly capabilityUri: string;
+    readonly fingerprint: string;
+  }) => Promise<{ readonly capabilityUri: string; readonly stored: boolean }>;
+  readonly fetchCatalog: () => Promise<{ readonly catalog: unknown; readonly offline: boolean }>;
+  readonly upsertAccount: (input: ProviderAccountUpsert) => Promise<ProviderAccountRecord>;
+  readonly now?: () => Date;
+}
+
+/**
+ * Import one already-discovered OpenCode credential after explicit consent.
+ * The source is re-read immediately before import so a stale discovery cannot
+ * cause the wrong credential to be copied into the account's capability URI.
+ */
+export async function connectLocalProviderAccount(
+  dependencies: ProviderAccountConnectDependencies,
+): Promise<ProviderAccountRecord> {
+  if (!dependencies.userConsent) {
+    throw new Error("explicit user consent is required before importing a local credential");
+  }
+  if (dependencies.account.revision !== dependencies.expectedRevision) {
+    throw new Error("provider account changed; reload it before connecting");
+  }
+  if (dependencies.account.source === CODEX_SOURCE || dependencies.account.renderProfile === "chatgpt_codex") {
+    throw new Error("ChatGPT subscriptions require the separate Codex App Server lane");
+  }
+
+  const discovery = await dependencies.discoverLocal();
+  const credential = discovery.credentials.find((candidate) => candidate.source === dependencies.account.source);
+  if (credential === undefined) {
+    throw new Error("the local credential is no longer available; run discovery again");
+  }
+  const { catalog, offline } = await dependencies.fetchCatalog();
+  const mapping = mapLocalCredential({
+    credential,
+    catalog,
+    catalogOffline: offline,
+    nowMs: (dependencies.now ?? (() => new Date()))().getTime(),
+  });
+  if (mapping.status !== "connected" && mapping.status !== "expired") {
+    throw new Error(mapping.statusDetail || "this local credential is not supported by Terminus");
+  }
+  const capabilityUri = providerAccountSecretUri(dependencies.account.id);
+  const importLocal = dependencies.importLocal;
+  if (importLocal === undefined) {
+    throw new Error("local credential import is unavailable");
+  }
+  const result = await importLocal({
+    source: credential.source,
+    capabilityUri,
+    fingerprint: credential.fingerprint,
+  });
+  if (!result.stored || result.capabilityUri !== capabilityUri) {
+    throw new Error("kernel did not confirm credential storage");
+  }
+  return dependencies.upsertAccount({
+    id: dependencies.account.id,
+    ...mappingColumns(mapping),
+    credentialUri: capabilityUri,
+    fingerprint: credential.fingerprint,
+    discoveredAt: dependencies.account.discoveredAt,
+  });
+}
+
 /**
  * Ask the kernel what credentials exist on this machine and make each one an
  * account.
  *
- * Runs at startup and on `POST /v1/provider-accounts/discover`. Auto-connect
- * is silent by product decision (2026-08-28): the credentials stay in the OS
- * keyring, nothing is sent anywhere the user's own CLI would not already send
- * it, and Settings offers one-click Disconnect.
+ * Runs at startup and on `POST /v1/provider-accounts/discover`. Discovery is
+ * metadata-only. A separate explicit-connect operation is the only path that
+ * invokes `importLocal`, so opening Settings cannot silently copy a secret.
  *
  * Order matters. A configured gateway is projected before credential discovery
  * so a temporarily unavailable kernel cannot hide it. After discovery, an
@@ -824,7 +880,6 @@ export async function discoverAndConnectLocalAccounts(
       discoveredAt: current?.discoveredAt ?? now(),
     });
     existing.set(ZEN_SOURCE, upserted);
-    if (current === null) imported.push(upserted.id);
   }
 
   // 2. Everything the kernel can see in the local credential stores.
@@ -862,7 +917,6 @@ export async function discoverAndConnectLocalAccounts(
       discoveredAt: now(),
     });
     existing.set(ZEN_SOURCE, upserted);
-    imported.push(upserted.id);
   }
 
   for (const credential of discovery.credentials) {
@@ -895,29 +949,15 @@ export async function discoverAndConnectLocalAccounts(
     let status = mapping.status;
     let statusDetail = mapping.statusDetail;
     let storedUri = routable ? (current?.credentialUri ?? "") : "";
+    // Discovery never imports or rotates secrets. A newly observed or rotated
+    // credential is visible, but remains disconnected until the user approves
+    // the explicit connect operation.
     if (needsImport) {
-      try {
-        const result = await dependencies.importLocal({
-          source: credential.source,
-          capabilityUri: credentialUri,
-          fingerprint: credential.fingerprint,
-        });
-        if (!result.stored || result.capabilityUri !== credentialUri) {
-          throw new Error("kernel did not confirm credential storage");
-        }
-        storedUri = credentialUri;
-        imported.push(accountId);
-      } catch (error: unknown) {
-        // Never quote the kernel error verbatim into a user-visible field: it
-        // is a kernel message, but the account status is a place a credential
-        // must never be able to reach.
-        status = "error";
-        statusDetail = "The credential could not be imported into the system keyring.";
-        storedUri = "";
-        warn(`importing ${credential.source} failed: ${errorMessage(error)}`);
-      }
-    } else if (rotated) {
-      imported.push(accountId);
+      storedUri = "";
+      status = "disconnected";
+      statusDetail = current === null
+        ? "Credential detected in the local OpenCode store; connect to approve copying it into the Terminus keyring."
+        : "Credential changed or is no longer present in the Terminus keyring; connect again to approve import.";
     }
 
     const upserted = await dependencies.upsertAccount({
@@ -932,25 +972,10 @@ export async function discoverAndConnectLocalAccounts(
     existing.set(credential.source, upserted);
   }
 
-  // 3. Exactly one default. A machine with a subscription or an API key should
-  //    not have to visit Settings before its first turn.
+  // 3. Discovery never chooses or changes a default. An explicit connect or
+  //    Settings action owns that user decision; the anonymous Zen account is
+  //    selected in-memory by `resolveTurnProvider` when no default exists.
   const accounts = [...existing.values()];
-  if (!accounts.some((account) => account.isDefault)) {
-    const chosen = chooseDefaultAccount(accounts);
-    if (chosen !== null) {
-      await dependencies.setDefaultAccount(chosen.id);
-      const refreshed = await dependencies.listAccounts();
-      return {
-        accounts: [...refreshed].sort(byDisplayName),
-        imported: [...new Set(imported)],
-        warnings,
-        codexInstalled: discovery.codexInstalled,
-        opencodeInstalled: discovery.opencodeInstalled,
-        lastRunAt: now().toISOString(),
-      };
-    }
-  }
-
   return {
     accounts: accounts.sort(byDisplayName),
     imported: [...new Set(imported)],
@@ -1066,21 +1091,25 @@ export function resolveTurnProvider(input: ResolveTurnProviderInput): TurnProvid
     if (account === undefined) {
       return { kind: "error", code: "PROVIDER_ACCOUNT_NOT_FOUND", accountId: requested };
     }
-    if (account.status !== "connected") {
+    if (account.status !== "connected" || account.renderProfile === "chatgpt_codex" || account.source === CODEX_SOURCE) {
       return {
         kind: "error",
         code: "PROVIDER_ACCOUNT_UNAVAILABLE",
         accountId: requested,
         status: account.status,
-        statusDetail: account.statusDetail,
+        statusDetail: account.statusDetail || "This Codex subscription requires the separate Codex App Server lane.",
       };
     }
     return { kind: "account", account, explicit: true };
   }
-  const installationDefault = input.accounts.find((account) => account.isDefault) ?? null;
+  const installationDefault = input.accounts.find((account) => account.isDefault)
+    ?? input.accounts.find((account) => account.source === ZEN_SOURCE && account.authKind === "anonymous")
+    ?? null;
   if (
     installationDefault !== null
     && installationDefault.status === "connected"
+    && installationDefault.renderProfile !== "chatgpt_codex"
+    && installationDefault.source !== CODEX_SOURCE
     && input.hasModel === true
   ) {
     return { kind: "account", account: installationDefault, explicit: false };

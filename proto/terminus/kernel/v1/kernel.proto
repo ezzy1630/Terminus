@@ -705,7 +705,8 @@ service SecretService {
 // A credential found in a local tool's store. Never carries secret bytes.
 message LocalProviderCredentialMessage {
   // Stable source id: "opencode:<providerID>" (an OpenCode auth-store entry)
-  // or "codex-chatgpt" (a ChatGPT login held by the Codex CLI).
+  // only OpenCode auth-store entries are returned. Codex CLI credentials are
+  // intentionally never read; a future App Server lane owns that login.
   string source = 1;
   // "api" | "oauth" | "wellknown" | "chatgpt".
   string auth_kind = 2;
@@ -718,7 +719,7 @@ message LocalProviderCredentialMessage {
   string metadata_json = 4;
   // Unix seconds at which the credential expires; 0 when it does not.
   uint64 expires_at_unix = 5;
-  // Which store it was read from: "opencode-auth-store" | "codex-auth-store".
+  // Which supported store it was read from: "opencode-auth-store".
   // A label, never a filesystem path.
   string store = 6;
 }
@@ -741,7 +742,7 @@ message ImportLocalProviderCredentialRequest {
   RequestContext context = 1;
   // Source id from discovery.
   string source = 2;
-  // Destination minted by the control plane:
+  // Destination minted by the control plane after explicit user consent:
   // secret://provider-account/<uuid-v7>. Requires a Secret-class capability
   // scoped to exactly this URI, as SecretService.Store does.
   string capability_uri = 3;
