@@ -10,6 +10,7 @@ import {
   createTerminusExecutionProfile,
   createTerminusMinimalProfile,
   resolveTerminusProfileMode,
+  workspaceActivationMode,
   terminusAdaptiveProfileSchema,
   terminusMinimalProfileSchema,
   validateTerminusExecutionProfile,
@@ -40,6 +41,7 @@ describe("terminus-minimal profile", () => {
     expect([...TERMINUS_MINIMAL_TOOL_IDS].sort()).toEqual([...STANDALONE_ALWAYS_ON_TOOL_IDS].sort());
     expect(TERMINUS_DECLARABLE_TOOL_IDS).toContain("capability");
     expect(TERMINUS_DECLARABLE_TOOL_IDS).toContain("web_fetch");
+    expect(TERMINUS_DECLARABLE_TOOL_IDS).toContain("inspect");
     expect(TERMINUS_DECLARABLE_TOOL_IDS).toContain("recall");
     expect(TERMINUS_MINIMAL_TOOL_IDS).not.toContain("recall" as never);
   });
@@ -108,6 +110,8 @@ describe("terminus-minimal profile", () => {
     expect(resolveTerminusProfileMode("minimal")).toBe("minimal");
     expect(resolveTerminusProfileMode("adaptive")).toBe("adaptive");
     expect(() => resolveTerminusProfileMode("full")).toThrow("TERMINUS_HARNESS_PROFILE");
+    expect(workspaceActivationMode("minimal")).toBe("lazy");
+    expect(workspaceActivationMode("adaptive")).toBe("eager");
 
     const adaptive = createTerminusAdaptiveProfile({ providerId: "local", modelKey: "local/test" });
     expect(() => validateTerminusExecutionProfile({ ...adaptive, subagentsEnabled: false })).toThrow();

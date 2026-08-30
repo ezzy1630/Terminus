@@ -12,7 +12,7 @@ export const TERMINUS_MINIMAL_PROFILE_VERSION = "1" as const;
  * independent promotion gates pass.
  */
 export const TERMINUS_ADAPTIVE_PROFILE_ID = "terminus-adaptive" as const;
-export const TERMINUS_ADAPTIVE_PROFILE_VERSION = "2" as const;
+export const TERMINUS_ADAPTIVE_PROFILE_VERSION = "3" as const;
 /**
  * The always-on coding surface. Every id here is declared to the provider,
  * accepted by the dispatch guard, and executable.
@@ -37,6 +37,7 @@ export const TERMINUS_MINIMAL_TOOL_IDS = [
 /** The opt-in adaptive surface. Minimal remains the permanent control arm. */
 export const TERMINUS_ADAPTIVE_TOOL_IDS = [
   ...TERMINUS_MINIMAL_TOOL_IDS,
+  "inspect",
   "recall",
 ] as const;
 
@@ -45,6 +46,7 @@ export const TERMINUS_DECLARABLE_TOOL_IDS = [
   "capability",
   ...TERMINUS_MINIMAL_TOOL_IDS,
   "web_fetch",
+  "inspect",
   "recall",
 ] as const;
 
@@ -80,6 +82,16 @@ export interface TerminusAdaptiveProfile {
 
 export type TerminusExecutionProfile = TerminusMinimalProfile | TerminusAdaptiveProfile;
 export type TerminusProfileMode = "minimal" | "adaptive";
+export type WorkspaceActivationMode = "lazy" | "eager";
+
+/**
+ * Keep the permanent control arm lazy. The opt-in adaptive arm pays the
+ * workspace-context cost up front and avoids a provider round trip before its
+ * first useful read, edit, or command.
+ */
+export function workspaceActivationMode(mode: TerminusProfileMode): WorkspaceActivationMode {
+  return mode === "adaptive" ? "eager" : "lazy";
+}
 
 export const terminusMinimalProfileSchema = z.object({
   profileId: z.literal(TERMINUS_MINIMAL_PROFILE_ID),
@@ -121,8 +133,8 @@ export interface TerminusMinimalProfileInput {
   readonly configuration?: Readonly<Record<string, unknown>> | undefined;
   /**
    * The bounded tool lifecycle this turn may declare to the provider.
-   * Defaults to the always-on set; lazy activation passes capability plus the
-   * workspace set while attempt records retain the exact per-request schema.
+   * Defaults to the always-on set. The minimal arm records capability plus
+   * the later workspace set; the adaptive arm records its eager workspace set.
    */
   readonly toolIds?: readonly string[] | undefined;
 }

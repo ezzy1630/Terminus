@@ -401,6 +401,7 @@ import {
   buildEvidenceIdentity,
   createTerminusExecutionProfile,
   resolveTerminusProfileMode,
+  workspaceActivationMode,
   TERMINUS_MINIMAL_TOOL_IDS,
   type EvidenceTerminalOutcome,
   type TerminusExecutionProfile,
@@ -15538,30 +15539,36 @@ async function settleStandaloneProviderTool(
     });
   }
   const ledgerIdempotencyKey = effectLedgerIdempotencyKey({ call, operationHash, toolCallId });
+  const operationClass = call.toolId === "inspect"
+    ? CapabilityOperationProto.CAPABILITY_OPERATION_CODE_INTEL
+    : call.toolId === "read"
+      ? CapabilityOperationProto.CAPABILITY_OPERATION_READ
+      // `write` is a patch transaction in the kernel and mints the same
+      // capability, so it is bound by the contract's write scope.
+      : call.toolId === "patch" || call.toolId === "write"
+        ? CapabilityOperationProto.CAPABILITY_OPERATION_PATCH
+        : call.toolId === "exec_poll"
+          ? CapabilityOperationProto.CAPABILITY_OPERATION_JOB
+          : call.toolId === "web_fetch"
+            ? CapabilityOperationProto.CAPABILITY_OPERATION_NETWORK
+            : CapabilityOperationProto.CAPABILITY_OPERATION_EXEC;
+  const workspacePaths = call.toolId === "inspect"
+    ? undefined
+    : [call.toolId === "exec"
+        ? call.arguments.cwd
+        : call.toolId === "web_fetch"
+          ? "."
+          : call.toolId === "read" || call.toolId === "patch" || call.toolId === "write" || call.toolId === "grep" || call.toolId === "glob"
+            ? call.arguments.path
+            : "."];
 
   let context: RequestContext;
   try {
     context = await kernelContextForTask(
       input.taskId,
       input.turnId,
-      [call.toolId === "read"
-        ? CapabilityOperationProto.CAPABILITY_OPERATION_READ
-        // `write` is a patch transaction in the kernel and mints the same
-        // capability, so it is bound by the contract's write scope.
-        : call.toolId === "patch" || call.toolId === "write"
-          ? CapabilityOperationProto.CAPABILITY_OPERATION_PATCH
-          : call.toolId === "exec_poll"
-            ? CapabilityOperationProto.CAPABILITY_OPERATION_JOB
-            : call.toolId === "web_fetch"
-              ? CapabilityOperationProto.CAPABILITY_OPERATION_NETWORK
-              : CapabilityOperationProto.CAPABILITY_OPERATION_EXEC],
-      [call.toolId === "exec"
-        ? call.arguments.cwd
-        : call.toolId === "web_fetch"
-          ? "."
-          : call.toolId === "read" || call.toolId === "patch" || call.toolId === "write" || call.toolId === "grep" || call.toolId === "glob"
-            ? call.arguments.path
-            : "."],
+      [operationClass],
+      workspacePaths,
     );
   } catch (error: unknown) {
     const explanation = error instanceof Error ? error.message : String(error);
@@ -15849,6 +15856,10 @@ function toolArgumentsExcerpt(call: ParsedStandaloneToolCall): string {
         return `${call.arguments.pattern} in ${call.arguments.path}`;
       case "glob":
         return call.arguments.pattern;
+      case "inspect":
+        return call.arguments.action === "symbol"
+          ? `${call.arguments.action}: ${call.arguments.query}`
+          : call.arguments.action;
       case "recall":
         return call.arguments.action === "search"
           ? `${call.arguments.action}: ${call.arguments.query}`
@@ -16985,14 +16996,18 @@ async function agentLoop(turnId: string): Promise<void> {
         .filter((value) => value.length > 0),
     )];
     const harnessProfileMode = resolveTerminusProfileMode(process.env.TERMINUS_HARNESS_PROFILE);
+    const activationMode = workspaceActivationMode(harnessProfileMode);
     const workspaceToolSchemas = selectStandaloneToolSchemas({
       toolsEnabled: toolsEnabledForTurn,
       activatedCapabilities: requestedToolCapabilities,
       adaptiveToolsEnabled: harnessProfileMode === "adaptive",
     });
-    const initialToolSchemas = selectInitialStandaloneToolSchemas(toolsEnabledForTurn);
-    const profileToolSchemas = [...initialToolSchemas, ...workspaceToolSchemas];
-    let workspaceActivated = false;
+    const capabilityToolSchemas = selectInitialStandaloneToolSchemas(toolsEnabledForTurn);
+    const initialToolSchemas = activationMode === "eager"
+      ? workspaceToolSchemas
+      : capabilityToolSchemas;
+    const profileToolSchemas = [...capabilityToolSchemas, ...workspaceToolSchemas];
+    let workspaceActivated = activationMode === "eager" && toolsEnabledForTurn;
     let activeToolSchemas = initialToolSchemas;
     let declaredToolIds = new Set<string>(activeToolSchemas.map((schema) => schema.id));
     const activatedToolCapabilities = requestedToolCapabilities.filter((capability) => {
@@ -17006,8 +17021,8 @@ async function agentLoop(turnId: string): Promise<void> {
       providerId: selectedProvider.providerId,
       modelKey: String(selectedModel.modelKey),
       // The profile records the bounded union; each provider attempt records
-      // the exact schema hash. The initial request exposes only capability,
-      // and activation exposes the workspace subset on the next attempt.
+      // the exact schema hash. Minimal starts with capability and expands on
+      // the next attempt. Adaptive starts with the workspace set.
       toolIds: profileToolSchemas.map((schema) => schema.id),
       configuration: {
         transport: accountRouting !== null
@@ -17018,7 +17033,7 @@ async function agentLoop(turnId: string): Promise<void> {
           ?? providerConfiguration?.revision
           ?? 0,
         tools_enabled: toolsEnabledForTurn,
-        lazy_workspace_activation: true,
+        workspace_activation: activationMode,
         tool_schema_hash: computeContentHash(canonicalJson(profileToolSchemas)),
         context_compatibility_key: selectedProvider.continuation.compatibilityKey,
         tested_safe_tokens: selectedProvider.context.testedSafeTokens,

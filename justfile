@@ -221,8 +221,18 @@ eval-fixture-smoke:
 eval-runtime-smoke:
     TERMINUS_E2E_SCENARIO=runtime-eval-smoke bash scripts/e2e/deterministic.sh
 
+# Opt-in adaptive arm. It must complete the same graded task without the
+# minimal profile's workspace-activation provider round trip.
+eval-runtime-adaptive-smoke:
+    TERMINUS_HARNESS_PROFILE=adaptive TERMINUS_E2E_EXPECT_PROFILE=adaptive TERMINUS_E2E_SCENARIO=runtime-eval-smoke bash scripts/e2e/deterministic.sh
+
+# The adopted standalone ADR permits one call per provider response. Exercise
+# adaptive kernel code intelligence sequentially without weakening that bound.
+eval-runtime-adaptive-inspect-smoke:
+    TERMINUS_HARNESS_PROFILE=adaptive TERMINUS_E2E_EXPECT_PROFILE=adaptive TERMINUS_E2E_EXPECT_INSPECT=1 TERMINUS_E2E_SCENARIO=runtime-eval-smoke bash scripts/e2e/deterministic.sh
+
 # Per-PR smoke gate: retain fast fixture coverage and require a real runtime path.
-eval-smoke: eval-fixture-smoke eval-runtime-smoke
+eval-smoke: eval-fixture-smoke eval-runtime-smoke eval-runtime-adaptive-smoke eval-runtime-adaptive-inspect-smoke
 
 # Full configured evaluation suite.
 eval-full:

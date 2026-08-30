@@ -42,7 +42,7 @@ import type { ToolResult } from "@terminus/aci";
 
 describe("standalone provider tools", () => {
   test("exposes the bounded kernel tool surface", () => {
-    expect(STANDALONE_TOOL_SCHEMAS.map((tool) => tool.id)).toEqual(["capability", "read", "patch", "write", "exec", "exec_poll", "web_fetch", "grep", "glob", "recall"]);
+    expect(STANDALONE_TOOL_SCHEMAS.map((tool) => tool.id)).toEqual(["capability", "read", "patch", "write", "exec", "exec_poll", "web_fetch", "grep", "glob", "inspect", "recall"]);
     expect(selectInitialStandaloneToolSchemas(true).map((tool) => tool.id)).toEqual(["capability"]);
     expect(selectInitialStandaloneToolSchemas(false)).toEqual([]);
     // Every always-on tool has a schema, and every schema id is dispatchable.
@@ -52,17 +52,19 @@ describe("standalone provider tools", () => {
     expect(DEFAULT_MAX_TOOL_CYCLES).toBe(200);
   });
 
-  test("keeps session recall exclusive to the opt-in adaptive profile", () => {
-    expect(STANDALONE_ADAPTIVE_TOOL_IDS).toEqual(["recall"]);
-    expect(selectStandaloneToolSchemas({ toolsEnabled: true, adaptiveToolsEnabled: false }).map((tool) => tool.id))
-      .not.toContain("recall");
+  test("keeps code intelligence and session recall exclusive to adaptive", () => {
+    expect(STANDALONE_ADAPTIVE_TOOL_IDS).toEqual(["inspect", "recall"]);
+    const minimal = selectStandaloneToolSchemas({ toolsEnabled: true, adaptiveToolsEnabled: false }).map((tool) => tool.id);
+    expect(minimal).not.toContain("inspect");
+    expect(minimal).not.toContain("recall");
     expect(selectStandaloneToolSchemas({
       toolsEnabled: true,
       adaptiveToolsEnabled: false,
       activatedCapabilities: ["standalone.recall"],
     }).map((tool) => tool.id)).not.toContain("recall");
-    expect(selectStandaloneToolSchemas({ toolsEnabled: true, adaptiveToolsEnabled: true }).map((tool) => tool.id))
-      .toContain("recall");
+    const adaptive = selectStandaloneToolSchemas({ toolsEnabled: true, adaptiveToolsEnabled: true }).map((tool) => tool.id);
+    expect(adaptive).toContain("inspect");
+    expect(adaptive).toContain("recall");
   });
 
   test("tool-cycle budget resolution is bounded and fail-closed", () => {
@@ -149,6 +151,116 @@ describe("standalone provider tools", () => {
     if (single.toolId !== "exec") throw new Error("expected exec");
     expect(single.arguments.program).toBe("ls");
     expect(single.arguments.args).toEqual([]);
+  });
+
+  test("normalizes Codex cmd and workdir aliases to the canonical exec operation", () => {
+    const codex = parseStandaloneToolCall({
+      toolCallId: "codex",
+      toolName: "exec",
+      arguments: { cmd: "rg --files | head", workdir: "packages/context-ir" },
+    });
+    const canonical = parseStandaloneToolCall({
+      toolCallId: "canonical",
+      toolName: "exec",
+      arguments: {
+        shell: { dialect: "bash", script: "rg --files | head" },
+        cwd: "packages/context-ir",
+      },
+    });
+    if (codex.toolId !== "exec" || canonical.toolId !== "exec") throw new Error("expected exec");
+    expect(codex.toolVersion).toBe("standalone-v3");
+    expect(codex.arguments).toEqual(canonical.arguments);
+    expect(normalizedToolOperationHash({ taskId: "task", contractVersion: 3, call: codex })).toBe(
+      normalizedToolOperationHash({ taskId: "task", contractVersion: 3, call: canonical }),
+    );
+
+    const simple = parseStandaloneToolCall({
+      toolCallId: "simple-codex",
+      toolName: "exec",
+      arguments: { cmd: "git status --short", workdir: "." },
+    });
+    const simpleCanonical = parseStandaloneToolCall({
+      toolCallId: "simple-canonical",
+      toolName: "exec",
+      arguments: { program: "git", args: ["status", "--short"], cwd: "." },
+    });
+    if (simple.toolId !== "exec" || simpleCanonical.toolId !== "exec") throw new Error("expected exec");
+    expect(simple.arguments).toEqual(simpleCanonical.arguments);
+    expect(normalizedToolOperationHash({ taskId: "task", contractVersion: 3, call: simple })).toBe(
+      normalizedToolOperationHash({ taskId: "task", contractVersion: 3, call: simpleCanonical }),
+    );
+
+    const quoted = parseStandaloneToolCall({
+      toolCallId: "quoted-codex",
+      toolName: "exec",
+      arguments: { cmd: "rg -n 'foo|bar' \"src/main file.ts\" --glob=\\*.ts" },
+    });
+    if (quoted.toolId !== "exec") throw new Error("expected exec");
+    expect(quoted.arguments).toMatchObject({
+      program: "rg",
+      args: ["-n", "foo|bar", "src/main file.ts", "--glob=*.ts"],
+    });
+
+    const emptyArgument = parseStandaloneToolCall({
+      toolCallId: "empty-argument",
+      toolName: "exec",
+      arguments: { cmd: "printf '%s' \"\"" },
+    });
+    if (emptyArgument.toolId !== "exec") throw new Error("expected exec");
+    expect(emptyArgument.arguments.args).toEqual(["%s", ""]);
+
+    const nativeHints = parseStandaloneToolCall({
+      toolCallId: "native-hints",
+      toolName: "exec",
+      arguments: {
+        cmd: "git status --short",
+        yield_time_ms: 10_000,
+        max_output_tokens: 512,
+      },
+    });
+    if (nativeHints.toolId !== "exec") throw new Error("expected exec");
+    expect(nativeHints.arguments.max_output_tokens).toBe(512);
+    expect(nativeHints.arguments).not.toHaveProperty("yield_time_ms");
+
+    expect(() => parseStandaloneToolCall({
+      toolCallId: "invalid-yield-hint",
+      toolName: "exec",
+      arguments: { cmd: "pwd", yield_time_ms: 40_000 },
+    })).toThrow(/yield_time_ms/);
+
+    const assignment = parseStandaloneToolCall({
+      toolCallId: "shell-assignment",
+      toolName: "exec",
+      arguments: { cmd: "MODE=test git status" },
+    });
+    if (assignment.toolId !== "exec") throw new Error("expected exec");
+    expect(assignment.arguments.shell).toEqual({ dialect: "bash", script: "MODE=test git status" });
+
+    for (const [toolCallId, cmd] of [
+      ["shell-expansion", "printf \"$HOME\""],
+      ["shell-comment", "git status # current tree"],
+      ["shell-unterminated", "rg 'missing"],
+    ] as const) {
+      const shell = parseStandaloneToolCall({ toolCallId, toolName: "exec", arguments: { cmd } });
+      if (shell.toolId !== "exec") throw new Error("expected exec");
+      expect(shell.arguments.shell).toEqual({ dialect: "bash", script: cmd });
+    }
+
+    expect(() => parseStandaloneToolCall({
+      toolCallId: "ambiguous-command",
+      toolName: "exec",
+      arguments: { cmd: "pwd", program: "pwd" },
+    })).toThrow(/cmd/);
+    expect(() => parseStandaloneToolCall({
+      toolCallId: "ambiguous-args",
+      toolName: "exec",
+      arguments: { cmd: "git status", args: ["--short"] },
+    })).toThrow(/cmd/);
+    expect(() => parseStandaloneToolCall({
+      toolCallId: "ambiguous-workdir",
+      toolName: "exec",
+      arguments: { cmd: "pwd", cwd: "a", workdir: "b" },
+    })).toThrow(/workdir/);
   });
 
   test("leaves an explicit program and shell mode untouched", () => {
@@ -681,7 +793,7 @@ describe("shell-mode gating", () => {
   const shellCall: ParsedStandaloneToolCall = {
     providerCallId: "s1",
     toolId: "exec",
-    toolVersion: "standalone-v1",
+    toolVersion: "standalone-v3",
     arguments: {
       program: undefined,
       args: [],
@@ -744,7 +856,7 @@ describe("shell-mode gating", () => {
       call: {
         providerCallId: "s2",
         toolId: "exec",
-        toolVersion: "standalone-v1",
+        toolVersion: "standalone-v3",
         arguments: { program: "true", args: [], cwd: ".", background: false, timeout_ms: 60_000, expected_exit_codes: [0] },
       },
       internalToolCallId: "tc",
@@ -1288,6 +1400,28 @@ describe("C1 exec always returns its output", () => {
     expect(result.truncation.occurred).toBe(true);
   });
 
+  test("max_output_tokens lowers the inline budget without losing artifact-backed totals", async () => {
+    const clients = {
+      process: { Start: () => processStream({ stdout: "x".repeat(20_000), stderr: "e".repeat(2_000), exitCode: 0 }) },
+    } as unknown as Clients;
+    const result = await executeStandaloneTool({
+      ...PHASE0_BASE,
+      clients,
+      call: parseStandaloneToolCall({
+        toolCallId: "e-output-budget",
+        toolName: "exec",
+        arguments: { program: "cat", args: ["big"], max_output_tokens: 256 },
+      }) as Extract<ParsedStandaloneToolCall, { toolId: "exec" }>,
+    });
+    const data = result.data as Record<string, unknown>;
+    const projectedBytes = new TextEncoder().encode(`${data.stdout as string}${data.stderr as string}`).byteLength;
+    expect(projectedBytes).toBeLessThanOrEqual(1_024 + 128);
+    expect(data.output_budget_bytes).toBe(1_024);
+    expect(data.stdout_total_bytes).toBe(20_000);
+    expect(data.stderr_total_bytes).toBe(2_000);
+    expect(result.truncation).toMatchObject({ occurred: true, reason: expect.stringContaining("1024-byte") });
+  });
+
   test("the shared output budget floors each stream", () => {
     expect(splitOutputBudget(100, 200)).toEqual({ stdout: 100, stderr: 200 });
     const split = splitOutputBudget(10_000_000, 300);
@@ -1823,6 +1957,76 @@ describe("C8 observed sources survive edits and turns", () => {
     expect(applied).toBe(2);
     expect(tracker.resolve("ws-1", "src/a.ts")).toBe(`sha256:${"2".repeat(64)}`);
     expect(tracker.resolve("ws-1", "src/b.ts")).toBeNull();
+  });
+});
+
+describe("adaptive kernel code intelligence", () => {
+  test("locates exact symbols and pages a source-versioned repository map", async () => {
+    const sourceHash = `sha256:${"d".repeat(64)}`;
+    const clients = {
+      codeIntel: {
+        Search: (request: { readonly query: string; readonly limit: number }) => {
+          expect(request.query).toBe("workspaceActivationMode");
+          expect(request.limit).toBe(5);
+          return {
+            results: [{ path: "src/profile.ts", line: 42, symbol: "workspaceActivationMode", method: "symbol-index" }],
+            truncated: false,
+            continuation: undefined,
+          };
+        },
+        Map: (request: { readonly limit: number; readonly continuation: string }) => {
+          expect(request.limit).toBe(1);
+          expect(request.continuation).toBe("");
+          return {
+            entries: [{ path: "src/profile.ts", symbols: ["workspaceActivationMode"], sourceSha256: sourceHash }],
+            indexRevision: "sha256:index",
+            truncated: true,
+            continuation: "next-page",
+            totalEntries: 2,
+          };
+        },
+      },
+    } as unknown as Clients;
+
+    const symbol = await executeStandaloneTool({
+      ...PHASE0_BASE,
+      clients,
+      call: parseStandaloneToolCall({
+        toolCallId: "inspect-symbol",
+        toolName: "inspect",
+        arguments: { action: "symbol", query: "workspaceActivationMode", limit: 5 },
+      }) as Extract<ParsedStandaloneToolCall, { toolId: "inspect" }>,
+    });
+    expect(symbol.status).toBe("success");
+    expect(symbol.data).toMatchObject({
+      action: "symbol",
+      results: [{ path: "src/profile.ts", line: 42, symbol: "workspaceActivationMode" }],
+    });
+
+    const map = await executeStandaloneTool({
+      ...PHASE0_BASE,
+      clients,
+      call: parseStandaloneToolCall({
+        toolCallId: "inspect-map",
+        toolName: "inspect",
+        arguments: { action: "repository_map", limit: 1 },
+      }) as Extract<ParsedStandaloneToolCall, { toolId: "inspect" }>,
+    });
+    expect(map.status).toBe("success");
+    expect(map.sourceVersions).toEqual({ "src/profile.ts": sourceHash });
+    expect(map.truncation).toEqual({
+      occurred: true,
+      reason: "repository map continues beyond this page",
+      continuation: "next-page",
+    });
+  });
+
+  test("rejects ambiguous inspect inputs before reaching the kernel", () => {
+    expect(() => parseStandaloneToolCall({
+      toolCallId: "inspect-invalid",
+      toolName: "inspect",
+      arguments: { action: "symbol" },
+    })).toThrow(/query/);
   });
 });
 

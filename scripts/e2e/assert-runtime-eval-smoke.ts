@@ -29,6 +29,10 @@ function count(value: unknown, label: string): number {
   return value;
 }
 
+function optionalCount(value: unknown): number {
+  return value === undefined ? 0 : count(value, "optional event count");
+}
+
 function artifact(record: JsonObject, kind: string): JsonObject[] {
   return array(record.artifacts, "artifacts")
     .map((value, index) => object(value, `artifacts[${index}]`))
@@ -43,6 +47,14 @@ async function main(): Promise<void> {
 
   const recordPath = resolve(resultsDir, entries[0]!);
   const record = object(await Bun.file(recordPath).json(), "run record");
+  const expectedProfile = process.env.TERMINUS_E2E_EXPECT_PROFILE === "adaptive"
+    ? "adaptive"
+    : "minimal";
+  const expectedInspect = process.env.TERMINUS_E2E_EXPECT_INSPECT === "1";
+  const expectedProviderAttempts = expectedProfile === "adaptive"
+    ? expectedInspect ? 5 : 4
+    : 5;
+  const expectedToolSettlements = expectedProfile === "adaptive" && !expectedInspect ? 3 : 4;
   invariant(record.harness === "terminus-live", "run did not use TerminusHarness");
   invariant(record.outcome === "completed", `run outcome was ${String(record.outcome)}`);
   invariant(record.success === true, "declared task grader did not pass");
@@ -72,8 +84,14 @@ async function main(): Promise<void> {
   invariant(graders[0]!.passed === true && graders[0]!.score === 1, "behavioral grader failed");
 
   const attempts = array(record.attempts, "attempts");
-  invariant(attempts.length >= 4, `expected at least four provider attempts, found ${attempts.length}`);
-  invariant(count(record.steps, "steps") >= 3, "model-facing tool loop did not settle three calls");
+  invariant(
+    attempts.length === expectedProviderAttempts,
+    `${expectedProfile} profile expected ${expectedProviderAttempts} provider attempts, found ${attempts.length}`,
+  );
+  invariant(
+    count(record.steps, "steps") === expectedToolSettlements,
+    `${expectedProfile} profile expected ${expectedToolSettlements} model-facing tool steps`,
+  );
 
   const patchArtifacts = artifact(record, "workspace_patch");
   invariant(
@@ -90,13 +108,32 @@ async function main(): Promise<void> {
   invariant(summary.truncated === false, "task transcript summary was truncated");
   invariant(summary.continuation_cursor === null, "complete transcript exposed a continuation cursor");
   invariant(summary.artifact_refs_available === false, "transcript overstated artifact-ref availability");
-  invariant(count(eventCounts["tool.proposed"], "tool.proposed count") >= 3, "tool proposals are missing");
-  invariant(count(eventCounts["tool.authorized"], "tool.authorized count") >= 2, "kernel authorizations are missing");
-  invariant(count(eventCounts["tool.started"], "tool.started count") >= 2, "kernel starts are missing");
-  invariant(count(eventCounts["tool.settled"], "tool.settled count") >= 3, "tool settlements are missing");
   invariant(
-    count(summary.successful_tool_settlements, "successful_tool_settlements") >= 3,
+    count(eventCounts["tool.proposed"], "tool.proposed count") === expectedToolSettlements,
+    "tool proposal count does not match the profile",
+  );
+  const expectedKernelOperations = expectedProfile === "adaptive"
+    ? expectedInspect ? 4 : 3
+    : 3;
+  invariant(
+    count(eventCounts["tool.authorized"], "tool.authorized count") >= expectedKernelOperations,
+    "kernel authorizations are missing",
+  );
+  invariant(
+    count(eventCounts["tool.started"], "tool.started count") >= expectedKernelOperations,
+    "kernel starts are missing",
+  );
+  invariant(
+    count(eventCounts["tool.settled"], "tool.settled count") === expectedToolSettlements,
+    "tool settlement count does not match the profile",
+  );
+  invariant(
+    count(summary.successful_tool_settlements, "successful_tool_settlements") === expectedToolSettlements,
     "successful tool settlements are missing",
+  );
+  invariant(
+    optionalCount(eventCounts["capability.activated"]) === (expectedProfile === "adaptive" ? 0 : 1),
+    `${expectedProfile} profile used the wrong workspace activation path`,
   );
   invariant(
     count(eventCounts["context.manifest_persisted"], "context.manifest_persisted count") >= 1,
@@ -119,6 +156,8 @@ async function main(): Promise<void> {
   console.log(JSON.stringify({
     schema: "terminus.runtime-eval-smoke.v1",
     status: "passed",
+    profile: expectedProfile,
+    inspect: expectedInspect,
     run_id: text(record.run_id, "run_id"),
     evidence_class: record.evidence_class,
     provider_attempts: attempts.length,

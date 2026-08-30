@@ -54,6 +54,22 @@ const isPackagedDesktopTask = renderedBody.includes(
 );
 const isBuildFailureTask = renderedBody.includes("build-001")
   && renderedBody.includes("missing import");
+function declaresTool(value: unknown, toolName: string): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const tools = (value as Record<string, unknown>).tools;
+  if (!Array.isArray(tools)) return false;
+  return tools.some((tool) => {
+    if (typeof tool !== "object" || tool === null || Array.isArray(tool)) return false;
+    const fn = (tool as Record<string, unknown>).function;
+    return typeof fn === "object"
+      && fn !== null
+      && !Array.isArray(fn)
+      && (fn as Record<string, unknown>).name === toolName;
+  });
+}
+const workspaceReadAvailable = declaresTool(request.body, "read");
+const workspaceInspectAvailable = declaresTool(request.body, "inspect");
+const exerciseInspect = process.env.TERMINUS_E2E_EXPECT_INSPECT === "1";
 // Keep the contiguous marker out of this provider source. The model request
 // can contain repository metadata for this file; only the deep read result
 // may satisfy this check.
@@ -80,9 +96,17 @@ const buildReadSettled = hasToolResultContaining(request.body, [
   "src/main.py",
   "file_sha256",
 ]);
+const buildInspectSettled = hasToolResultContaining(request.body, [
+  "Repository map returned",
+  "src/main.py",
+]);
 const buildPatchSettled = hasToolResultContaining(request.body, [
   "src/main.py",
   "new_sha256",
+]);
+const buildExecSettled = hasToolResultContaining(request.body, [
+  "exit_code",
+  "stdout",
 ]);
 const emitDone = (): void => {
   console.log(JSON.stringify({
@@ -113,17 +137,33 @@ if (rawRequest.includes(restartCrashBoundary)) {
   sleep(250);
 }
 
-// Exercise the real model-facing tool loop. The first minimal-profile request
-// can only activate workspace capabilities; later requests read and patch the
-// fixture before proposing completion. State is derived solely from the
-// replayed provider transcript so every fixture process remains stateless.
-if (!renderedBody.includes('"role":"tool"')) {
+// Exercise both profile arms. Minimal must activate workspace capabilities;
+// adaptive already declares read and starts useful work on its first request.
+// State comes only from the replayed transcript, so each fixture process is
+// stateless.
+if (
+  !renderedBody.includes('"role":"tool"')
+  && !(isBuildFailureTask && workspaceReadAvailable)
+) {
   console.log(JSON.stringify({
     kind: "tool_call",
     tool_call: {
       tool_call_id: "fixture-capability",
       tool_name: "capability",
       arguments: { action: "activate_workspace" },
+    },
+  }));
+  emitDone();
+  process.exit(0);
+}
+
+if (isBuildFailureTask && exerciseInspect && workspaceInspectAvailable && !buildInspectSettled) {
+  console.log(JSON.stringify({
+    kind: "tool_call",
+    tool_call: {
+      tool_call_id: "fixture-build-inspect",
+      tool_name: "inspect",
+      arguments: { action: "repository_map", limit: 10 },
     },
   }));
   emitDone();
@@ -172,6 +212,22 @@ if __name__ == "__main__":
         path: "src/main.py",
         expected_utf8: expectedUtf8,
         replacement_utf8: replacementUtf8,
+      },
+    },
+  }));
+  emitDone();
+  process.exit(0);
+}
+
+if (isBuildFailureTask && !buildExecSettled) {
+  console.log(JSON.stringify({
+    kind: "tool_call",
+    tool_call: {
+      tool_call_id: "fixture-build-exec",
+      tool_name: "exec",
+      arguments: {
+        cmd: 'git status --short -- "src/main.py"',
+        workdir: ".",
       },
     },
   }));

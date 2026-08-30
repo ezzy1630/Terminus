@@ -124,13 +124,15 @@ source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 if source.startswith("#!"):
     source = source.split("\n", 1)[1]
 encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
+prefix = "process.env.TERMINUS_E2E_EXPECT_INSPECT=\"1\";" if sys.argv[2] == "1" else ""
 print(
-    "const f=eval(Buffer.from(\""
+    prefix
+    + "const f=eval(Buffer.from(\""
     + encoded
     + "\",\"base64\").toString(\"utf8\"));"
       "f({},require,{exports:{}},\"fixture.js\",\".\")"
 )
-' "$provider_bundle"
+' "$provider_bundle" "${TERMINUS_E2E_EXPECT_INSPECT:-0}"
   )"
   if (( ${#provider_args_json} > 16384 )); then
     echo "[eval-runtime-smoke] provider fixture exceeded the command argument limit" >&2

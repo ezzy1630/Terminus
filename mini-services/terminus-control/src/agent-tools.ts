@@ -52,6 +52,8 @@ export const MAX_TOOL_MODEL_RESULT_BYTES = 128 * 1_024;
 export const READ_PAGE_MAX_BYTES = 64 * 1_024;
 /** Combined stdout+stderr projection budget for one exec/grep/glob result. */
 export const EXEC_OUTPUT_MAX_BYTES = 30 * 1_024;
+/** Largest model-requested exec projection, expressed in approximate tokens. */
+export const EXEC_OUTPUT_MAX_TOKENS = Math.floor(EXEC_OUTPUT_MAX_BYTES / 4);
 /**
  * Bytes each stream keeps before the shared budget is split proportionally.
  * Without a floor a chatty stdout erases the stderr that explains the
@@ -212,7 +214,143 @@ export function hoistArgvProgram(value: unknown): unknown {
   return { ...call, program, args: rest };
 }
 
-export const standaloneExecInputSchema = z.preprocess(hoistArgvProgram, z.object({
+/**
+ * Normalize the command vocabulary used by Codex's native exec interface.
+ *
+ * Shell-free `cmd` strings map to argv; the rest map to governed shell mode.
+ * The alias does not create another execution path. Policy, sandboxing,
+ * output bounds, and settlement still see one canonical request. Mixed alias
+ * and canonical forms stay unnormalized so strict validation rejects the
+ * ambiguity instead of guessing which command the model intended.
+ */
+export function aliasExecArguments(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const call = { ...(value as Record<string, unknown>) };
+
+  if (call.workdir !== undefined && call.cwd === undefined) {
+    call.cwd = call.workdir;
+    delete call.workdir;
+  }
+
+  // Codex's exec transport accepts this polling hint. Terminus foreground
+  // execution already settles exactly once, while durable waiting is explicit
+  // through background + exec_poll, so the hint has no command semantics.
+  // Accept the trained spelling without letting it affect the operation hash.
+  if (
+    typeof call.yield_time_ms === "number"
+    && Number.isInteger(call.yield_time_ms)
+    && call.yield_time_ms >= 250
+    && call.yield_time_ms <= 30_000
+  ) {
+    delete call.yield_time_ms;
+  }
+
+  if (
+    call.cmd !== undefined
+    && call.program === undefined
+    && call.args === undefined
+    && call.shell === undefined
+  ) {
+    if (typeof call.cmd !== "string") return call;
+    const argv = simpleCodexArgv(call.cmd);
+    if (argv === null) {
+      call.shell = { dialect: "bash", script: call.cmd };
+    } else {
+      const [program, ...args] = argv;
+      call.program = program;
+      call.args = args;
+    }
+    delete call.cmd;
+  }
+
+  return hoistArgvProgram(call);
+}
+
+/**
+ * Parse only the shell-free subset whose argv meaning is unambiguous.
+ * Quoting and escaping are decoded when they only group literal arguments.
+ * Expansion, assignments, operators, and comments stay in governed shell
+ * mode. This covers ordinary Codex commands while letting command policy
+ * inspect the real executable.
+ */
+function simpleCodexArgv(command: string): readonly [string, ...string[]] | null {
+  const argv: string[] = [];
+  let argument = "";
+  let argumentStarted = false;
+  let quote: "single" | "double" | null = null;
+
+  const finishArgument = (): void => {
+    if (!argumentStarted) return;
+    argv.push(argument);
+    argument = "";
+    argumentStarted = false;
+  };
+
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
+    if (character === undefined) return null;
+
+    if (quote === "single") {
+      if (character === "'") quote = null;
+      else argument += character;
+      continue;
+    }
+
+    if (quote === "double") {
+      if (character === '"') {
+        quote = null;
+        continue;
+      }
+      if (character === "$" || character === "`") return null;
+      if (character === "\\") {
+        const escaped = command[index + 1];
+        if (escaped === undefined || escaped === "\n" || escaped === "\r") return null;
+        if (escaped === '"' || escaped === "\\") {
+          argument += escaped;
+          index += 1;
+          continue;
+        }
+      }
+      argument += character;
+      continue;
+    }
+
+    if (character === " " || character === "\t") {
+      finishArgument();
+      continue;
+    }
+    if (character === "'") {
+      quote = "single";
+      argumentStarted = true;
+      continue;
+    }
+    if (character === '"') {
+      quote = "double";
+      argumentStarted = true;
+      continue;
+    }
+    if (character === "\\") {
+      const escaped = command[index + 1];
+      if (escaped === undefined || escaped === "\n" || escaped === "\r") return null;
+      argument += escaped;
+      argumentStarted = true;
+      index += 1;
+      continue;
+    }
+    if (/[\n\r|&;<>()$`{}*?\[\]~#]/.test(character)) return null;
+
+    argument += character;
+    argumentStarted = true;
+  }
+
+  if (quote !== null) return null;
+  finishArgument();
+  const [program, ...args] = argv;
+  if (program === undefined || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(program)) return null;
+  return [program, ...args];
+}
+
+export const standaloneExecInputSchema = z.preprocess(aliasExecArguments, z.object({
   program: z.string().max(4_096).refine(
     (program) => !/[\0\r\n]/.test(program) && !program.includes(";") && !program.includes("\\"),
     "program must be an executable path or name, not a shell expression",
@@ -227,6 +365,8 @@ export const standaloneExecInputSchema = z.preprocess(hoistArgvProgram, z.object
    */
   timeout_ms: z.number().int().min(100).max(EXEC_BACKGROUND_MAX_TIMEOUT_MS).default(120_000),
   expected_exit_codes: z.array(z.number().int().min(0).max(255)).min(1).max(16).default([0]),
+  /** Approximate model-visible output budget; full output remains artifact-backed. */
+  max_output_tokens: z.number().int().min(256).max(EXEC_OUTPUT_MAX_TOKENS).optional(),
   /**
    * Run under the kernel job supervisor and return immediately with a
    * background_id; await completion (and fetch output tails) via exec_poll.
@@ -338,6 +478,20 @@ export const standaloneGlobInputSchema = z.object({
   max_results: z.number().int().min(1).max(1_000).default(200),
 }).strict();
 
+/** Refreshed kernel code intelligence, kept separate from lexical grep. */
+export const standaloneInspectInputSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("symbol"),
+    query: z.string().trim().min(1).max(256),
+    limit: z.number().int().min(1).max(50).default(10),
+  }).strict(),
+  z.object({
+    action: z.literal("repository_map"),
+    limit: z.number().int().min(1).max(100).default(50),
+    continuation: z.string().max(512).default(""),
+  }).strict(),
+]);
+
 /**
  * Exact, bounded recall of completed turns in the current task/thread.
  * This is session history, not durable semantic memory: it never crosses the
@@ -372,6 +526,7 @@ export type StandalonePatchInput = z.infer<typeof standalonePatchInputSchema>;
 export type StandaloneExecInput = z.infer<typeof standaloneExecInputSchema>;
 export type StandaloneGrepInput = z.infer<typeof standaloneGrepInputSchema>;
 export type StandaloneGlobInput = z.infer<typeof standaloneGlobInputSchema>;
+export type StandaloneInspectInput = z.infer<typeof standaloneInspectInputSchema>;
 export type StandaloneRecallInput = z.infer<typeof standaloneRecallInputSchema>;
 
 /**
@@ -464,11 +619,12 @@ export type ParsedStandaloneToolCall =
   | { readonly providerCallId: string; readonly toolId: "read"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneReadInput }
   | { readonly providerCallId: string; readonly toolId: "patch"; readonly toolVersion: "standalone-v1"; readonly arguments: StandalonePatchInput }
   | { readonly providerCallId: string; readonly toolId: "write"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneWriteInput }
-  | { readonly providerCallId: string; readonly toolId: "exec"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneExecInput }
+  | { readonly providerCallId: string; readonly toolId: "exec"; readonly toolVersion: "standalone-v3"; readonly arguments: StandaloneExecInput }
   | { readonly providerCallId: string; readonly toolId: "exec_poll"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneExecPollInput }
   | { readonly providerCallId: string; readonly toolId: "web_fetch"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneWebFetchInput }
   | { readonly providerCallId: string; readonly toolId: "grep"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneGrepInput }
   | { readonly providerCallId: string; readonly toolId: "glob"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneGlobInput }
+  | { readonly providerCallId: string; readonly toolId: "inspect"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneInspectInput }
   | { readonly providerCallId: string; readonly toolId: "recall"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneRecallInput };
 
 export type StandaloneWebFetchInput = z.infer<typeof standaloneWebFetchInputSchema>;
@@ -613,12 +769,13 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
   },
   {
     id: "exec",
-    version: "standalone-v1",
-    summary: "Run one sandboxed command (workspace-writable, no secrets in env). argv mode (program+args) or shell mode (dialect+script, pipes/redirections allowed). Default timeout 120s, max 600s foreground; background:true returns a background_id immediately (up to 30 min) — await it with exec_poll. A non-zero exit is a normal result, not an error: stdout, stderr, and exit_code always come back.",
+    version: "standalone-v3",
+    summary: "Run one sandboxed command (workspace-writable, no secrets in env). Use argv mode (program+args), shell mode (dialect+script), or Codex aliases cmd+workdir. Shell-free cmd strings, including quoted literal arguments, normalize to argv so policy sees the executable; expansion, assignments, operators, comments, and redirection stay governed shell syntax. Codex yield_time_ms is accepted as a transport hint; use background:true plus exec_poll for durable waiting. A non-zero exit is a normal result, not an error: stdout, stderr, and exit_code always come back.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
+        cmd: { type: "string", minLength: 1, maxLength: 64 * 1_024, description: "Codex-compatible command string. Shell-free strings, including quoted literal arguments, normalize to argv; commands requiring shell evaluation stay in shell mode." },
         program: { type: "string", description: "Executable name or path; argv mode." },
         args: { type: "array", maxItems: 128, items: { type: "string" }, default: [] },
         shell: {
@@ -631,8 +788,11 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
           },
         },
         cwd: { type: "string", default: "." },
+        workdir: { type: "string", minLength: 1, maxLength: 4_096, description: "Codex-compatible alias for cwd." },
+        yield_time_ms: { type: "integer", minimum: 250, maximum: 30_000, description: "Codex-compatible response polling hint. Terminus validates it but foreground commands still settle to completion; use background for asynchronous work." },
         timeout_ms: { type: "integer", minimum: 100, maximum: EXEC_BACKGROUND_MAX_TIMEOUT_MS, default: 120_000, description: "Forwarded to the kernel unclamped; above 600000 requires background: true." },
         expected_exit_codes: { type: "array", minItems: 1, maxItems: 16, items: { type: "integer", minimum: 0, maximum: 255 }, default: [0] },
+        max_output_tokens: { type: "integer", minimum: 256, maximum: EXEC_OUTPUT_MAX_TOKENS, description: "Approximate token budget for inline stdout+stderr. Full output remains available through artifact references." },
         background: { type: "boolean", default: false },
       },
     },
@@ -739,6 +899,43 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
     policyTags: ["workspace", "read-only", "search", "standalone"],
   },
   {
+    id: "inspect",
+    version: "standalone-v1",
+    summary: "Query refreshed kernel code intelligence. action:symbol locates an exact symbol and returns its path and line. action:repository_map pages indexed files, symbols, and source hashes. Use grep for arbitrary text or regex search.",
+    inputSchema: {
+      oneOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["action", "query"],
+          properties: {
+            action: { const: "symbol" },
+            query: { type: "string", minLength: 1, maxLength: 256 },
+            limit: { type: "integer", minimum: 1, maximum: 50, default: 10 },
+          },
+        },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["action"],
+          properties: {
+            action: { const: "repository_map" },
+            limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+            continuation: { type: "string", maxLength: 512, default: "" },
+          },
+        },
+      ],
+    },
+    resultSchema,
+    sideEffectClass: "inspect",
+    requiredCapabilities: ["workspace.read"],
+    trustLevel: "builtin",
+    maximumModelResultBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+    maximumArtifactBytes: 0,
+    defaultTimeoutMs: 30_000,
+    policyTags: ["workspace", "read-only", "code-intelligence", "adaptive", "standalone"],
+  },
+  {
     id: "recall",
     version: "standalone-v1",
     summary: "Browse, search, or read exact completed turns from this task and thread. Results come from immutable user/assistant artifacts with source URIs and explicit continuation. This does not access other tasks, infer durable memories, or change the prompt automatically.",
@@ -805,8 +1002,8 @@ export const STANDALONE_ALWAYS_ON_TOOL_IDS = [
 /** Network access is discoverable and must be explicitly activated. */
 export const STANDALONE_DISCOVERABLE_TOOL_IDS = ["web_fetch"] as const;
 
-/** Exact session recall is opt-in with the adaptive execution profile. */
-export const STANDALONE_ADAPTIVE_TOOL_IDS = ["recall"] as const;
+/** Kernel code intelligence and exact recall are opt-in with adaptive. */
+export const STANDALONE_ADAPTIVE_TOOL_IDS = ["inspect", "recall"] as const;
 
 /** The only tool exposed before the model decides workspace access is needed. */
 export const STANDALONE_INITIAL_TOOL_IDS = ["capability"] as const;
@@ -944,7 +1141,7 @@ export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStan
     case "write":
       return { providerCallId: call.toolCallId, toolId: "write", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneWriteInputSchema) };
     case "exec":
-      return { providerCallId: call.toolCallId, toolId: "exec", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneExecInputSchema) };
+      return { providerCallId: call.toolCallId, toolId: "exec", toolVersion: "standalone-v3", arguments: parseArguments(call, standaloneExecInputSchema) };
     case "exec_poll":
       return { providerCallId: call.toolCallId, toolId: "exec_poll", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneExecPollInputSchema) };
     case "web_fetch":
@@ -953,6 +1150,8 @@ export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStan
       return { providerCallId: call.toolCallId, toolId: "grep", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneGrepInputSchema) };
     case "glob":
       return { providerCallId: call.toolCallId, toolId: "glob", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneGlobInputSchema) };
+    case "inspect":
+      return { providerCallId: call.toolCallId, toolId: "inspect", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneInspectInputSchema) };
     case "recall":
       return { providerCallId: call.toolCallId, toolId: "recall", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneRecallInputSchema) };
     default:
@@ -1353,6 +1552,21 @@ export function toolEffectMetadata(call: ParsedStandaloneToolCall): StandaloneTo
         expectedLatencyMs: 30_000,
         expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
       };
+    case "inspect":
+      return {
+        effectType: "READ_LOCAL",
+        resourceUri: "workspace://code-intelligence",
+        reversibility: "none",
+        sideEffectClass: "inspect",
+        workspaceSnapshot: "turn-workspace",
+        externalNetwork: false,
+        processAffinity: null,
+        consistency: "workspace_snapshot",
+        rateLimitGroup: null,
+        cacheable: true,
+        expectedLatencyMs: 30_000,
+        expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+      };
     case "recall":
       return {
         effectType: "READ_LOCAL",
@@ -1554,6 +1768,11 @@ export async function executeStandaloneTool(
       throw new Error("capability activation must settle in the control plane");
     case "recall":
       throw new Error("session recall must settle in the control plane");
+    case "inspect":
+      return executeInspect(
+        { ...input, context, call: input.call as Extract<ParsedStandaloneToolCall, { toolId: "inspect" }> },
+        startedAt,
+      );
     case "read": {
       const requestedStartLine = input.call.arguments.offset_line;
       const requestedEndLine = Math.min(
@@ -2069,6 +2288,96 @@ export async function executeStandaloneTool(
   }
 }
 
+async function executeInspect(
+  input: ExecuteStandaloneToolInput & {
+    readonly context: RequestContext;
+    readonly call: Extract<ParsedStandaloneToolCall, { toolId: "inspect" }>;
+  },
+  startedAt: number,
+): Promise<ToolResult<unknown>> {
+  if (input.call.arguments.action === "symbol") {
+    const response = await withAbortSignal(input.clients.codeIntel.Search({
+      context: nextRequestContext(input.context, "inspect-symbol"),
+      workspaceId: input.workspaceId,
+      query: input.call.arguments.query,
+      limit: input.call.arguments.limit,
+    }), input.signal);
+    const elapsed = performance.now() - startedAt;
+    const result = okResult({
+      action: "symbol",
+      query: input.call.arguments.query,
+      results: response.results.map((entry) => ({
+        path: entry.path,
+        line: entry.line,
+        symbol: entry.symbol,
+        method: entry.method,
+      })),
+      continuation: response.continuation ?? null,
+    }, {
+      toolCallId: input.internalToolCallId,
+      traceId: input.traceId,
+      summary: response.results.length === 0
+        ? `No indexed symbol named '${input.call.arguments.query}'`
+        : `Located ${response.results.length} indexed symbol result${response.results.length === 1 ? "" : "s"} for '${input.call.arguments.query}'`,
+      sideEffects: [sideEffect(input.sideEffectId, "inspect", `Inspect symbol ${input.call.arguments.query}`, true)],
+      timing: { executionMs: elapsed, totalMs: elapsed },
+    });
+    return {
+      ...result,
+      policyDecisionId: input.policyDecisionId,
+      truncation: response.truncated
+        ? {
+            occurred: true,
+            reason: "symbol results exceeded the requested limit",
+            continuation: response.continuation ?? null,
+          }
+        : result.truncation,
+    };
+  }
+
+  const response = await withAbortSignal(input.clients.codeIntel.Map({
+    context: nextRequestContext(input.context, "inspect-repository-map"),
+    workspaceId: input.workspaceId,
+    limit: input.call.arguments.limit,
+    continuation: input.call.arguments.continuation,
+  }), input.signal);
+  const sourceVersions = Object.fromEntries(
+    response.entries
+      .filter((entry) => /^sha256:[0-9a-f]{64}$/.test(entry.sourceSha256))
+      .map((entry) => [entry.path, entry.sourceSha256]),
+  );
+  const elapsed = performance.now() - startedAt;
+  const result = okResult({
+    action: "repository_map",
+    entries: response.entries.map((entry) => ({
+      path: entry.path,
+      symbols: entry.symbols,
+      source_sha256: entry.sourceSha256,
+    })),
+    index_revision: response.indexRevision,
+    total_entries: response.totalEntries,
+    continuation: response.continuation ?? null,
+  }, {
+    toolCallId: input.internalToolCallId,
+    traceId: input.traceId,
+    summary: `Repository map returned ${response.entries.length} of ${response.totalEntries} indexed files`,
+    sourceVersions,
+    sideEffects: [sideEffect(input.sideEffectId, "inspect", "Inspect repository map", true)],
+    timing: { executionMs: elapsed, totalMs: elapsed },
+  });
+  return {
+    ...result,
+    policyDecisionId: input.policyDecisionId,
+    truncation: response.truncated
+      ? {
+          occurred: true,
+          reason: "repository map continues beyond this page",
+          continuation: response.continuation ?? null,
+        }
+      : result.truncation,
+  };
+}
+
 const WEB_FETCH_EXCERPT_CHARS = 8_000;
 
 async function executeWebFetch(
@@ -2477,6 +2786,9 @@ async function settleProcessOutcome(
   events: ReturnType<KernelUdsClients["process"]["Start"]>,
   startedAt: number,
 ): Promise<ToolResult<unknown>> {
+  const outputBudget = input.call.toolId === "exec"
+    ? Math.min(EXEC_OUTPUT_MAX_BYTES, (input.call.arguments.max_output_tokens ?? EXEC_OUTPUT_MAX_TOKENS) * 4)
+    : EXEC_OUTPUT_MAX_BYTES;
   const outcome = await collectProcess(
     events,
     input.signal,
@@ -2488,6 +2800,7 @@ async function settleProcessOutcome(
         reason: "turn-cancelled",
       });
     },
+    outputBudget,
   );
   const elapsed = performance.now() - startedAt;
   if (outcome.kind === "denied") {
@@ -2547,6 +2860,7 @@ async function settleProcessOutcome(
       stderr: outcome.stderr,
       stdout_total_bytes: outcome.stdoutTotalBytes,
       stderr_total_bytes: outcome.stderrTotalBytes,
+      output_budget_bytes: outputBudget,
       output_elided: outcome.truncated,
     };
     summary = timedOut
@@ -2573,7 +2887,7 @@ async function settleProcessOutcome(
       ? {
           occurred: true,
           reason: outcome.truncated
-            ? `process output exceeded the ${EXEC_OUTPUT_MAX_BYTES}-byte head/tail projection`
+            ? `process output exceeded the ${outputBudget}-byte head/tail projection`
             : "search result exceeded max_results",
           continuation: projectionContinuation,
         }
@@ -2734,8 +3048,9 @@ export function splitOutputBudget(
   floor: number = EXEC_OUTPUT_STREAM_FLOOR_BYTES,
 ): { readonly stdout: number; readonly stderr: number } {
   if (stdoutBytes + stderrBytes <= budget) return { stdout: stdoutBytes, stderr: stderrBytes };
-  const stdoutFloor = Math.min(stdoutBytes, floor);
-  const stderrFloor = Math.min(stderrBytes, floor);
+  const effectiveFloor = Math.min(floor, Math.floor(budget / 2));
+  const stdoutFloor = Math.min(stdoutBytes, effectiveFloor);
+  const stderrFloor = Math.min(stderrBytes, effectiveFloor);
   let remaining = Math.max(0, budget - stdoutFloor - stderrFloor);
   const stdoutWant = Math.max(0, stdoutBytes - stdoutFloor);
   const stderrWant = Math.max(0, stderrBytes - stderrFloor);
@@ -2755,13 +3070,14 @@ function collectProcess(
   }) => { readonly unsubscribe: () => void } },
   signal: AbortSignal | null | undefined,
   cancelProcess: (processId: string) => Promise<void>,
+  outputBudget: number = EXEC_OUTPUT_MAX_BYTES,
 ): Promise<ProcessOutcome> {
   // Each stream retains up to the whole shared budget at its head and at its
   // tail; the final 50/50 split with a per-stream floor happens once the
   // totals are known.
   return new Promise((resolve, reject) => {
-    const stdout = new BoundedOutputStream(EXEC_OUTPUT_MAX_BYTES);
-    const stderr = new BoundedOutputStream(EXEC_OUTPUT_MAX_BYTES);
+    const stdout = new BoundedOutputStream(outputBudget);
+    const stderr = new BoundedOutputStream(outputBudget);
     let settled = false;
     let subscription: { readonly unsubscribe: () => void } | null = null;
     let processId: string | null = null;
@@ -2804,7 +3120,7 @@ function collectProcess(
         if (event.stderr !== undefined) stderr.push(event.stderr.bytes);
         const exited = event.exited;
         if (exited !== undefined) {
-          const split = splitOutputBudget(stdout.totalBytes, stderr.totalBytes);
+          const split = splitOutputBudget(stdout.totalBytes, stderr.totalBytes, outputBudget);
           const stdoutText = stdout.project(split.stdout);
           const stderrText = stderr.project(split.stderr);
           finish(() => resolve({

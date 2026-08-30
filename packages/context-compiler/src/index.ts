@@ -1508,6 +1508,8 @@ export interface AllocationOptions {
   readonly preserveDependencies: boolean;
   readonly preserveCompleteEpisodes: boolean;
   readonly hardIncludeRequired: boolean;
+  /** Episode sequence by fragment id; used to reserve the newest tool exchanges first. */
+  readonly episodeSequence?: ReadonlyMap<string, number>;
 }
 
 export interface AllocationResult {
@@ -1555,6 +1557,7 @@ export function allocateBudget(
   const selected: ScoredCandidate[] = [];
   const omitted: { result: RetrievalResult; reason: string }[] = [];
   let remaining = Number(budget.optionalContextTarget);
+  let toolResultReserve = Number(budget.expectedToolResultReserve);
   const byId = new Map(scored.map((candidate) => [candidate.result.fragment.id, candidate]));
   const selectedIds = new Set<string>();
   // Hard-required first.
@@ -1610,7 +1613,41 @@ export function allocateBudget(
     return { dependencies, error: null };
   };
 
+  // A settled call/result pair is the model's only durable observation of an
+  // effect. Spend the explicit tool-result reserve on the newest complete
+  // exchanges before utility-ranked context; otherwise a large schema set can
+  // reduce optionalContextTarget to zero and make the model repeat calls it
+  // cannot see were already settled.
+  const toolResultsNewestFirst = optional
+    .filter((candidate) => isToolResultFragment(candidate.result.fragment))
+    .sort((left, right) =>
+      (options.episodeSequence?.get(right.result.fragment.id) ?? -1)
+      - (options.episodeSequence?.get(left.result.fragment.id) ?? -1)
+    );
+  for (const result of toolResultsNewestFirst) {
+    const closure = options.preserveDependencies
+      ? dependencyClosure(result)
+      : { dependencies: [], error: null };
+    if (closure.error !== null) continue;
+    const bundle = [...closure.dependencies, result]
+      .filter((candidate, index, all) => all.findIndex((item) => item.result.fragment.id === candidate.result.fragment.id) === index)
+      .filter((candidate) => !selectedIds.has(candidate.result.fragment.id));
+    const cost = bundle.reduce(
+      (sum, candidate) => sum + tokenCostFor(candidate.result.fragment, modelKey, providerId, tokenizer),
+      0,
+    );
+    if (cost > toolResultReserve + remaining) continue;
+    for (const candidate of bundle) {
+      selected.push(candidate);
+      selectedIds.add(candidate.result.fragment.id);
+    }
+    const fromReserve = Math.min(toolResultReserve, cost);
+    toolResultReserve -= fromReserve;
+    remaining -= cost - fromReserve;
+  }
+
   for (const s of optional) {
+    if (selectedIds.has(s.result.fragment.id)) continue;
     const closure = options.preserveDependencies
       ? dependencyClosure(s)
       : { dependencies: [], error: null };
@@ -1954,6 +1991,7 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     preserveDependencies: true,
     preserveCompleteEpisodes: true,
     hardIncludeRequired: true,
+    episodeSequence: episodeSequenceIndex(input.recentEpisodes),
   }, input.model.modelKey, input.provider.providerId, tokenizer);
   // 7b. Emission order. Allocation chose the survivors on utility; the wire
   // order is canonical (prefix → per-turn block → transcript in episode

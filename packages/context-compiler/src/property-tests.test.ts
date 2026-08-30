@@ -273,6 +273,38 @@ describe("Complete tool episodes", () => {
     // Should be omitted because its dependency is not satisfied.
     expect(alloc.omitted.some((o) => o.result.fragment.id === "tool_result:2")).toBe(true);
   });
+
+  test("the explicit tool-result reserve preserves a settled pair when optional context is zero", () => {
+    const call = makeFragment("tool_call:reserved", 50, 200);
+    const result = makeFragment("tool_result:reserved", 50, 300, ["tool_call:reserved"]);
+    const unrelated = makeFragment("code:optional", 70, 100);
+    const budget = {
+      ...standardBudget(),
+      optionalContextTarget: 0n as TokenCount,
+      expectedToolResultReserve: 500n as TokenCount,
+    };
+    const scored: ScoredCandidate[] = [
+      { result: makeResult(unrelated), utility: 1, hardRequired: false },
+      { result: makeResult(call), utility: 0.8, hardRequired: false },
+      { result: makeResult(result), utility: 0.8, hardRequired: false },
+    ];
+
+    const alloc = allocateBudget(scored, budget, {
+      preserveDependencies: true,
+      preserveCompleteEpisodes: true,
+      hardIncludeRequired: true,
+      episodeSequence: new Map([
+        ["tool_call:reserved", 2],
+        ["tool_result:reserved", 3],
+      ]),
+    }, MODEL_KEY);
+
+    expect(alloc.selected.map((candidate) => candidate.result.fragment.id).sort()).toEqual([
+      "tool_call:reserved",
+      "tool_result:reserved",
+    ].sort());
+    expect(alloc.omitted.some((entry) => entry.result.fragment.id === "code:optional")).toBe(true);
+  });
 });
 
 // ──────────────────────── Property 3: Budget never exceeds hard limit ────────
