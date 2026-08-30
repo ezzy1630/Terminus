@@ -11,12 +11,13 @@ describe("Codex external event projection", () => {
     const expired = buffer.read("1");
     expect(expired.cursor_expired).toBe(true);
     expect(expired.events).toHaveLength(CODEX_EVENT_RING_LIMIT);
-    expect(expired.events[0]).toMatchObject({ cursor: "5", sequence: 5, text: "chunk-5" });
-    expect(expired.events.at(-1)).toMatchObject({ cursor: "260", sequence: 260, text: "chunk-260" });
+    expect(expired.events[0]).toMatchObject({ sequence: 5, text: "chunk-5" });
+    expect(expired.events[0]?.cursor).toMatch(/^[0-9a-f-]+:5$/);
+    expect(expired.events.at(-1)).toMatchObject({ sequence: 260, text: "chunk-260" });
     expect(expired.events[0]).not.toHaveProperty("reasoning");
 
     const resumed = buffer.read(expired.next_cursor);
-    expect(resumed).toEqual({ events: [], next_cursor: "260", cursor_expired: false });
+    expect(resumed).toEqual({ events: [], next_cursor: expired.next_cursor, cursor_expired: false, resync_cursor: null });
   });
 
   test("ignores non-user-facing notifications and sanitizes errors", () => {
@@ -26,8 +27,8 @@ describe("Codex external event projection", () => {
     buffer.append({ method: "error", params: { message: "provider secret", accessToken: "never" } });
     buffer.append({ method: "turn/completed", params: { turn: { status: "failed", error: { message: "raw protocol" } } } });
     expect(buffer.read(null).events).toEqual([
-      { cursor: "1", sequence: 1, kind: "error", text: "Codex reported an error" },
-      { cursor: "2", sequence: 2, kind: "turn/completed", text: "Turn failed" },
+      expect.objectContaining({ sequence: 1, kind: "error", text: "Codex reported an error" }),
+      expect.objectContaining({ sequence: 2, kind: "turn/completed", text: "Turn failed" }),
     ]);
   });
 
@@ -47,5 +48,21 @@ describe("Codex external event projection", () => {
       { kind: "thread/tokenUsage/updated", text: "Usage updated" },
     ]);
     expect(JSON.stringify(buffer.read(null))).not.toContain("private");
+  });
+
+  test("treats a previous process epoch and legacy numeric cursor as expired", () => {
+    const previous = new CodexLaneEventBuffer();
+    previous.append({ method: "turn/started", params: {} });
+    const oldCursor = previous.read(null).next_cursor;
+
+    const restarted = new CodexLaneEventBuffer();
+    restarted.append({ method: "turn/started", params: {} });
+    const oldEpoch = restarted.read(oldCursor);
+    expect(oldEpoch.cursor_expired).toBe(true);
+    expect(oldEpoch.resync_cursor).toBe(oldEpoch.next_cursor);
+
+    const legacy = restarted.read("1");
+    expect(legacy.cursor_expired).toBe(true);
+    expect(legacy.resync_cursor).toBe(legacy.next_cursor);
   });
 });

@@ -366,6 +366,7 @@ import {
   CODEX_EXTERNAL_HARNESS,
   CodexAppServerError,
   CodexAppServerSession,
+  type CodexAppServerLease,
   type CodexAppServerSessionOptions,
   type CodexAppServerStartThreadInput,
   type CodexAppServerStatus,
@@ -4633,7 +4634,11 @@ async function persistCodexLaneState(
   session: PrismaSession,
   state: Omit<PersistedCodexLaneState, "external_harness" | "workspace_id" | "session_id" | "updated_at"> & { readonly updated_at?: string },
 ): Promise<PersistedCodexLaneState> {
-  const metadata = safeParse<Record<string, unknown>>(session.metadataJson, {});
+  // The route may retain a Prisma snapshot while an App Server callback
+  // advances the lease. Always merge against the latest row so callbacks
+  // cannot overwrite a newer thread or unrelated session metadata.
+  const latest = await db.session.findUnique({ where: { id: session.id } });
+  const metadata = safeParse<Record<string, unknown>>(latest?.metadataJson ?? session.metadataJson, {});
   const persisted: PersistedCodexLaneState = {
     external_harness: CODEX_EXTERNAL_HARNESS,
     workspace_id: session.workspaceId,
@@ -4677,7 +4682,10 @@ async function codexKernelContext(
   });
 }
 
-function codexSessionOptions(session: PrismaSession): CodexAppServerSessionOptions {
+function codexSessionOptions(
+  session: PrismaSession,
+  persisted: PersistedCodexLaneState | null,
+): CodexAppServerSessionOptions {
   const key = codexLaneKey(session.workspaceId, session.id);
   return {
     clients: requireKernelUds(),
@@ -4687,6 +4695,19 @@ function codexSessionOptions(session: PrismaSession): CodexAppServerSessionOptio
     // own supported App Server flow; Terminus never reads or forwards auth
     // store material.
     public_env: {},
+    ...(persisted === null ? {} : { persisted_lease: { job_id: persisted.job_id, state: persisted.state } }),
+    on_lease: async (lease: CodexAppServerLease) => {
+      const latest = await db.session.findUnique({ where: { id: session.id } });
+      if (latest === null || latest.workspaceId !== session.workspaceId) {
+        throw new Error("Codex App Server session disappeared while persisting its job lease");
+      }
+      const current = readCodexLaneState(latest);
+      await persistCodexLaneState(latest, {
+        thread_id: current?.thread_id ?? null,
+        job_id: lease.job_id,
+        state: lease.state,
+      });
+    },
     on_event: (event) => getCodexLaneEventBuffer(key).append(event.message),
   };
 }
@@ -4702,9 +4723,30 @@ function getCodexLaneSession(session: PrismaSession): CodexAppServerSession {
     // reconnect/resume attempt.
     codexLaneSessions.delete(key);
   }
-  const created = new CodexAppServerSession(codexSessionOptions(session));
+  const created = new CodexAppServerSession(codexSessionOptions(session, readCodexLaneState(session)));
   codexLaneSessions.set(key, created);
   return created;
+}
+
+function codexStatusFromPersisted(persisted: PersistedCodexLaneState | null): CodexAppServerStatus {
+  const state = persisted?.state === "running" ? "running"
+    : persisted?.state === "exited" ? "exited"
+      : persisted?.state === "stopped" ? "stopped"
+        : persisted?.state === "unknown_settlement" || persisted?.state === "starting" ? "unknown_settlement"
+          : "not_started";
+  return {
+    available: state === "running",
+    state,
+    external_harness: CODEX_EXTERNAL_HARNESS,
+    protocol: "codex-app-server.v2",
+    executable: "codex",
+    job_id: persisted?.job_id ?? null,
+    reason: state === "unknown_settlement"
+      ? "Codex App Server job settlement is unknown; reconcile before retrying"
+      : state === "exited"
+        ? "Codex App Server exited; start a new external session"
+        : null,
+  };
 }
 
 function codexErrorResponse(res: ServerResponse, error: unknown): void {
@@ -8327,22 +8369,12 @@ const routes: Route[] = [
     const session = await codexSessionIdentity(workspaceId, sessionId);
     if (session === null) return sendError(res, 404, "SESSION_NOT_FOUND", "session was not found in workspace", "not_found");
     const persisted = readCodexLaneState(session);
-    const lane = getCodexLaneSession(session);
-    try {
-      await lane.open();
-      const current = lane.status();
-      // GET is observational. Job/thread state is persisted only by the
-      // idempotent thread/turn/stop mutations, so a status read cannot race a
-      // session metadata update and overwrite unrelated session fields.
-      sendJson(res, 200, codexStatusWire(current, persisted));
-    } catch (error: unknown) {
-      sendJson(res, 200, codexStatusWire({
-        ...lane.status(),
-        available: false,
-        external_harness: CODEX_EXTERNAL_HARNESS,
-        reason: error instanceof CodexAppServerError ? error.message : "Codex App Server availability is unknown",
-      }, persisted));
-    }
+    // Status polling is strictly observational. In particular, a desktop
+    // reconnect must never create a process or reserve a lease as a side
+    // effect of GET. A live in-memory lane is the freshest local projection;
+    // otherwise use the durable session snapshot.
+    const lane = codexLaneSessions.get(codexLaneKey(workspaceId, sessionId));
+    sendJson(res, 200, codexStatusWire(lane?.status() ?? codexStatusFromPersisted(persisted), persisted));
   }),
   route("GET", "/v1/external/codex/events", async (req, res) => {
     const query = new URL(req.url ?? "/", "http://terminus.local").searchParams;
@@ -8365,7 +8397,10 @@ const routes: Route[] = [
       events: result.events,
       next_cursor: result.next_cursor,
       cursor_expired: result.cursor_expired,
-      ...(result.cursor_expired ? { cursor_expired_signal: "replay window expired; resync from the current cursor" } : {}),
+      ...(result.cursor_expired ? {
+        cursor_expired_signal: "replay window expired; resync from the bounded current snapshot",
+        resync_cursor: result.resync_cursor,
+      } : {}),
     });
   }),
   route("GET", "/v1/external/codex/account", async (req, res) => {
@@ -8480,11 +8515,18 @@ const routes: Route[] = [
     const session = await codexSessionIdentity(parsed.data.workspace_id, parsed.data.session_id);
     if (session === null) return sendError(res, 404, "SESSION_NOT_FOUND", "session was not found in workspace", "not_found");
     const key = codexLaneKey(session.workspaceId, session.id);
-    const lane = codexLaneSessions.get(key);
+    const persistedBeforeStop = readCodexLaneState(session);
+    // A control restart drops the in-memory object, but not the durable job
+    // identity. Rehydrate it for an explicit stop so we reconcile/stop that
+    // exact lease instead of reporting success while it keeps running.
+    const lane = codexLaneSessions.get(key)
+      ?? (persistedBeforeStop?.job_id !== null && persistedBeforeStop?.job_id !== undefined
+        ? getCodexLaneSession(session)
+        : undefined);
     try {
       if (lane !== undefined) await lane.stop(parsed.data.reason ?? "user-stop");
       const persisted = await persistCodexLaneState(session, {
-        thread_id: readCodexLaneState(session)?.thread_id ?? null,
+        thread_id: readCodexLaneState(session)?.thread_id ?? persistedBeforeStop?.thread_id ?? null,
         job_id: null,
         state: "stopped",
       });
