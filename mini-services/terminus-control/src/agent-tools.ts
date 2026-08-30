@@ -44,18 +44,55 @@ import {
  * cannot change the decision. Model, user, and task-contract denials are
  * model-visible corrections and get one adaptive recompile instead.
  */
-export interface ToolDenialMetadata {
-  readonly origin: "kernel" | "model" | "user" | "contract";
-  readonly disposition: "terminal" | "recoverable";
-  readonly decision: string;
-  readonly decisionId: string | null;
-  readonly explanation: string;
-}
+export const TOOL_DENIAL_SCHEMA_VERSION = "terminus.tool-denial.v1" as const;
+
+export type ToolDenialMetadata =
+  | {
+      readonly schemaVersion: typeof TOOL_DENIAL_SCHEMA_VERSION;
+      readonly origin: "kernel";
+      readonly disposition: "terminal";
+      readonly decision: string;
+      readonly decisionId: string | null;
+      readonly explanation: string;
+    }
+  | {
+      readonly schemaVersion: typeof TOOL_DENIAL_SCHEMA_VERSION;
+      readonly origin: "model" | "user" | "contract";
+      readonly disposition: "recoverable";
+      readonly decision: string;
+      readonly decisionId: string | null;
+      readonly explanation: string;
+    };
 
 export type ExecutedToolResult = ToolResult<unknown> & {
   /** Private control metadata; the model-visible projection omits it. */
   readonly denial?: ToolDenialMetadata | undefined;
 };
+
+/**
+ * Return a terminal disposition only for a typed kernel authorization fault.
+ * Callers must not promote ordinary operational text to a policy decision.
+ */
+export function typedKernelPolicyDenial(error: unknown): ToolDenialMetadata | null {
+  const record = error !== null && typeof error === "object"
+    ? error as Record<string, unknown>
+    : null;
+  const code = record?.code;
+  if (code !== 7 && code !== "PERMISSION_DENIED") return null;
+  const classified = classifyLoopError(error);
+  if (classified.kind !== "policy_denied") return null;
+  const decisionId = typeof record?.decisionId === "string" && record.decisionId.length > 0
+    ? record.decisionId
+    : null;
+  return {
+    schemaVersion: TOOL_DENIAL_SCHEMA_VERSION,
+    origin: "kernel",
+    disposition: "terminal",
+    decision: classified.envelope.code,
+    decisionId,
+    explanation: classified.envelope.message,
+  };
+}
 
 /**
  * Tool cycles are the *batches* of tool calls a turn may settle. The step
@@ -2108,6 +2145,7 @@ export async function executeStandaloneTool(
         // non-unique anchor): no effects were committed, so report a clean,
         // actionable tool error instead of surfacing ambiguous settlement.
         const message = error instanceof Error ? error.message : String(error);
+        const denial = typedKernelPolicyDenial(error);
         const stale = /sha256|source|stale|precondition/i.test(message);
         const elapsed = performance.now() - startedAt;
         const base = okResult(null, {
@@ -2120,14 +2158,17 @@ export async function executeStandaloneTool(
         });
         return {
           ...base,
-          status: "error",
+          status: denial === null ? "error" : "denied",
           policyDecisionId: input.policyDecisionId,
+          ...(denial === null ? {} : { denial }),
           diagnostics: [{
             severity: "error",
-            code: stale ? "PATCH_STALE_SOURCE" : "PATCH_REJECTED",
-            message: stale
-              ? `The observed source version of ${patchArguments.path} no longer matches. Re-read the file (a fresh read returns file_sha256) and retry with current content.`
-              : message.slice(0, 2_048),
+            code: denial?.decision ?? (stale ? "PATCH_STALE_SOURCE" : "PATCH_REJECTED"),
+            message: denial !== null
+              ? denial.explanation
+              : stale
+                ? `The observed source version of ${patchArguments.path} no longer matches. Re-read the file (a fresh read returns file_sha256) and retry with current content.`
+                : message.slice(0, 2_048),
             path: patchArguments.path,
             range: null,
           }],
@@ -2222,6 +2263,7 @@ export async function executeStandaloneTool(
         }), input.signal);
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
+        const denial = typedKernelPolicyDenial(error);
         const elapsed = performance.now() - startedAt;
         const base = okResult(null, {
           toolCallId: input.internalToolCallId,
@@ -2231,12 +2273,13 @@ export async function executeStandaloneTool(
         });
         return {
           ...base,
-          status: "error",
+          status: denial === null ? "error" : "denied",
           policyDecisionId: input.policyDecisionId,
+          ...(denial === null ? {} : { denial }),
           diagnostics: [{
             severity: "error",
-            code: "WRITE_REJECTED",
-            message: message.slice(0, 2_048),
+            code: denial?.decision ?? "WRITE_REJECTED",
+            message: denial?.explanation ?? message.slice(0, 2_048),
             path: writeArguments.path,
             range: null,
           }],
@@ -2291,6 +2334,7 @@ export async function executeStandaloneTool(
           status: "denied",
           policyDecisionId: input.policyDecisionId,
           denial: {
+            schemaVersion: TOOL_DENIAL_SCHEMA_VERSION,
             origin: "contract",
             disposition: "recoverable",
             decision: "deny",
@@ -2595,7 +2639,8 @@ async function executeWebFetch(
     // Connector policy refusals carry a typed kernel status. Never infer
     // authorization from provider-controlled human text: a destination can
     // mention "policy" in an ordinary transport failure.
-    const policyDenied = classifyLoopError(error).kind === "policy_denied";
+    const denial = typedKernelPolicyDenial(error);
+    const policyDenied = denial !== null;
     const base = okResult(null, {
       toolCallId: input.internalToolCallId,
       traceId: input.traceId,
@@ -2608,15 +2653,7 @@ async function executeWebFetch(
       ...base,
       status: policyDenied ? "denied" : "error",
       policyDecisionId: input.policyDecisionId,
-      ...(policyDenied ? {
-        denial: {
-          origin: "kernel" as const,
-          disposition: "terminal" as const,
-          decision: "deny",
-          decisionId: null,
-          explanation: message,
-        },
-      } : {}),
+      ...(denial === null ? {} : { denial }),
       diagnostics: [{
         severity: "error",
         code: policyDenied ? "WEB_FETCH_EGRESS_DENIED" : "WEB_FETCH_FAILED",
@@ -2688,7 +2725,7 @@ function tailOf(bytes: Uint8Array, budgetBytes: number): { text: string; totalBy
 async function settleJobPoll(
   input: ExecuteStandaloneToolInput & { readonly call: Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }> },
   startedAt: number,
-): Promise<ToolResult<unknown>> {
+): Promise<ExecutedToolResult> {
   const context = await resolveKernelRequestContext(input.context);
   const state = await withAbortSignal(input.clients.jobs.Get({
     context: nextRequestContext(context, "exec-poll"),
@@ -2713,6 +2750,28 @@ async function settleJobPoll(
     fetchArtifactTail(input, state.stdoutArtifact, tailBytes),
     fetchArtifactTail(input, state.stderrArtifact, tailBytes),
   ]);
+  const denial = stdoutTail.denial ?? stderrTail.denial ?? null;
+  if (denial !== null) {
+    const base = okResult(null, {
+      toolCallId: input.internalToolCallId,
+      traceId: input.traceId,
+      summary: denial.explanation,
+      timing: { executionMs: performance.now() - startedAt, totalMs: performance.now() - startedAt },
+    });
+    return {
+      ...base,
+      status: "denied",
+      policyDecisionId: input.policyDecisionId,
+      denial,
+      diagnostics: [{
+        severity: "error",
+        code: denial.decision,
+        message: denial.explanation,
+        path: null,
+        range: null,
+      }],
+    };
+  }
   const stdoutArtifact = kernelArtifactDescriptor(state.stdoutArtifact);
   const stderrArtifact = kernelArtifactDescriptor(state.stderrArtifact);
   const exitExpected = input.call.arguments.expected_exit_codes.includes(state.exitCode);
@@ -2758,7 +2817,7 @@ async function fetchArtifactTail(
   input: ExecuteStandaloneToolInput,
   artifactRef: KernelArtifactRef | undefined,
   tailBytes: number,
-): Promise<{ text: string; totalBytes: number; truncated: boolean }> {
+): Promise<{ text: string; totalBytes: number; truncated: boolean; denial?: ToolDenialMetadata | undefined }> {
   if (artifactRef === undefined || artifactRef.sha256.length === 0) {
     return { text: "", totalBytes: 0, truncated: false };
   }
@@ -2773,7 +2832,10 @@ async function fetchArtifactTail(
     // The job output exists but cannot be fetched; surface the reason rather
     // than failing the poll — the exit code is still authoritative.
     const message = error instanceof Error ? error.message : String(error);
-    return { text: `<artifact unavailable: ${message.slice(0, 256)}>`, totalBytes: artifactRef.sizeBytes, truncated: true };
+    const denial = typedKernelPolicyDenial(error);
+    return denial === null
+      ? { text: `<artifact unavailable: ${message.slice(0, 256)}>`, totalBytes: artifactRef.sizeBytes, truncated: true }
+      : { text: "", totalBytes: artifactRef.sizeBytes, truncated: true, denial };
   }
 }
 
@@ -2884,7 +2946,8 @@ function processDispatchFailure(
 ): ExecutedToolResult {
   const message = error instanceof Error ? error.message : String(error);
   const classified = classifyLoopError(error);
-  const denied = classified.kind === "policy_denied";
+  const denial = typedKernelPolicyDenial(error);
+  const denied = denial !== null;
   const elapsed = performance.now() - startedAt;
   const base = okResult(null, {
     toolCallId: input.internalToolCallId,
@@ -2896,15 +2959,7 @@ function processDispatchFailure(
     ...base,
     status: denied ? "denied" : "error",
     policyDecisionId: input.policyDecisionId,
-    ...(denied ? {
-      denial: {
-        origin: "kernel" as const,
-        disposition: "terminal" as const,
-        decision: "deny",
-        decisionId: null,
-        explanation: message,
-      },
-    } : {}),
+    ...(denial === null ? {} : { denial }),
     diagnostics: [{
       severity: "error",
       code: denied ? classified.envelope.code : "PROCESS_DISPATCH_FAILED",
@@ -2976,6 +3031,7 @@ async function settleProcessOutcome(
       status: "denied",
       policyDecisionId: input.policyDecisionId,
       denial: {
+        schemaVersion: TOOL_DENIAL_SCHEMA_VERSION,
         origin: "kernel",
         disposition: "terminal",
         decision: outcome.policy.decision || "deny",

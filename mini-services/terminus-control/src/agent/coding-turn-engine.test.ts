@@ -27,6 +27,8 @@ interface HarnessOptions {
   readonly failOnCallIds?: readonly string[];
   /** Scripted settlements by call id; a settled error is an observation, not a stop. */
   readonly settleAs?: Readonly<Record<string, EngineToolSettlement>>;
+  readonly settleFailures?: Readonly<Record<string, Error>>;
+  readonly onPolicyDenied?: (message: string) => void | Promise<void>;
   readonly afterToolsSettled?: () => Promise<void>;
   readonly onOperationObserved?: (observation: OperationObservation) => void | Promise<void>;
   readonly omitCompletionSignal?: boolean;
@@ -101,11 +103,14 @@ async function runHarness(options: HarnessOptions) {
     settleToolCall: async ({ call }) => {
       const error = settleErrors.get(call.toolCallId);
       if (error !== undefined) throw error;
+      const scriptedFailure = options.settleFailures?.[call.toolCallId];
+      if (scriptedFailure !== undefined) throw scriptedFailure;
       trace.push(`settle:${call.toolName}:${call.toolCallId}`);
       return options.settleAs?.[call.toolCallId];
     },
     ...(options.afterToolsSettled === undefined ? {} : { afterToolsSettled: options.afterToolsSettled }),
     ...(options.onOperationObserved === undefined ? {} : { onOperationObserved: options.onOperationObserved }),
+    ...(options.onPolicyDenied === undefined ? {} : { onPolicyDenied: options.onPolicyDenied }),
     ...(options.drainSteering === undefined ? {} : { drainSteering: options.drainSteering }),
     ...(options.onSteeringDrained === undefined ? {} : { onSteeringDrained: options.onSteeringDrained }),
   });
@@ -171,6 +176,7 @@ describe("CodingTurnEngine", () => {
           errorCode: "PERMISSION_DENIED",
           errorClass: "policy_denied",
           denial: {
+            schemaVersion: "terminus.tool-denial.v1",
             origin: "contract",
             disposition: "recoverable",
             decision: "deny",
@@ -188,6 +194,7 @@ describe("CodingTurnEngine", () => {
 
   test("a kernel policy denial records its observation and stops without another provider attempt", async () => {
     const observations: OperationObservation[] = [];
+    const policyDenials: string[] = [];
     const { stop, trace } = await runHarness({
       responses: [{ calls: [toolCall("denied", "exec"), toolCall("speculative", "read")] }, { text: "must not be requested" }],
       settleAs: {
@@ -196,6 +203,7 @@ describe("CodingTurnEngine", () => {
           errorCode: "TOOL_RESULT_DENIED",
           errorClass: "denied",
           denial: {
+            schemaVersion: "terminus.tool-denial.v1",
             origin: "kernel",
             disposition: "terminal",
             decision: "deny",
@@ -205,6 +213,7 @@ describe("CodingTurnEngine", () => {
         },
       },
       onOperationObserved: (observation) => { observations.push(observation); },
+      onPolicyDenied: (message) => { policyDenials.push(message); },
     });
 
     expect(stop).toMatchObject({
@@ -223,6 +232,55 @@ describe("CodingTurnEngine", () => {
     expect(trace).not.toContain("begin:2");
     expect(observations).toHaveLength(1);
     expect(observations[0]?.status).toBe("denied");
+    expect(policyDenials).toEqual(["The kernel denied this process by policy."]);
+  });
+
+  test("a terminal denial wins over a parallel generic settlement failure", async () => {
+    const { stop, trace } = await runHarness({
+      responses: [
+        { calls: [toolCall("generic", "read"), toolCall("denied", "read")] },
+        { text: "must not be requested" },
+      ],
+      sideEffectClassOf: () => "read",
+      settleFailures: { generic: new Error("transport failed") },
+      settleAs: {
+        denied: {
+          status: "denied",
+          errorCode: "KERNEL_POLICY_DENIED",
+          errorClass: "kernel_policy_denied",
+          denial: {
+            schemaVersion: "terminus.tool-denial.v1",
+            origin: "kernel",
+            disposition: "terminal",
+            decision: "PERMISSION_DENIED",
+            decisionId: "kernel-decision-parallel",
+            explanation: "kernel refused the read",
+          },
+        },
+      },
+    });
+    expect(stop.kind).toBe("policy_stop");
+    expect(trace).toContain("settle:read:denied");
+  });
+
+  test("terminal metadata on a non-denied settlement is ignored", async () => {
+    const { stop } = await runHarness({
+      responses: [{ calls: [toolCall("mismatch", "read")] }, { text: "continued" }],
+      settleAs: {
+        mismatch: {
+          status: "success",
+          denial: {
+            schemaVersion: "terminus.tool-denial.v1",
+            origin: "kernel",
+            disposition: "terminal",
+            decision: "PERMISSION_DENIED",
+            decisionId: "invalid-success-denial",
+            explanation: "must not stop a successful settlement",
+          },
+        },
+      },
+    });
+    expect(stop.kind).toBe("completion_proposal");
   });
 
   test("multi-call responses are all settled before the next compile", async () => {

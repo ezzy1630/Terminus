@@ -36,11 +36,25 @@ import {
   semanticIdempotencyGateApplies,
   stripNumberedGuttersIfFullyNumbered,
   toolEffectMetadata,
+  typedKernelPolicyDenial,
   type ParsedStandaloneToolCall,
 } from "./agent-tools.js";
 import type { ToolResult } from "@terminus/aci";
 
 describe("standalone provider tools", () => {
+  test("all kernel tool boundaries classify only typed PERMISSION_DENIED as terminal", () => {
+    for (const toolId of ["patch", "write", "read", "inspect", "exec_poll", "exec", "grep", "glob", "web_fetch"]) {
+      expect(typedKernelPolicyDenial(Object.assign(new Error(`${toolId} refused`), { code: 7 }))).toMatchObject({
+        schemaVersion: "terminus.tool-denial.v1",
+        origin: "kernel",
+        disposition: "terminal",
+        decision: "PERMISSION_DENIED",
+      });
+    }
+    expect(typedKernelPolicyDenial(Object.assign(new Error("permission denied"), { code: 13 }))).toBeNull();
+    expect(typedKernelPolicyDenial(Object.assign(new Error("contract denied"), { code: "POLICY_DENIED" }))).toBeNull();
+  });
+
   test("exposes the bounded kernel tool surface", () => {
     expect(STANDALONE_TOOL_SCHEMAS.map((tool) => tool.id)).toEqual(["capability", "read", "patch", "write", "exec", "exec_poll", "web_fetch", "grep", "glob", "inspect", "recall"]);
     expect(selectInitialStandaloneToolSchemas(true).map((tool) => tool.id)).toEqual(["capability"]);
@@ -1098,7 +1112,7 @@ describe("R11 web_fetch URL guards", () => {
     expect(result.status).toBe("denied");
     expect(result.diagnostics[0]?.code).toBe("WEB_FETCH_EGRESS_DENIED");
     expect(result.diagnostics[0]?.message).toMatch(/allowlist/);
-    expect(result.denial).toMatchObject({ origin: "kernel", disposition: "terminal", decision: "deny" });
+    expect(result.denial).toMatchObject({ origin: "kernel", disposition: "terminal", decision: "PERMISSION_DENIED" });
   });
 
   test("connector prose mentioning policy does not become a kernel denial", async () => {
@@ -1445,9 +1459,10 @@ describe("C1 exec always returns its output", () => {
     expect(result.diagnostics[0]?.code).toBe("PERMISSION_DENIED");
     expect(result.diagnostics[0]?.message).toMatch(/Do not retry/);
     expect(result.denial).toEqual({
+      schemaVersion: "terminus.tool-denial.v1",
       origin: "kernel",
       disposition: "terminal",
-      decision: "deny",
+      decision: "PERMISSION_DENIED",
       decisionId: null,
       explanation: "policy denied: no matching rule",
     });

@@ -513,20 +513,24 @@ export class CodingTurnEngine {
             if (outcome.failed || outcome.denied) break;
           }
         }
+        let deferredFailure: unknown = null;
         for (const outcome of outcomes) {
           await this.observeOperation(outcome.observation);
           if (outcome.denied) policyDenied = true;
           if (outcome.terminalDenial !== null) terminalPolicyDenial = outcome.terminalDenial;
-          if (!outcome.failed) continue;
-          const stop = await this.stopForToolError(outcome.error);
-          if (stop !== null) return stop;
-          throw outcome.error;
+          if (outcome.failed && deferredFailure === null) deferredFailure = outcome.error;
         }
         if (terminalPolicyDenial !== null) {
           // The kernel has already made the authoritative decision. The
           // observation above is durable; do not recompile or make another
           // provider request without a new admission.
+          await this.dependencies.onPolicyDenied?.(terminalPolicyDenial.explanation);
           return this.policyStopForDenial(terminalPolicyDenial);
+        }
+        if (deferredFailure !== null) {
+          const stop = await this.stopForToolError(deferredFailure);
+          if (stop !== null) return stop;
+          throw deferredFailure;
         }
         operationIndex += outcomes.length;
         // A policy denial is already a complete model-visible result. Do not
@@ -672,7 +676,7 @@ export class CodingTurnEngine {
       return {
         failed: false,
         denied: settlementRecord?.status === "denied" || settlementRecord?.errorClass === "policy_denied",
-        terminalDenial: settlementRecord?.denial?.disposition === "terminal"
+        terminalDenial: settlementRecord?.status === "denied" && settlementRecord.denial?.disposition === "terminal"
           ? settlementRecord.denial
           : null,
         error: undefined,

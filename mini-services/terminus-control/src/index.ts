@@ -190,6 +190,8 @@ import {
   toolEffectMetadata,
   ToolAbortedError,
   type ToolDenialMetadata,
+  TOOL_DENIAL_SCHEMA_VERSION,
+  typedKernelPolicyDenial,
   type ExecutedToolResult,
   type ParsedStandaloneToolCall,
   type ProviderCallIdentity,
@@ -15881,6 +15883,7 @@ async function settleStandaloneProviderTool(
       sideEffectId: null,
       result,
       denial: {
+        schemaVersion: TOOL_DENIAL_SCHEMA_VERSION,
         origin: "contract",
         disposition: "recoverable",
         decision: "deny",
@@ -15929,6 +15932,52 @@ async function settleStandaloneProviderTool(
     );
   } catch (error: unknown) {
     const explanation = error instanceof Error ? error.message : String(error);
+    const kernelDenial = typedKernelPolicyDenial(error);
+    if (kernelDenial !== null) {
+      const result = {
+        ...errorResult(kernelDenial.explanation, {
+          toolCallId,
+          traceId: input.turnId,
+          status: "denied",
+          summary: "Kernel policy denied capability admission",
+        }),
+        policyDecisionId: kernelDenial.decisionId ?? uuid(),
+      };
+      return persistSettledToolResult({
+        input,
+        call,
+        toolCallId,
+        callTranscriptArtifactUri: callTranscriptArtifact.uri,
+        sideEffectId: null,
+        result,
+        denial: kernelDenial,
+        workspaceRevisionBefore,
+        workspaceRevisionAfter: workspaceRevisionBefore,
+        ...operationContext,
+      });
+    }
+    if (!(error instanceof TaskScopeError)) {
+      const result = {
+        ...errorResult(explanation, {
+          toolCallId,
+          traceId: input.turnId,
+          status: "error",
+          summary: "Capability admission failed",
+        }),
+        policyDecisionId: null,
+      };
+      return persistSettledToolResult({
+        input,
+        call,
+        toolCallId,
+        callTranscriptArtifactUri: callTranscriptArtifact.uri,
+        sideEffectId: null,
+        result,
+        workspaceRevisionBefore,
+        workspaceRevisionAfter: workspaceRevisionBefore,
+        ...operationContext,
+      });
+    }
     const policyDecisionId = await denyStandaloneTool({
       input,
       call,
@@ -15955,6 +16004,7 @@ async function settleStandaloneProviderTool(
       sideEffectId: null,
       result,
       denial: {
+        schemaVersion: TOOL_DENIAL_SCHEMA_VERSION,
         origin: "contract",
         disposition: "recoverable",
         decision: "deny",
@@ -16017,6 +16067,7 @@ async function settleStandaloneProviderTool(
         sideEffectId: null,
         result: deniedResult,
         denial: {
+          schemaVersion: TOOL_DENIAL_SCHEMA_VERSION,
           origin: "user",
           disposition: "recoverable",
           decision: "deny",
@@ -16091,6 +16142,32 @@ async function settleStandaloneProviderTool(
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
   } catch (error: unknown) {
+    const kernelDenial = typedKernelPolicyDenial(error);
+    if (kernelDenial !== null) {
+      result = {
+        ...errorResult(kernelDenial.explanation, {
+          toolCallId,
+          traceId: input.turnId,
+          status: "denied",
+          summary: `Kernel policy denied ${call.toolId}`,
+        }),
+        policyDecisionId: kernelDenial.decisionId ?? policyDecisionId,
+        denial: kernelDenial,
+      };
+      const workspaceRevisionAfter = await readStandaloneWorkspaceRevision(input);
+      return persistSettledToolResult({
+        input,
+        call,
+        toolCallId,
+        callTranscriptArtifactUri: callTranscriptArtifact.uri,
+        sideEffectId,
+        result,
+        denial: kernelDenial,
+        workspaceRevisionBefore,
+        workspaceRevisionAfter,
+        ...operationContext,
+      });
+    }
     if (error instanceof ToolAbortedError && !dispatched) {
       await effectSettlementService.cancel({
         taskId: input.taskId,
@@ -16718,7 +16795,12 @@ async function persistSettledToolResult(input: {
     resultArtifactUri: fullResultArtifact.uri,
     resultTranscriptArtifactUri: resultTranscriptArtifact.uri,
     resultTranscriptHash: resultTranscriptArtifact.hash,
-    errorJson: toolState === "SETTLED" ? null : JSON.stringify({ summary: input.result.summary }),
+    errorJson: toolState === "SETTLED"
+      ? null
+      : JSON.stringify({
+          summary: input.result.summary,
+          ...(input.denial === undefined ? {} : { denial: input.denial }),
+        }),
     truncation: input.result.truncation,
     observedSourceVersions: observedSourceVersionsOf(input.result),
   });
@@ -16731,7 +16813,9 @@ async function persistSettledToolResult(input: {
     resultHash: fullResultArtifact.hash,
     errorCode: status === "success" || status === "partial"
       ? null
-      : input.denial?.decisionId ?? input.denial?.decision ?? `TOOL_RESULT_${status.toUpperCase()}`,
+      : input.denial?.origin === "kernel"
+        ? "KERNEL_POLICY_DENIED"
+        : `TOOL_RESULT_${status.toUpperCase()}`,
     errorClass: status === "success" || status === "partial"
       ? null
       : input.denial?.origin === "kernel" ? "kernel_policy_denied" : status,
@@ -21688,6 +21772,116 @@ async function canResumeTurnAtBoundary(turnId: string, state: string): Promise<b
     || (state === "TOOL_SETTLEMENT" && toolCalls.length > 0);
 }
 
+type RecoveredKernelDenial = Extract<ToolDenialMetadata, { origin: "kernel" }>;
+
+/** Read the versioned denial envelope persisted at the tool-call boundary. */
+async function recoveredKernelDenialForTurn(turnId: string): Promise<RecoveredKernelDenial | null> {
+  const calls = await db.toolCall.findMany({
+    where: { turnId, state: "DENIED" },
+    orderBy: { settledAt: "desc" },
+    select: { errorJson: true },
+  });
+  for (const call of calls) {
+    const envelope = call.errorJson === null
+      ? null
+      : safeParse<Record<string, unknown> | null>(call.errorJson, null);
+    const denial = envelope?.denial;
+    if (denial === null || denial === undefined || typeof denial !== "object") continue;
+    const candidate = denial as Record<string, unknown>;
+    if (
+      candidate.schemaVersion !== TOOL_DENIAL_SCHEMA_VERSION
+      || candidate.origin !== "kernel"
+      || candidate.disposition !== "terminal"
+      || typeof candidate.decision !== "string"
+      || (candidate.decisionId !== null && typeof candidate.decisionId !== "string")
+      || typeof candidate.explanation !== "string"
+    ) continue;
+    return {
+      schemaVersion: TOOL_DENIAL_SCHEMA_VERSION,
+      origin: "kernel",
+      disposition: "terminal",
+      decision: candidate.decision,
+      decisionId: candidate.decisionId as string | null,
+      explanation: candidate.explanation,
+    };
+  }
+  return null;
+}
+
+/** Idempotently settle a turn after a crash following a durable kernel denial. */
+async function settleRecoveredKernelPolicyDenial(input: {
+  readonly id: string;
+  readonly taskId: string | null;
+  readonly state: string;
+  readonly denial: RecoveredKernelDenial;
+}): Promise<void> {
+  const terminalError = {
+    code: "KERNEL_POLICY_DENIED",
+    category: "policy_denied",
+    message: input.denial.explanation,
+    reason: "policy_denied",
+    details: {
+      schema_version: input.denial.schemaVersion,
+      origin: input.denial.origin,
+      disposition: input.denial.disposition,
+      decision: input.denial.decision,
+      decision_id: input.denial.decisionId,
+      explanation: input.denial.explanation,
+    },
+  };
+  await mutateAgentState(async () => {
+    const current = await db.turn.findUnique({ where: { id: input.id }, select: { state: true } });
+    if (current === null || ["COMPLETED", "INTERRUPTED", "FAILED", "BUDGET_EXHAUSTED", "POLICY_DENIED", "BLOCKED", "USER_ACTION_REQUIRED", "ABORTED"].includes(current.state)) {
+      return;
+    }
+    const settledAt = new Date();
+    await emit({
+      eventType: "turn.policy_denied",
+      aggregateType: "turn",
+      aggregateId: input.id,
+      correlationId: input.taskId ?? undefined,
+      idempotencyKey: `turn-policy-denied-recovery:${input.id}`,
+      payload: terminalError,
+    }, async (tx) => {
+      await tx.providerAttempt.updateMany({
+        where: { turnId: input.id, status: "running" },
+        data: { status: "failed", completedAt: settledAt, errorJson: JSON.stringify(terminalError) },
+      });
+      const turn = await tx.turn.updateMany({
+        where: { id: input.id, state: input.state },
+        data: {
+          state: "POLICY_DENIED",
+          completedAt: settledAt,
+          terminalErrorJson: JSON.stringify(terminalError),
+        },
+      });
+      if (turn.count !== 1) throw new Error(`turn ${input.id} changed during policy-denial recovery`);
+      if (input.taskId !== null) {
+        await tx.task.updateMany({
+          where: { id: input.taskId, status: { in: ["ACTIVE", "VERIFYING"] } },
+          data: {
+            status: "POLICY_DENIED",
+            phase: "VERIFY",
+            completedAt: settledAt,
+            terminalReasonJson: JSON.stringify(terminalError),
+          },
+        });
+      }
+    });
+    if (input.taskId !== null) {
+      await emit({
+        eventType: "task.turn_policy_denied",
+        aggregateType: "task",
+        aggregateId: input.taskId,
+        correlationId: input.taskId,
+        idempotencyKey: `task-policy-denied-recovery:${input.id}`,
+        payload: { status: "POLICY_DENIED", active_turn: null, ...terminalError },
+      });
+      await synchronizeV1TaskProjection(input.taskId, "task.turn_policy_denied");
+    }
+  });
+}
+
 /** Finish a verified turn after a crash between admission and publication. */
 async function recoverVerifiedOrFinalizingTurn(input: {
   readonly id: string;
@@ -21993,6 +22187,16 @@ async function recoverActiveAgentTurns(): Promise<number> {
       // A repair row is authoritative once scheduling commits. Leave this
       // admission window for recoverDurableRepairAttempts instead of
       // quarantining the parent as an uncertain verifier restart.
+      continue;
+    }
+    const recoveredDenial = await recoveredKernelDenialForTurn(turn.id);
+    if (recoveredDenial !== null) {
+      await settleRecoveredKernelPolicyDenial({
+        id: turn.id,
+        taskId: turn.taskId,
+        state: turn.state,
+        denial: recoveredDenial,
+      });
       continue;
     }
     if (repairAttemptId !== null && (turn.state === "REPAIRING" || turn.state === "CONTEXT_COMPILING")) {
