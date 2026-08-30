@@ -1,6 +1,6 @@
 # Static inventory
 
-> Auto-generated from the source tree by `tools/codegen/inventory.ts`.
+> Auto-generated from Git-tracked source at HEAD by `tools/codegen/inventory.ts`.
 > Do not edit by hand — run `just codegen`.
 
 **Honesty boundary:** every count below is a STATIC source scan at HEAD.
@@ -18,7 +18,7 @@ A declared test is not a passing run. Executed-test evidence lives in CI
 | Declared Rust tests | 592 | `#[test]` + `#[tokio::test]` occurrences in crates/** (excl. generated) |
 | TypeScript test files | 169 | `*.test.{ts,tsx}` in packages/ + apps/ |
 | Declared TypeScript test blocks | 1595 | `test(/it(` occurrences in those files |
-| Declared Python tests | 458 | `def test_*` in python/** |
+| Declared Python tests | 452 | `def test_*` in python/** |
 | ADRs | 52 | docs/decisions/ADR-*.md |
 | Runbooks | 15 | docs/runbooks/*.md |
 | SQLite migrations | 29 | migrations/sqlite/*.sql |
