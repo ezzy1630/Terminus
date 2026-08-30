@@ -885,8 +885,13 @@ describe("shell-mode gating", () => {
     let started = false;
     const clients = {
       process: {
-        Start: () => {
+        Start: (request: {
+          intent: { policyProfileId: string };
+          sandboxProfileId: string;
+        }) => {
           started = true;
+          expect(request.intent.policyProfileId).toBe("workspace-development");
+          expect(request.sandboxProfileId).toBe("secure-local-default");
           return {
             subscribe: (observer: { complete: () => void }) => {
               observer.complete();
@@ -911,7 +916,9 @@ describe("shell-mode gating", () => {
       policyDecisionId: "pd",
       traceId: "trace",
       contractHash: "hash",
-      devMode: false,
+      // Development mode must never turn unattended execution into an
+      // implicit host-level bypass.
+      devMode: true,
       shellModeEnabled: false,
     }).catch(() => undefined);
     await attempt;

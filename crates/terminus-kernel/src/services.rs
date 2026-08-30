@@ -1957,6 +1957,7 @@ mod sandbox_profile_tests {
 pub struct ProcessService {
     process: Arc<ProcessManager>,
     policy: Arc<PolicyEngine>,
+    workspace_development_policy: Result<Arc<PolicyEngine>, String>,
     token_issuer: Arc<TokenIssuer>,
     approvals: Arc<ApprovalStore>,
     workspaces: WorkspaceService,
@@ -2032,6 +2033,10 @@ impl std::fmt::Debug for ProcessService {
         f.debug_struct("ProcessService")
             .field("process", &self.process)
             .field("policy", &self.policy)
+            .field(
+                "workspace_development_policy_loaded",
+                &self.workspace_development_policy.is_ok(),
+            )
             .field("workspaces", &self.workspaces)
             .finish_non_exhaustive()
     }
@@ -2048,6 +2053,10 @@ impl ProcessService {
         Self {
             process,
             policy,
+            workspace_development_policy: terminus_policy::workspace_development_rule_set()
+                .map(PolicyEngine::new)
+                .map(Arc::new)
+                .map_err(|error| error.to_string()),
             token_issuer,
             approvals,
             workspaces,
@@ -2068,6 +2077,68 @@ impl ProcessService {
     pub fn with_egress_broker(mut self, proxy: Arc<EgressProxy>, root: PathBuf) -> Self {
         self.egress_broker = Some(EgressBrokerConfig { proxy, root });
         self
+    }
+
+    fn command_policy<'a>(
+        &'a self,
+        token: &terminus_authz::CapabilityToken,
+        requested_profile_id: &str,
+        sandbox_profile_id: &str,
+    ) -> KernelResult<&'a PolicyEngine> {
+        match requested_profile_id {
+            "" | "default" | terminus_policy::SECURE_LOCAL_DEFAULT_POLICY_PROFILE_ID => {
+                Ok(&self.policy)
+            }
+            terminus_policy::WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID => {
+                if !token
+                    .allows_policy_profile(terminus_policy::WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID)
+                {
+                    return Err(KernelError::new(
+                        terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                        terminus_kernel_protocol::ErrorCategory::Permission,
+                        "capability token does not authorize command policy profile `workspace-development`",
+                        false,
+                    ));
+                }
+                let workspace_scope = &token.claims.max_scope.workspace_paths;
+                if workspace_scope.len() != 1 || workspace_scope[0] != "**" {
+                    return Err(KernelError::new(
+                        terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                        terminus_kernel_protocol::ErrorCategory::Permission,
+                        "workspace-development policy requires an explicit whole-workspace capability scope",
+                        false,
+                    ));
+                }
+                if !matches!(
+                    sandbox_profile_id,
+                    "secure-local-default" | "default-restrictive"
+                ) {
+                    return Err(KernelError::new(
+                        terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                        terminus_kernel_protocol::ErrorCategory::Permission,
+                        "workspace-development policy requires an enforced secure sandbox profile",
+                        false,
+                    ));
+                }
+                self.workspace_development_policy
+                    .as_ref()
+                    .map(Arc::as_ref)
+                    .map_err(|error| {
+                        KernelError::new(
+                            terminus_kernel_protocol::ErrorCode::IntegrityCheckFailed,
+                            terminus_kernel_protocol::ErrorCategory::Integrity,
+                            format!("workspace-development policy failed to load: {error}"),
+                            false,
+                        )
+                    })
+            }
+            other => Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                format!("unknown command policy profile `{other}`"),
+                false,
+            )),
+        }
     }
 
     #[cfg(unix)]
@@ -2154,19 +2225,17 @@ impl ProcessService {
         normalized.working_directory = command.cwd.relative_path.clone();
         normalized.secret_capabilities = command.secret_capability_uris.clone();
         normalized.effect_types.insert(EffectType::ExecuteLocal);
+        if !command.secret_capability_uris.is_empty() {
+            normalized.effect_types.insert(EffectType::SecretUse);
+        }
         // Heuristic effect classification: shell scripts and known network
         // binaries get extra effect types so the policy engine can match on
         // them.
         if command.shell.enabled {
-            normalized.shell_ast = Some(terminus_policy::ShellAst::Script {
-                dialect: if command.shell.dialect.is_empty() {
-                    "sh".to_string()
-                } else {
-                    command.shell.dialect.clone()
-                },
-                script: command.shell.script.clone(),
-            });
-            normalized.effect_types.insert(EffectType::ExecuteLocal);
+            let parsed = terminus_policy::ShellAst::parse(&command.shell.script);
+            normalized.shell_ast = parsed.shell_ast;
+            normalized.redirections = parsed.redirections;
+            normalized.effect_types.extend(parsed.effect_types);
         }
         let program_basename = command
             .program
@@ -2278,6 +2347,8 @@ impl ProcessService {
             OperationClass::Exec,
             &requested_scope,
         )?;
+        let command_policy =
+            self.command_policy(&token, &intent.policy_profile_id, sandbox_profile_id)?;
         let cwd_safe = terminus_fs::SafePath::new(&command.cwd.relative_path).map_err(|error| {
             KernelError::new(
                 terminus_kernel_protocol::ErrorCode::InvalidArgument,
@@ -2337,7 +2408,7 @@ impl ProcessService {
         let tainted = !normalized.taint_sources.is_empty();
 
         // §31.3 step 7: evaluate command/resource policy.
-        let mut report = self.policy.evaluate(&normalized);
+        let mut report = command_policy.evaluate(&normalized);
 
         // Taint elevation: a tainted privileged effect must not auto-allow.
         if tainted
@@ -2639,6 +2710,7 @@ impl ProcessService {
             args = ?command.args,
             cwd = %command.cwd.relative_path,
             decision = ?report.decision,
+            policy_profile_id = %intent.policy_profile_id,
             rule_ids = ?report.rule_ids,
             decision_id = %report.decision_id,
             sandbox_backend = %enforcement.backend_id,

@@ -694,6 +694,8 @@ export interface MintTaskCapabilityRequest {
   secretCapabilities: string[];
   /** 1..300 */
   ttlSeconds: number;
+  /** Non-default command policies this token may select */
+  policyProfileIds: string[];
 }
 
 export interface MintTaskCapabilityResponse {
@@ -6921,6 +6923,7 @@ function createBaseMintTaskCapabilityRequest(): MintTaskCapabilityRequest {
     networkDestinations: [],
     secretCapabilities: [],
     ttlSeconds: 0,
+    policyProfileIds: [],
   };
 }
 
@@ -6957,6 +6960,9 @@ export const MintTaskCapabilityRequest: MessageFns<MintTaskCapabilityRequest> = 
     }
     if (message.ttlSeconds !== 0) {
       writer.uint32(80).uint64(message.ttlSeconds);
+    }
+    for (const v of message.policyProfileIds) {
+      writer.uint32(90).string(v!);
     }
     return writer;
   },
@@ -7058,6 +7064,14 @@ export const MintTaskCapabilityRequest: MessageFns<MintTaskCapabilityRequest> = 
           message.ttlSeconds = longToNumber(reader.uint64());
           continue;
         }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.policyProfileIds.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7084,6 +7098,7 @@ export const MintTaskCapabilityRequest: MessageFns<MintTaskCapabilityRequest> = 
     message.networkDestinations = object.networkDestinations?.map((e) => e) || [];
     message.secretCapabilities = object.secretCapabilities?.map((e) => e) || [];
     message.ttlSeconds = object.ttlSeconds ?? 0;
+    message.policyProfileIds = object.policyProfileIds?.map((e) => e) || [];
     return message;
   },
 };

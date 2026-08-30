@@ -31,8 +31,8 @@ export interface PermissionProfile {
 export const PERMISSION_PROFILES: readonly PermissionProfile[] = [
   {
     id: "full-access",
-    label: "Full access",
-    description: "Edits files and runs commands without asking",
+    label: "Full workspace access",
+    description: "Runs commands and edits this workspace without asking; host access stays sandboxed",
   },
   {
     id: "auto",

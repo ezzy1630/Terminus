@@ -86,6 +86,15 @@ pub fn default_rule_set() -> RuleSet {
     file.into_rule_set()
 }
 
+/// A bounded but broad local-development policy. The signed capability and
+/// enforced sandbox decide whether a caller may select it; this rule set only
+/// decides which classified commands may start once selected.
+pub fn workspace_development_rule_set() -> Result<RuleSet, crate::PolicyError> {
+    let yaml = include_str!("../../../policies/command/workspace-development.yaml");
+    let file: RuleSetFile = serde_yaml::from_str(yaml)?;
+    Ok(file.into_rule_set())
+}
+
 /// A representative default rule set YAML string. In production this is read
 /// from `policies/command/default.yaml`; the two MUST stay in sync (see
 /// `shipped_yaml_file_matches_the_compiled_default` below).
@@ -393,5 +402,30 @@ mod tests {
             default_rule_set(),
             "policies/command/default.yaml has drifted from sample_rule_set_yaml()"
         );
+    }
+
+    #[test]
+    fn workspace_development_allows_arbitrary_local_exec_with_bounds() {
+        let engine = crate::PolicyEngine::new(
+            workspace_development_rule_set().expect("embedded development policy parses"),
+        );
+        let report = engine.evaluate(&exec("/usr/bin/make", &["test"]));
+        assert_eq!(report.decision, crate::Decision::AllowWithConstraints);
+        assert_eq!(report.constraints.max_runtime_ms, Some(600_000));
+        assert_eq!(report.constraints.max_output_bytes, Some(16_777_216));
+    }
+
+    #[test]
+    fn workspace_development_denies_raw_network_and_external_state() {
+        let engine = crate::PolicyEngine::new(
+            workspace_development_rule_set().expect("embedded development policy parses"),
+        );
+        let mut curl = exec("/usr/bin/curl", &["https://example.com"]);
+        curl.effect_types.insert(EffectType::NetworkRead);
+        assert_eq!(engine.evaluate(&curl).decision, crate::Decision::Deny);
+
+        let mut deploy = exec("/usr/bin/terraform", &["apply"]);
+        deploy.effect_types.insert(EffectType::ExternalStateWrite);
+        assert_eq!(engine.evaluate(&deploy).decision, crate::Decision::Deny);
     }
 }

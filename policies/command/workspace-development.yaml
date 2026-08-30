@@ -1,0 +1,65 @@
+# Capability-bound command policy for unattended work inside an enforced
+# workspace sandbox. This policy expands which local programs may start; it
+# does not widen filesystem, network, secret, or external-state authority.
+
+rules:
+  - id: allow-workspace-development-exec
+    description: Allow bounded local programs inside the enforced workspace sandbox
+    priority: 10
+    match:
+      effects_any: ["EXECUTE_LOCAL"]
+    effect:
+      kind: allow_with_constraints
+      constraint:
+        max_runtime_ms: 600000
+        max_output_bytes: 16777216
+        disallowed_env:
+          ["ANTHROPIC_API_KEY", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "OPENAI_API_KEY"]
+
+  - id: deny-workspace-development-network
+    description: Raw command network access must use a kernel broker
+    priority: 40
+    match:
+      effects_any: ["NETWORK_READ", "NETWORK_WRITE"]
+    effect:
+      kind: deny
+  - id: deny-workspace-development-external-state
+    description: External state mutation must use a typed connector
+    priority: 50
+    match:
+      effects_any: ["EXTERNAL_STATE_WRITE"]
+    effect:
+      kind: deny
+
+  - id: deny-workspace-development-secret-use
+    description: Local programs may not receive ambient secret authority
+    priority: 50
+    match:
+      effects_any: ["SECRET_USE", "CREDENTIAL_ADMIN"]
+    effect:
+      kind: deny
+
+  - id: deny-workspace-development-security-administration
+    description: Coding commands may not administer sandboxes or plugins
+    priority: 50
+    match:
+      effects_any: ["SANDBOX_ADMIN", "PLUGIN_ADMIN"]
+    effect:
+      kind: deny
+
+  - id: deny-workspace-development-download-pipe-interpreter
+    description: Deny download-to-interpreter installation pipelines
+    priority: 60
+    match:
+      - executable_any: ["curl", "wget"]
+        argv_contains_any: ["|", "bash", "sh", "python", "perl"]
+      - shell_script_contains_all: ["curl", "| bash"]
+      - shell_script_contains_all: ["curl", "| sh"]
+      - shell_script_contains_all: ["curl", "|bash"]
+      - shell_script_contains_all: ["curl", "|sh"]
+      - shell_script_contains_all: ["wget", "| bash"]
+      - shell_script_contains_all: ["wget", "| sh"]
+      - shell_script_contains_all: ["wget", "|bash"]
+      - shell_script_contains_all: ["wget", "|sh"]
+    effect:
+      kind: deny

@@ -31,6 +31,10 @@ import {
   resolveKernelRequestContext,
   type KernelRequestContextSource,
 } from "./kernel-request-context.js";
+import {
+  SECURE_LOCAL_SANDBOX_PROFILE_ID,
+  WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID,
+} from "./kernel-policy-profiles.js";
 
 /**
  * Tool cycles are the *batches* of tool calls a turn may settle. The step
@@ -2280,7 +2284,11 @@ export async function executeStandaloneTool(
         try {
           start = await withAbortSignal(input.clients.jobs.Start({
             context: nextRequestContext(context, "exec-background"),
-            intent: toolIntent(input.contractHash, "execute_local"),
+            intent: toolIntent(
+              input.contractHash,
+              "execute_local",
+              WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID,
+            ),
             command: {
               program: shell !== undefined ? "" : assertProgram(input.call.arguments.program),
               args: shell !== undefined ? [] : [...input.call.arguments.args],
@@ -2292,7 +2300,9 @@ export async function executeStandaloneTool(
               shell: shell === undefined ? undefined : { enabled: true, dialect: shell.dialect, script: shell.script },
               allowUnboundedTimeout: false,
             },
-            sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
+            // Full workspace access is unattended, not unsandboxed. Local
+            // development uses the same enforced boundary as a packaged run.
+            sandboxProfileId: SECURE_LOCAL_SANDBOX_PROFILE_ID,
             outputPolicyId: "tool-result-bounded",
             durable: false,
           }), input.signal);
@@ -2318,7 +2328,11 @@ export async function executeStandaloneTool(
       try {
         const events = input.clients.process.Start({
           context: nextRequestContext(context, "exec"),
-          intent: toolIntent(input.contractHash, "execute_local"),
+          intent: toolIntent(
+            input.contractHash,
+            "execute_local",
+            WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID,
+          ),
           command: {
             program: shell !== undefined ? "" : assertProgram(input.call.arguments.program),
             args: shell !== undefined ? [] : [...input.call.arguments.args],
@@ -2333,7 +2347,7 @@ export async function executeStandaloneTool(
             shell: shell === undefined ? undefined : { enabled: true, dialect: shell.dialect, script: shell.script },
             allowUnboundedTimeout: false,
           },
-          sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
+          sandboxProfileId: SECURE_LOCAL_SANDBOX_PROFILE_ID,
           outputPolicyId: "tool-result-bounded",
         });
         return await settleProcessOutcome(input, events, startedAt);
@@ -2362,7 +2376,7 @@ export async function executeStandaloneTool(
             shell: undefined,
             allowUnboundedTimeout: false,
           },
-          sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
+          sandboxProfileId: SECURE_LOCAL_SANDBOX_PROFILE_ID,
           outputPolicyId: "tool-result-bounded",
         });
         return await settleProcessOutcome(input, events, startedAt);
@@ -3020,14 +3034,18 @@ function nextRequestContext(context: RequestContext, suffix: string): RequestCon
   };
 }
 
-function toolIntent(contractHash: string, effectClass: string) {
+function toolIntent(
+  contractHash: string,
+  effectClass: string,
+  policyProfileId = SECURE_LOCAL_SANDBOX_PROFILE_ID,
+) {
   return {
     userIntentRef: "task-contract",
     taskContractHash: contractHash,
     trustLabel: "derived",
     confidentialityLabel: "workspace",
     taintSources: [],
-    policyProfileId: "secure-local-default",
+    policyProfileId,
     expectedEffectClass: effectClass,
   };
 }

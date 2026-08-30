@@ -914,6 +914,9 @@ pub struct MintTaskCapabilityRequest {
     /// 1..300
     #[prost(uint64, tag="10")]
     pub ttl_seconds: u64,
+    /// Non-default command policies this token may select
+    #[prost(string, repeated, tag="11")]
+    pub policy_profile_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MintTaskCapabilityResponse {

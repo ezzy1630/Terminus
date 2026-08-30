@@ -9,8 +9,8 @@
  *
  * Three levels, mirroring the Codex app's control:
  *
- *   full-access  Edits files and runs commands without asking. The default,
- *                and exactly what the old behaviour was.
+ *   full-access  Edits files and runs commands in the sandboxed workspace
+ *                without asking. The default.
  *   auto         Works freely inside the workspace; asks before anything
  *                that leaves it (network fetches).
  *   ask          Asks before every edit, command, or fetch. Reads, searches
@@ -77,7 +77,11 @@ export interface PermissionProfileDescription {
 export function describePermissionProfile(profile: PermissionProfile): PermissionProfileDescription {
   switch (profile) {
     case "full-access":
-      return { id: profile, label: "Full access", summary: "Edits files and runs commands without asking." };
+      return {
+        id: profile,
+        label: "Full workspace access",
+        summary: "Runs commands and edits this workspace without asking; host access stays sandboxed.",
+      };
     case "auto":
       return { id: profile, label: "Auto", summary: "Works in the workspace freely; asks before network access." };
     case "ask":

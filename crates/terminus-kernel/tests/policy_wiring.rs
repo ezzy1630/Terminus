@@ -39,6 +39,15 @@ fn empty_intent() -> EffectIntent {
     }
 }
 
+fn workspace_development_intent() -> EffectIntent {
+    EffectIntent {
+        trust_label: "trusted".to_string(),
+        confidentiality_label: "workspace".to_string(),
+        policy_profile_id: "workspace-development".to_string(),
+        ..Default::default()
+    }
+}
+
 fn mint_admin_token(issuer: &TokenIssuer) -> String {
     let binder = TokenBinder {
         principal: "test".to_string(),
@@ -86,6 +95,39 @@ fn mint_token_with_classes(issuer: &TokenIssuer, classes: &[OperationClass]) -> 
         )
         .and_then(|t| t.encode())
         .expect("mint token")
+}
+
+fn mint_workspace_development_exec_token(issuer: &TokenIssuer) -> String {
+    mint_workspace_development_exec_token_with_scope(
+        issuer,
+        Scope::deny_unspecified(vec!["**".to_string()], Vec::new(), Vec::new()),
+        "test-nonce-workspace-development",
+    )
+}
+
+fn mint_workspace_development_exec_token_with_scope(
+    issuer: &TokenIssuer,
+    scope: Scope,
+    nonce: &str,
+) -> String {
+    let binder = TokenBinder {
+        principal: "test".to_string(),
+        session_id: "test".to_string(),
+        task_id: "test".to_string(),
+        workspace_id: "*".to_string(),
+        kernel_instance_id: String::new(),
+    };
+    issuer
+        .mint_with_policy_profiles(
+            binder,
+            vec![OperationClass::Exec],
+            vec!["workspace-development".to_string()],
+            scope,
+            None,
+            nonce,
+        )
+        .and_then(|token| token.encode())
+        .expect("mint workspace-development token")
 }
 
 fn make_kernel() -> (tempfile::TempDir, KernelHandle) {
@@ -220,6 +262,152 @@ async fn process_start_allows_local_tests_via_pnpm() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn secure_default_still_denies_unlisted_local_programs() {
+    let (_dir, kernel) = make_kernel();
+    let token = mint_token_with_classes(&kernel.token_issuer, &[OperationClass::Exec]);
+    let ctx = ctx_with_token(&token);
+    let command = CommandSpec {
+        program: "/usr/bin/true".to_string(),
+        cwd: WorkspacePath::new("ws-1", "."),
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    let error = kernel
+        .processes
+        .start_in_profile(&ctx, &empty_intent(), command, "degraded-local")
+        .await
+        .expect_err("secure default must remain default-deny");
+    assert_eq!(error.code(), ErrorCode::PolicyDenied);
+}
+
+#[tokio::test]
+async fn workspace_development_requires_a_profile_bound_capability() {
+    let (_dir, kernel) = make_kernel();
+    let token = mint_token_with_classes(&kernel.token_issuer, &[OperationClass::Exec]);
+    let ctx = ctx_with_token(&token);
+    let command = CommandSpec {
+        program: "/usr/bin/true".to_string(),
+        cwd: WorkspacePath::new("ws-1", "."),
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    let error = kernel
+        .processes
+        .start_in_profile(
+            &ctx,
+            &workspace_development_intent(),
+            command,
+            "secure-local-default",
+        )
+        .await
+        .expect_err("an ordinary Exec token must not select a broader policy");
+    assert_eq!(error.code(), ErrorCode::PermissionDenied);
+    assert_eq!(error.category(), ErrorCategory::Permission);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn workspace_development_runs_arbitrary_local_programs_when_bound() {
+    let (_dir, kernel) = make_kernel();
+    let token = mint_workspace_development_exec_token(&kernel.token_issuer);
+    let ctx = ctx_with_token(&token);
+    let command = CommandSpec {
+        program: "/usr/bin/true".to_string(),
+        cwd: WorkspacePath::new("ws-1", "."),
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    kernel
+        .processes
+        .start_in_profile(
+            &ctx,
+            &workspace_development_intent(),
+            command,
+            "secure-local-default",
+        )
+        .await
+        .expect("profile-bound local program starts under the enforced macOS sandbox");
+}
+
+#[tokio::test]
+async fn workspace_development_rejects_a_degraded_sandbox() {
+    let (_dir, kernel) = make_kernel();
+    let token = mint_workspace_development_exec_token(&kernel.token_issuer);
+    let ctx = ctx_with_token(&token);
+    let command = CommandSpec {
+        program: "/usr/bin/true".to_string(),
+        cwd: WorkspacePath::new("ws-1", "."),
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    let error = kernel
+        .processes
+        .start_in_profile(
+            &ctx,
+            &workspace_development_intent(),
+            command,
+            "degraded-local",
+        )
+        .await
+        .expect_err("workspace-development must never use the degraded sandbox");
+    assert_eq!(error.code(), ErrorCode::PermissionDenied);
+}
+
+#[tokio::test]
+async fn workspace_development_rejects_a_narrow_workspace_scope() {
+    let (dir, kernel) = make_kernel();
+    std::fs::create_dir_all(dir.path().join("src/subdir")).expect("create scoped cwd");
+    let token = mint_workspace_development_exec_token_with_scope(
+        &kernel.token_issuer,
+        Scope::deny_unspecified(vec!["src/**".to_string()], Vec::new(), Vec::new()),
+        "test-nonce-narrow-workspace-development",
+    );
+    let ctx = ctx_with_token(&token);
+    let command = CommandSpec {
+        program: "/usr/bin/true".to_string(),
+        cwd: WorkspacePath::new("ws-1", "src/subdir"),
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    let error = kernel
+        .processes
+        .start_in_profile(
+            &ctx,
+            &workspace_development_intent(),
+            command,
+            "secure-local-default",
+        )
+        .await
+        .expect_err("workspace development must never exceed a narrow workspace scope");
+    assert_eq!(error.code(), ErrorCode::PermissionDenied);
+}
+
+#[tokio::test]
+async fn workspace_development_still_denies_classified_raw_network_commands() {
+    let (_dir, kernel) = make_kernel();
+    let token = mint_workspace_development_exec_token(&kernel.token_issuer);
+    let ctx = ctx_with_token(&token);
+    let command = CommandSpec {
+        program: "/usr/bin/curl".to_string(),
+        args: vec!["https://example.com".to_string()],
+        cwd: WorkspacePath::new("ws-1", "."),
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    let error = kernel
+        .processes
+        .start_in_profile(
+            &ctx,
+            &workspace_development_intent(),
+            command,
+            "secure-local-default",
+        )
+        .await
+        .expect_err("workspace development must not grant raw network access");
+    assert_eq!(error.code(), ErrorCode::PolicyDenied);
 }
 
 #[tokio::test]
