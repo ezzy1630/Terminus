@@ -255,8 +255,8 @@ def decode_task_contract(
             raise ContractDecodeError("policy risk_class lowers the task risk")
         risk = policy_risk
         budgets = _compose_budgets(task_budgets, _budget_overrides(policy))
-        # A policy's ``secrets`` key normally names a policy file, not a
-        # capability list (for example ``policy.secrets points to policies/secrets/default``).
+        # A policy's ``secrets`` field normally points at the
+        # ``policies/secrets/default`` file, not a capability list.
         # Only explicit capability keys are meaningful in policy.yaml.
         policy_secrets = _secret_uris(policy, source="policy", include_legacy_secrets=False)
         secrets = tuple(dict.fromkeys((*task_secrets, *policy_secrets)))

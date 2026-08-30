@@ -345,10 +345,11 @@ describe("Anthropic Messages Connector", () => {
       ...DEFAULT_PROVIDER_CAPS,
       reasoning: { supported: false, budgetControl: false, summaryAvailable: false },
     };
+    const legacyModelId = "claude-3-5-haiku-20241022" as ModelKey;
     const rendered = await renderRequest({
       ...input,
       provider,
-      model: { ...DEFAULT_MODEL_CAPS, modelKey: ("claude-" + "3-5-haiku-20241022") as ModelKey, snapshot: provider },
+      model: { ...DEFAULT_MODEL_CAPS, modelKey: legacyModelId, snapshot: provider },
       outputProfile: "terse",
     });
     const body = rendered.body as Record<string, unknown>;

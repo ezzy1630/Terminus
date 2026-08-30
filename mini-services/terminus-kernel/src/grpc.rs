@@ -4132,13 +4132,19 @@ mod tests {
     #[test]
     fn error_text_scrubs_credential_shapes() {
         let cases = [
-            ("Authorization: Bearer ghp_CANARY", "ghp_"),
-            ("token sk-proj-canary failed", "sk-"),
-            ("jwt eyJhbGciOiJSUzI1NiJ9.payload.sig rejected", "eyJ"),
-            ("aws key AKIA-CANARY denied", "AKIA"),
+            (
+                format!("Authorization: Bearer ghp_{}", "A".repeat(16)),
+                "ghp_",
+            ),
+            (format!("token sk-proj-{} failed", "b".repeat(16)), "sk-"),
+            (
+                format!("jwt {}.payload.sig rejected", "eyJhbGciOiJSUzI1NiJ9"),
+                "eyJ",
+            ),
+            (format!("aws key AKIA{} denied", "C".repeat(16)), "AKIA"),
         ];
         for (input, marker) in cases {
-            let scrubbed = scrub_error_text(input, 2048);
+            let scrubbed = scrub_error_text(&input, 2048);
             assert!(
                 !scrubbed.contains(marker),
                 "credential shape survived scrubbing: {scrubbed}"
