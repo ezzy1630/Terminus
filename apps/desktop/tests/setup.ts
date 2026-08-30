@@ -1,28 +1,39 @@
 import "@testing-library/jest-dom/vitest";
 
-// jsdom on the bundled Node runtime can expose an opaque-origin window
-// without localStorage. The theme store intentionally persists user choices,
-// so provide a deterministic storage implementation for offline tests.
-if (!window.localStorage) {
-  const values = new Map<string, string>();
-  Object.defineProperty(window, "localStorage", {
-    configurable: true,
-    value: {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => values.set(key, value),
-      removeItem: (key: string) => values.delete(key),
-      clear: () => values.clear(),
-      key: (index: number) => [...values.keys()][index] ?? null,
-      get length() { return values.size; },
-    } satisfies Storage,
-  });
+// Node can expose an unavailable process-wide localStorage object instead of
+// jsdom's browser implementation. Install one deterministic browser-shaped
+// store so renderer tests and Storage.prototype spies share the same realm.
+class TestStorage implements Storage {
+  readonly #values = new Map<string, string>();
+
+  get length(): number {
+    return this.#values.size;
+  }
+
+  clear(): void {
+    this.#values.clear();
+  }
+
+  getItem(key: string): string | null {
+    return this.#values.get(key) ?? null;
+  }
+
+  key(index: number): string | null {
+    return [...this.#values.keys()][index] ?? null;
+  }
+
+  removeItem(key: string): void {
+    this.#values.delete(key);
+  }
+
+  setItem(key: string, value: string): void {
+    this.#values.set(key, value);
+  }
 }
 
-// Node can expose an experimental process-wide Storage constructor. Renderer
-// code uses the window realm, so tests must spy on that same prototype.
-Object.defineProperty(globalThis, "Storage", {
-  configurable: true,
-  value: window.Storage,
+Object.defineProperties(window, {
+  Storage: { configurable: true, value: TestStorage },
+  localStorage: { configurable: true, value: new TestStorage() },
 });
 
 // Polyfill ResizeObserver for jsdom
