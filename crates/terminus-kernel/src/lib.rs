@@ -11,7 +11,6 @@
 #![forbid(unsafe_code)]
 
 mod approvals;
-pub mod computer_use;
 pub mod connectors;
 mod error;
 mod ledger;

@@ -176,8 +176,6 @@ fn required_operation_class(method: &axum::http::Method, path: &str) -> Option<O
         OperationClass::Extension
     } else if path.starts_with("/v1/artifacts/ingest") || path.starts_with("/v1/artifacts/gc") {
         OperationClass::ArtifactIngest
-    } else if path.starts_with("/v1/computer/") {
-        OperationClass::ComputerUse
     } else {
         return None;
     };

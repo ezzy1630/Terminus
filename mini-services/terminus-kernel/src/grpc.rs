@@ -27,9 +27,6 @@ use protocol::artifact_ingest_service_server::{
 use protocol::code_intelligence_service_server::{
     CodeIntelligenceService as CodeIntelligenceRpc, CodeIntelligenceServiceServer,
 };
-use protocol::computer_use_service_server::{
-    ComputerUseService as ComputerUseRpc, ComputerUseServiceServer,
-};
 use protocol::connector_service_server::{
     ConnectorService as ConnectorServiceRpc, ConnectorServiceServer,
 };
@@ -524,7 +521,7 @@ fn decode_task_operation_classes(
             "at least one operation class is required",
         ));
     }
-    if raw_operations.len() > 12 {
+    if raw_operations.len() > 11 {
         return Err(Status::invalid_argument(
             "too many operation classes requested",
         ));
@@ -572,9 +569,6 @@ fn decode_task_operation_classes(
             }
             protocol::CapabilityOperationProto::CapabilityOperationArtifactIngest => {
                 terminus_authz::OperationClass::ArtifactIngest
-            }
-            protocol::CapabilityOperationProto::CapabilityOperationComputerUse => {
-                terminus_authz::OperationClass::ComputerUse
             }
         };
         if operations.contains(&operation) {
@@ -1179,93 +1173,6 @@ impl ExtensionRuntimeRpc for GrpcKernel {
                 report.reason
             },
         }))
-    }
-}
-
-#[tonic::async_trait]
-impl ComputerUseRpc for GrpcKernel {
-    async fn observe(
-        &self,
-        request: Request<protocol::ComputerObserveRequest>,
-    ) -> Result<Response<protocol::ComputerObserveResponse>, Status> {
-        let request = request.into_inner();
-        let context = request
-            .context
-            .map(context)
-            .ok_or_else(|| Status::invalid_argument("context is required"))?;
-        terminus_kernel::validate_capability_for_op(
-            &self.kernel.token_issuer,
-            &context,
-            terminus_authz::OperationClass::ComputerUse,
-            &terminus_authz::Scope::default(),
-        )
-        .map_err(status)?;
-        terminus_kernel::computer_use::validate_observe_request(
-            &request.browser_session_id,
-            request.viewport_width,
-            request.viewport_height,
-            request.max_screenshot_bytes,
-        )
-        .map_err(|error| Status::invalid_argument(error.to_string()))?;
-        Err(Status::unavailable(
-            "no authenticated isolated-browser adapter is configured; no browser effect was attempted",
-        ))
-    }
-
-    async fn act(
-        &self,
-        request: Request<protocol::ComputerActRequest>,
-    ) -> Result<Response<protocol::ComputerActResponse>, Status> {
-        let request = request.into_inner();
-        let context = request
-            .context
-            .map(context)
-            .ok_or_else(|| Status::invalid_argument("context is required"))?;
-        terminus_kernel::validate_capability_for_op(
-            &self.kernel.token_issuer,
-            &context,
-            terminus_authz::OperationClass::ComputerUse,
-            &terminus_authz::Scope::default(),
-        )
-        .map_err(status)?;
-        let action = match protocol::ComputerActionKind::try_from(request.action) {
-            Ok(protocol::ComputerActionKind::ComputerActionNavigate) => {
-                terminus_kernel::computer_use::BrowserActionKind::Navigate
-            }
-            Ok(protocol::ComputerActionKind::ComputerActionClick) => {
-                terminus_kernel::computer_use::BrowserActionKind::Click
-            }
-            Ok(protocol::ComputerActionKind::ComputerActionTypeText) => {
-                terminus_kernel::computer_use::BrowserActionKind::TypeText
-            }
-            Ok(protocol::ComputerActionKind::ComputerActionScroll) => {
-                terminus_kernel::computer_use::BrowserActionKind::Scroll
-            }
-            Ok(protocol::ComputerActionKind::ComputerActionWait) => {
-                terminus_kernel::computer_use::BrowserActionKind::Wait
-            }
-            Ok(protocol::ComputerActionKind::ComputerActionUnspecified) | Err(_) => {
-                return Err(Status::invalid_argument(
-                    "action is not in the governed browser allowlist",
-                ));
-            }
-        };
-        terminus_kernel::computer_use::validate_action_request(
-            &request.browser_session_id,
-            &request.observation_id,
-            request.observation_version,
-            action,
-            &request.target_id,
-            &request.navigation_url,
-            &request.text,
-            request.scroll_x,
-            request.scroll_y,
-            request.wait_ms,
-        )
-        .map_err(|error| Status::invalid_argument(error.to_string()))?;
-        Err(Status::unavailable(
-            "no authenticated isolated-browser adapter is configured; no browser effect was attempted",
-        ))
     }
 }
 
@@ -3618,11 +3525,6 @@ pub async fn serve_grpc(
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
         )
         .add_service(
-            ComputerUseServiceServer::new(service.clone())
-                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
-                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
-        )
-        .add_service(
             WorkspaceServiceServer::new(service.clone())
                 .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
@@ -3767,11 +3669,6 @@ pub async fn serve_grpc_mtls(
         )
         .add_service(
             JobServiceServer::new(service.clone())
-                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
-                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
-        )
-        .add_service(
-            ComputerUseServiceServer::new(service.clone())
                 .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
         )

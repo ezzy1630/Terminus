@@ -767,135 +767,6 @@ pub struct BootstrapControlCapabilities {
     pub expires_at_unix: u64,
 }
 // =============================================================================
-// Governed browser computer-use service (ADR-0041, SPEC §25)
-// =============================================================================
-
-/// Computer use is deliberately a separate capability from generic process,
-/// network, and artifact access. The kernel must own the browser lease and
-/// reject requests when no authenticated, isolated adapter is configured.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ComputerObserveRequest {
-    #[prost(message, optional, tag="1")]
-    pub context: ::core::option::Option<RequestContext>,
-    #[prost(message, optional, tag="2")]
-    pub intent: ::core::option::Option<EffectIntent>,
-    #[prost(string, tag="3")]
-    pub browser_session_id: ::prost::alloc::string::String,
-    #[prost(uint32, tag="4")]
-    pub viewport_width: u32,
-    #[prost(uint32, tag="5")]
-    pub viewport_height: u32,
-    #[prost(uint64, tag="6")]
-    pub max_screenshot_bytes: u64,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SemanticBrowserTarget {
-    #[prost(string, tag="1")]
-    pub target_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub role: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub accessible_name: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub selector: ::prost::alloc::string::String,
-    #[prost(double, tag="5")]
-    pub x: f64,
-    #[prost(double, tag="6")]
-    pub y: f64,
-    #[prost(double, tag="7")]
-    pub width: f64,
-    #[prost(double, tag="8")]
-    pub height: f64,
-    #[prost(string, tag="9")]
-    pub text_snippet: ::prost::alloc::string::String,
-    #[prost(double, tag="10")]
-    pub confidence: f64,
-    #[prost(string, tag="11")]
-    pub semantic_hash: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ComputerObservation {
-    #[prost(string, tag="1")]
-    pub observation_id: ::prost::alloc::string::String,
-    #[prost(uint64, tag="2")]
-    pub observation_version: u64,
-    #[prost(string, tag="3")]
-    pub browser_session_id: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub url: ::prost::alloc::string::String,
-    #[prost(string, tag="5")]
-    pub title: ::prost::alloc::string::String,
-    #[prost(uint32, tag="6")]
-    pub viewport_width: u32,
-    #[prost(uint32, tag="7")]
-    pub viewport_height: u32,
-    #[prost(message, optional, tag="8")]
-    pub screenshot: ::core::option::Option<ArtifactRef>,
-    #[prost(message, optional, tag="9")]
-    pub semantic_tree: ::core::option::Option<ArtifactRef>,
-    #[prost(message, repeated, tag="10")]
-    pub targets: ::prost::alloc::vec::Vec<SemanticBrowserTarget>,
-    #[prost(bool, tag="11")]
-    pub screenshot_truncated: bool,
-    #[prost(string, tag="12")]
-    pub continuation_token: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="13")]
-    pub receipt: ::core::option::Option<ArtifactRef>,
-    #[prost(string, tag="14")]
-    pub trust_label: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ComputerObserveResponse {
-    #[prost(message, optional, tag="1")]
-    pub observation: ::core::option::Option<ComputerObservation>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ComputerActRequest {
-    #[prost(message, optional, tag="1")]
-    pub context: ::core::option::Option<RequestContext>,
-    #[prost(message, optional, tag="2")]
-    pub intent: ::core::option::Option<EffectIntent>,
-    #[prost(string, tag="3")]
-    pub browser_session_id: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub observation_id: ::prost::alloc::string::String,
-    #[prost(uint64, tag="5")]
-    pub observation_version: u64,
-    #[prost(enumeration="ComputerActionKind", tag="6")]
-    pub action: i32,
-    #[prost(string, tag="7")]
-    pub target_id: ::prost::alloc::string::String,
-    #[prost(string, tag="8")]
-    pub navigation_url: ::prost::alloc::string::String,
-    #[prost(string, tag="9")]
-    pub text: ::prost::alloc::string::String,
-    #[prost(double, tag="10")]
-    pub scroll_x: f64,
-    #[prost(double, tag="11")]
-    pub scroll_y: f64,
-    #[prost(uint64, tag="12")]
-    pub wait_ms: u64,
-    #[prost(string, tag="13")]
-    pub origin: ::prost::alloc::string::String,
-    #[prost(string, tag="14")]
-    pub approval_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ComputerActResponse {
-    #[prost(string, tag="1")]
-    pub action_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub outcome: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="3")]
-    pub pre_observation: ::core::option::Option<ComputerObservation>,
-    #[prost(message, optional, tag="4")]
-    pub post_observation: ::core::option::Option<ComputerObservation>,
-    #[prost(message, optional, tag="5")]
-    pub receipt: ::core::option::Option<ArtifactRef>,
-    #[prost(string, tag="6")]
-    pub failure_reason: ::prost::alloc::string::String,
-}
-// =============================================================================
 // Workspace service (SPEC §31.1)
 // =============================================================================
 
@@ -1605,44 +1476,6 @@ impl PatchCommitMode {
         }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum ComputerActionKind {
-    ComputerActionUnspecified = 0,
-    ComputerActionNavigate = 1,
-    ComputerActionClick = 2,
-    ComputerActionTypeText = 3,
-    ComputerActionScroll = 4,
-    ComputerActionWait = 5,
-}
-impl ComputerActionKind {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::ComputerActionUnspecified => "COMPUTER_ACTION_UNSPECIFIED",
-            Self::ComputerActionNavigate => "COMPUTER_ACTION_NAVIGATE",
-            Self::ComputerActionClick => "COMPUTER_ACTION_CLICK",
-            Self::ComputerActionTypeText => "COMPUTER_ACTION_TYPE_TEXT",
-            Self::ComputerActionScroll => "COMPUTER_ACTION_SCROLL",
-            Self::ComputerActionWait => "COMPUTER_ACTION_WAIT",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "COMPUTER_ACTION_UNSPECIFIED" => Some(Self::ComputerActionUnspecified),
-            "COMPUTER_ACTION_NAVIGATE" => Some(Self::ComputerActionNavigate),
-            "COMPUTER_ACTION_CLICK" => Some(Self::ComputerActionClick),
-            "COMPUTER_ACTION_TYPE_TEXT" => Some(Self::ComputerActionTypeText),
-            "COMPUTER_ACTION_SCROLL" => Some(Self::ComputerActionScroll),
-            "COMPUTER_ACTION_WAIT" => Some(Self::ComputerActionWait),
-            _ => None,
-        }
-    }
-}
 // =============================================================================
 // Sandbox service (SPEC §13, §31.1)
 // =============================================================================
@@ -1733,7 +1566,6 @@ pub enum CapabilityOperationProto {
     CapabilityOperationExtension = 9,
     CapabilityOperationGit = 10,
     CapabilityOperationArtifactIngest = 11,
-    CapabilityOperationComputerUse = 12,
 }
 impl CapabilityOperationProto {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1754,7 +1586,6 @@ impl CapabilityOperationProto {
             Self::CapabilityOperationExtension => "CAPABILITY_OPERATION_EXTENSION",
             Self::CapabilityOperationGit => "CAPABILITY_OPERATION_GIT",
             Self::CapabilityOperationArtifactIngest => "CAPABILITY_OPERATION_ARTIFACT_INGEST",
-            Self::CapabilityOperationComputerUse => "CAPABILITY_OPERATION_COMPUTER_USE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1772,7 +1603,6 @@ impl CapabilityOperationProto {
             "CAPABILITY_OPERATION_EXTENSION" => Some(Self::CapabilityOperationExtension),
             "CAPABILITY_OPERATION_GIT" => Some(Self::CapabilityOperationGit),
             "CAPABILITY_OPERATION_ARTIFACT_INGEST" => Some(Self::CapabilityOperationArtifactIngest),
-            "CAPABILITY_OPERATION_COMPUTER_USE" => Some(Self::CapabilityOperationComputerUse),
             _ => None,
         }
     }
