@@ -1,7 +1,7 @@
 # Terminus harness and macOS app: current snapshot, executed fixes, and target
 
-**Date:** 2026-08-29  
-**Scope:** the harness first; the native macOS desktop app second. Website, Windows, and unrelated product surfaces are excluded.  
+**Date:** 2026-08-29
+**Scope:** the harness first; the native macOS desktop app second. Website, Windows, and unrelated product surfaces are excluded.
 **Observed checkout:** `main` at `76b7a3e734a0ab12f2a77addf710b1073ec16bc6`, 35 commits ahead of `origin/main`, with a large pre-existing dirty Phase-0 implementation. This report does not attribute or commit those existing changes.
 
 ## Verdict
