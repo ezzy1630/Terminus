@@ -1,0 +1,57 @@
+hypothesis: >-
+  Deriving compaction pressure from the selected model budget while preserving an
+  exact obligation anchor and recursive source lineage will improve long-horizon
+  completion without reducing requirement recall or restart correctness.
+target_cohort: compaction_mid_implementation
+changed_components:
+  - terminus.adaptive-compaction.v1
+  - terminus.compaction-summary.v2
+  - compaction policy telemetry
+predicted_improvements:
+  small_window_preflight_failures: -1.0
+  requirement_recall_rate: 0.05
+  exact_source_recall_rate: 0.05
+predicted_regressions:
+  summary_call_rate: 0.05
+  prompt_cache_read_rate: -0.02
+metrics:
+  - verified_successful_tasks_per_dollar_hour
+  - required_criterion_recall_rate
+  - exact_scope_retention_rate
+  - exact_source_recall_rate
+  - duplicate_effect_count
+  - repeated_compaction_attempt_count
+  - compaction_injection_escape_count
+  - summary_failure_rate
+  - prompt_cache_read_rate
+  - provider_input_tokens
+  - wall_clock_ms
+budget:
+  max_cost_usd: 50.0
+  max_wall_seconds: 14400
+  max_tool_calls: 2000
+seeds: 5
+holdouts:
+  - interruption_resume
+  - long_horizon
+  - tiny_bugfix
+rollback_condition:
+  metric: required_criterion_recall_rate
+  threshold: ">= 0.0"
+  action: rollback
+owner: context-owner
+observed:
+  primary_metric_delta: null
+  secondary_metric_deltas: {}
+  confidence_intervals: {}
+  security_guardrail_results: {}
+  cost_guardrail_results: {}
+  regression_cohorts: []
+  notes: >-
+    Local deterministic policy, compaction, lineage, and serialize/restart/recall
+    tests pass. No paired provider-backed cohort has been run, so this is not
+    promotion evidence.
+decision: retain_experimental
+decision_reason: >-
+  The candidate is implemented on an isolated branch, but the required paired
+  cohort and two context-policy approvals are still absent.
