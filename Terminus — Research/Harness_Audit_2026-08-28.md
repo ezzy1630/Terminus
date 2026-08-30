@@ -64,7 +64,7 @@ Test evidence (run during audit): `cargo test --workspace` → **438 passed, 0 f
 
 ### P1 — Tokens, cost, latency (the efficiency objective)
 
-5. **Fix the compaction-trigger N+1** (`index.ts:12808`): batch artifact-metadata lookup into one kernel RPC (or persist episode byteSize on the episode row at write time — simplest, zero RPC). 
+5. **Fix the compaction-trigger N+1** (`index.ts:12808`): batch artifact-metadata lookup into one kernel RPC (or persist episode byteSize on the episode row at write time — simplest, zero RPC).
 6. **Sample the evidence ceremony**: make `operationContext`/`onOperationObserved` opt-in per effect class (keep for writes; drop for reads). Measure before/after on eval tokens.
 7. **Cache discipline**: adopt pi's placement — verify breakpoints land on last tool def + last user message; add session-affinity `prompt_cache_key` for OpenAI-compatible providers; add a live cache-hit-rate + cost footer (pi's `cache-stats.ts` is the reference).
 8. **Loop guards**: (a) length-stop ⇒ fail all tool calls in that message without executing (pi `failToolCallsFromTruncatedMessage`); (b) JSON repair on malformed tool args; (c) repetition guard (verbatim-window detection); (d) empty-response guard with fallback; (e) verification nudge — already half-built: the verification-repair-controller exists (`verification-repair-controller.ts`), extend to block finish-after-edit without fresh evidence.

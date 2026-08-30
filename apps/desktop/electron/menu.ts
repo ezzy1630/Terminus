@@ -225,4 +225,3 @@ export function repositoryLinksFrom(metadata: Readonly<Record<string, unknown>>)
   const base = `${url.origin}${url.pathname.replace(/\/$/, "")}`;
   return { documentationUrl: `${base}#readme`, issuesUrl: `${base}/issues/new` };
 }
-
