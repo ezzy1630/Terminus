@@ -112,6 +112,9 @@ interface RuntimeEnvironmentInput extends RuntimeStatePaths {
   readonly userHomePath: string;
   /** PATH inherited by Electron. Finder launches may supply only system dirs. */
   readonly inheritedPath?: string | undefined;
+  /** Optional per-user roots used by the installed provider CLIs. */
+  readonly userXdgDataHome?: string | undefined;
+  readonly userCodexHome?: string | undefined;
   readonly controlToken: string;
   readonly controlInstanceNonce: string;
   readonly bootstrapToken: string;
@@ -335,6 +338,8 @@ export class StandaloneRuntimeSupervisor {
       userDataPath: this.input.userDataPath,
       userHomePath: this.input.userHomePath,
       inheritedPath: process.env.PATH,
+      userXdgDataHome: process.env.XDG_DATA_HOME,
+      userCodexHome: process.env.CODEX_HOME,
       controlToken: this.connection.controlToken,
       controlInstanceNonce,
       bootstrapToken: randomToken(),
@@ -563,6 +568,11 @@ export function runtimeEnvironments(input: RuntimeEnvironmentInput): RuntimeEnvi
     TERMINUS_CONTROL_CORS_ORIGIN: "terminus://app",
     TERMINUS_CONTROL_INSTANCE_NONCE: input.controlInstanceNonce,
   };
+  // Provider discovery runs in the kernel process. These are path-only hints,
+  // never credentials; the kernel still applies its existing filesystem and
+  // secret-store policy to the requested roots.
+  addAbsolutePathEnvironment(kernel, "XDG_DATA_HOME", input.userXdgDataHome);
+  addAbsolutePathEnvironment(kernel, "CODEX_HOME", input.userCodexHome);
   if (input.providerCommandJson !== undefined && input.providerCommandJson.trim().length > 0) {
     control.TERMINUS_LOCAL_PROVIDER_COMMAND_JSON = input.providerCommandJson;
   }
@@ -583,6 +593,18 @@ export function userToolchainPath(userHomePath: string, inheritedPath?: string):
     join(userHomePath, ".cargo", "bin"),
     join(userHomePath, ".bun", "bin"),
     join(userHomePath, ".local", "bin"),
+    join(userHomePath, ".local", "share", "mise", "shims"),
+    join(userHomePath, ".asdf", "shims"),
+    join(userHomePath, ".mise", "shims"),
+    join(userHomePath, ".nodenv", "shims"),
+    join(userHomePath, ".nvm", "current", "bin"),
+    join(userHomePath, ".npm-global", "bin"),
+    join(userHomePath, ".pyenv", "shims"),
+    join(userHomePath, ".rye", "shims"),
+    join(userHomePath, ".yarn", "bin"),
+    join(userHomePath, "Library", "pnpm"),
+    join(userHomePath, "go", "bin"),
+    join(userHomePath, "bin"),
     join(userHomePath, ".volta", "bin"),
     "/opt/homebrew/bin",
     "/opt/homebrew/sbin",
@@ -595,6 +617,14 @@ export function userToolchainPath(userHomePath: string, inheritedPath?: string):
     ...(inheritedPath ?? "").split(delimiter),
   ];
   return [...new Set(candidates.filter((entry) => isAbsolute(entry)))].join(delimiter);
+}
+
+function addAbsolutePathEnvironment(
+  environment: NodeJS.ProcessEnv,
+  name: "XDG_DATA_HOME" | "CODEX_HOME",
+  value: string | undefined,
+): void {
+  if (value !== undefined && isAbsolute(value)) environment[name] = value;
 }
 
 async function prepareState(

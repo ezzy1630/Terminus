@@ -116,8 +116,11 @@ describe("the connected accounts section", () => {
     const chatgpt = await screen.findByTestId("provider-account-mock-account-chatgpt");
     expect(chatgpt).toHaveTextContent("ChatGPT");
     expect(chatgpt).toHaveTextContent("Codex CLI login");
-    expect(chatgpt).toHaveTextContent("Connected");
-    expect(chatgpt).toHaveTextContent("Default");
+    expect(chatgpt).toHaveTextContent("Unsupported");
+    expect(chatgpt).toHaveTextContent("ChatGPT/Codex subscription login was detected");
+    // The current local credential bridge is not an approved Terminus-native
+    // model route, so it must not claim to be the active default.
+    expect(within(chatgpt).queryByText("Default")).not.toBeInTheDocument();
     expect(chatgpt).toHaveTextContent("4 models");
     // Rendered in the reader's own locale and zone, so the assertion is on the
     // clause rather than on one spelling of the date.
@@ -293,15 +296,25 @@ describe("install and sign-in hints", () => {
   test("names a missing CLI rather than a missing account", () => {
     expect(discoveryHints(discovery({ installed_tools: [] }), []))
       .toEqual([
-        "Codex CLI not installed — no ChatGPT login was found to import.",
-        "OpenCode not installed — no API keys were found to import.",
+        "Codex CLI is not installed — install it, then run `codex` to connect ChatGPT.",
+        "OpenCode is not installed — install it, then run `opencode auth login` to connect a provider.",
       ]);
   });
 
   test("tells an operator with the CLI installed how to sign in", () => {
     expect(discoveryHints(discovery(), [])).toEqual([
-      "Codex CLI is installed but not signed in — run `codex` to sign in.",
-      "OpenCode is installed but its auth store holds no usable key — run `opencode auth login`.",
+      "Codex CLI is installed but no usable ChatGPT login was found — run `codex` to sign in.",
+      "OpenCode is installed but no usable provider login was found — run `opencode auth login`.",
+    ]);
+  });
+
+  test("calls out an installed login that needs action", () => {
+    expect(discoveryHints(discovery(), [
+      account({ id: "expired-codex", source: "codex-chatgpt", status: "expired" }),
+      account({ id: "broken-opencode", status: "error", status_detail: "The provider rejected this credential." }),
+    ])).toEqual([
+      "ChatGPT login is expired — run `codex` to sign in again.",
+      "OpenCode provider login is unavailable — The provider rejected this credential. Run `opencode auth login` to reconnect it.",
     ]);
   });
 
@@ -316,7 +329,16 @@ describe("install and sign-in hints", () => {
     expect(discoveryHints(discovery(), [
       account({ id: "z", source: "zen", display_name: "OpenCode Zen", auth_kind: "anonymous" }),
     ])).toEqual([
-      "Codex CLI is installed but not signed in — run `codex` to sign in.",
+      "Codex CLI is installed but no usable ChatGPT login was found — run `codex` to sign in.",
+    ]);
+  });
+
+  test("does not claim a detected ChatGPT login can route a Terminus turn", () => {
+    expect(discoveryHints(discovery(), [
+      account({ id: "codex", source: "codex-chatgpt", status: "unsupported" }),
+    ])).toEqual([
+      "A ChatGPT/Codex subscription login was detected, but Terminus-native routing is unavailable. Use an API provider or a future official Codex adapter.",
+      "OpenCode is installed but no usable provider login was found — run `opencode auth login`.",
     ]);
   });
 
@@ -324,7 +346,7 @@ describe("install and sign-in hints", () => {
     installList(response([], { discovery: discovery({ installed_tools: ["opencode"] }) }));
     render(<ProviderAccountSettings />);
 
-    expect(await screen.findByText(/Codex CLI not installed/)).toBeInTheDocument();
+    expect(await screen.findByText(/Codex CLI is not installed/)).toBeInTheDocument();
   });
 });
 
@@ -384,7 +406,7 @@ describe("the first-launch notice", () => {
     const view = render(<ProviderAccountsNotice />);
 
     expect(await screen.findByTestId("provider-accounts-notice"))
-      .toHaveTextContent("Connected 2 providers — 1 from OpenCode and your ChatGPT login.");
+      .toHaveTextContent("Connected 1 provider from OpenCode.");
 
     await user.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByTestId("provider-accounts-notice")).not.toBeInTheDocument();
@@ -407,7 +429,7 @@ describe("the first-launch notice", () => {
 
     installList(response([
       account({ id: "mock-a", source: "opencode:baseten" }),
-      account({ id: "mock-b", source: "codex-chatgpt" }),
+      account({ id: "mock-b", source: "opencode:cerebras" }),
     ]));
     render(<ProviderAccountsNotice />);
 
