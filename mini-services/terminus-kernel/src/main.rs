@@ -219,6 +219,9 @@ fn build_router(state: Arc<AppState>) -> Router {
         // ----- KernelInfoService -----
         .route("/v1/info", post(handlers::info::info))
         .route("/v1/health", post(handlers::info::health))
+        // ----- Governed ComputerUseService -----
+        .route("/v1/computer/observe", post(handlers::computer::observe))
+        .route("/v1/computer/act", post(handlers::computer::act))
         // ----- WorkspaceService -----
         .route(
             "/v1/workspaces/register",

@@ -26,6 +26,7 @@ pub enum OperationClass {
     Extension,
     Git,
     ArtifactIngest,
+    ComputerUse,
     Admin,
 }
 
@@ -44,6 +45,7 @@ impl OperationClass {
             Self::Extension => "extension",
             Self::Git => "git",
             Self::ArtifactIngest => "artifact_ingest",
+            Self::ComputerUse => "computer_use",
             Self::Admin => "admin",
         }
     }
