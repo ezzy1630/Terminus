@@ -182,7 +182,7 @@ function TaskSearchImpl({
     const all: Row[] = [
       { kind: "action", id: "action:new", label: "New task", icon: <SquarePen size={15} strokeWidth={1.6} aria-hidden />, hint: shortcutDisplay(FIXED_SHORTCUTS.newTask), run: onNewTask },
       { kind: "action", id: "action:open", label: "Open project", icon: <FolderOpen size={15} strokeWidth={1.6} aria-hidden />, hint: shortcutDisplay(FIXED_SHORTCUTS.openProject), run: onOpenProject },
-      { kind: "action", id: "action:board", label: "Kanban", icon: <Columns3 size={15} strokeWidth={1.6} aria-hidden />, run: onOpenBoard },
+      { kind: "action", id: "action:board", label: "All Tasks", icon: <Columns3 size={15} strokeWidth={1.6} aria-hidden />, run: onOpenBoard },
       { kind: "action", id: "action:commands", label: "Commands", icon: <Terminal size={15} strokeWidth={1.6} aria-hidden />, hint: shortcutDisplay(FIXED_SHORTCUTS.commandPalette), run: onOpenCommands },
     ];
     if (!trimmed) return all;

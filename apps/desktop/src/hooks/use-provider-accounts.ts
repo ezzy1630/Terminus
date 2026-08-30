@@ -2,11 +2,9 @@
  * Terminus Desktop — Connected provider accounts.
  *
  * Terminus does not ask an operator to paste a key. The credentials it can use
- * are the ones their own tools already hold — the OpenCode auth store. The
- * separate Codex subscription lane is shown below this account list and is
- * never imported into native routing. This hook reads the resulting list and
- * offers explicit Connect for a disconnected OpenCode API account, plus make
- * default and disconnect for an already connected credential.
+ * are the ones their own tools already hold — the OpenCode and Codex auth
+ * stores. This hook reads the resulting list and offers explicit Connect,
+ * make-default, and disconnect operations.
  *
  * Three properties this file exists to hold:
  *
@@ -39,9 +37,6 @@ const EMPTY_DISCOVERY: ProviderAccountDiscovery = {
   opencode_store_status: null,
   warnings: [],
 };
-
-const CODEX_SUBSCRIPTION_UNAVAILABLE =
-  "A ChatGPT/Codex subscription login was detected. Use the separate external Codex lane; it is not Terminus-native routing.";
 
 /** Set by the dev mock so design review has rows to look at. */
 declare global {
@@ -96,21 +91,8 @@ function messageFor(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.trim().length > 0 ? error.message : fallback;
 }
 
-/**
- * A Codex CLI login is an observed local credential, not a native Terminus
- * model route. Keep it visible so the operator understands what was found;
- * subscription use is handled by the separate external lane.
- */
 function normalizeAccounts(accounts: readonly ProviderAccount[]): readonly ProviderAccount[] {
-  return accounts.map((account) => {
-    if (account.source !== "codex-chatgpt" || account.status !== "connected") return account;
-    return {
-      ...account,
-      status: "unsupported",
-      status_detail: CODEX_SUBSCRIPTION_UNAVAILABLE,
-      is_default: false,
-    };
-  });
+  return accounts;
 }
 
 export function useProviderAccounts(): ProviderAccountsState {
@@ -127,7 +109,13 @@ export function useProviderAccounts(): ProviderAccountsState {
   // Mutations resolve after the component may have unmounted (Settings is a
   // dialog); writing state then is a React warning and a leak.
   const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    // React Strict Mode runs setup → cleanup → setup in development. Restore
+    // the live marker in setup or every async account mutation appears to
+    // hang forever after its successful server response.
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -229,8 +217,9 @@ export function useProviderAccounts(): ProviderAccountsState {
   }, [reload, state.accounts]);
 
   const connect = useCallback(async (account: ProviderAccount): Promise<void> => {
-    if (!account.source.startsWith("opencode:") || account.status !== "disconnected") {
-      setState((current) => ({ ...current, error: "Only disconnected OpenCode API accounts can be connected here." }));
+    const locallyImportable = account.source.startsWith("opencode:") || account.source === "codex-chatgpt";
+    if (!locallyImportable || account.status !== "disconnected") {
+      setState((current) => ({ ...current, error: "Only disconnected local provider accounts can be connected here." }));
       return;
     }
     if (!account.credential_fingerprint) {
@@ -322,7 +311,10 @@ export function useCodexLane(identity: CodexLaneIdentity | null): CodexLaneState
   const mounted = useRef(true);
   const eventCursor = useRef<string | null>(null);
 
-  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     eventCursor.current = null;
@@ -469,7 +461,7 @@ export function useCodexLane(identity: CodexLaneIdentity | null): CodexLaneState
  * showed it raw would be asking the reader to know the naming scheme.
  */
 export function accountSourceLabel(source: string): string {
-  if (source === "codex-chatgpt") return "Codex CLI login (external lane)";
+  if (source === "codex-chatgpt") return "ChatGPT subscription login";
   if (source === "zen") return "OpenCode Zen";
   if (source.startsWith("opencode:")) return "OpenCode auth store";
   return source;
@@ -500,17 +492,17 @@ export function discoveryHints(
   const codexAccounts = accounts.filter((account) => account.source === "codex-chatgpt");
   const opencodeAccounts = accounts.filter((account) => account.source.startsWith("opencode:"));
   const hasCodex = codexAccounts.some((account) => account.status === "connected");
-  const hasUnsupportedCodex = codexAccounts.some((account) => account.status === "unsupported");
+  const hasDisconnectedCodex = codexAccounts.some((account) => account.status === "disconnected");
   const hasVendorKeys = opencodeAccounts.some((account) => account.status === "connected");
   const hasZen = accounts.some((account) => account.source === "zen" && account.status === "connected");
   if (!installed("codex")) {
     hints.push("Codex CLI is not installed — install it, then run `codex` to connect ChatGPT.");
   } else if (!hasCodex) {
     const expired = codexAccounts.some((account) => account.status === "expired");
-    hints.push(hasUnsupportedCodex
-      ? CODEX_SUBSCRIPTION_UNAVAILABLE
-      : expired
+    hints.push(expired
       ? "ChatGPT login is expired — run `codex` to sign in again."
+      : hasDisconnectedCodex
+      ? "ChatGPT login is available — select Connect to approve its exact credential and destination."
       : "Codex CLI is installed but no usable ChatGPT login was found — run `codex` to sign in.");
   }
   if (!installed("opencode")) {

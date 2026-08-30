@@ -138,6 +138,10 @@ function inertStream(): ArpV2EventStream {
   };
 }
 
+async function showKanban(): Promise<void> {
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Kanban view" }));
+}
+
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
@@ -147,14 +151,12 @@ afterEach(() => {
 });
 
 describe("mission board domain mapping", () => {
-  test("registers the board as an actionable desktop command", () => {
+  test("registers all tasks as an actionable desktop command", () => {
     const openMissionBoard = vi.fn();
     const command = buildDefaultCommands({ openMissionBoard })
       .find((candidate) => candidate.id === "nav.mission-board");
 
-    // One name for one surface: the rail's row, the page heading and the
-    // palette entry all say "Board".
-    expect(command?.label).toBe("Open board");
+    expect(command?.label).toBe("Open all tasks");
     command?.action();
     expect(openMissionBoard).toHaveBeenCalledOnce();
   });
@@ -352,7 +354,7 @@ describe("MissionBoardView", () => {
 
     const first = render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
     await user.click(await screen.findByRole("button", { name: "List view" }));
-    await user.type(screen.getByRole("textbox", { name: "Search mission board" }), "Audit");
+    await user.type(screen.getByRole("textbox", { name: "Search all tasks" }), "Audit");
     const firstScrollRoot = first.container.querySelector<HTMLElement>(".mission-board-scroll");
     expect(firstScrollRoot).not.toBeNull();
     if (firstScrollRoot !== null) {
@@ -364,8 +366,8 @@ describe("MissionBoardView", () => {
 
     const second = render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
     expect(await screen.findByRole("button", { name: "List view" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("textbox", { name: "Search mission board" })).toHaveValue("Audit");
-    expect(screen.getByRole("table", { name: "Board tasks" })).toHaveTextContent("Audit authentication");
+    expect(screen.getByRole("textbox", { name: "Search all tasks" })).toHaveValue("Audit");
+    expect(screen.getByRole("table", { name: "All tasks" })).toHaveTextContent("Audit authentication");
     expect(screen.queryByText("Add token refresh")).not.toBeInTheDocument();
     const secondScrollRoot = second.container.querySelector<HTMLElement>(".mission-board-scroll");
     expect(secondScrollRoot).toMatchObject({ scrollLeft: 96, scrollTop: 144 });
@@ -386,7 +388,7 @@ describe("MissionBoardView", () => {
 
     render(<MissionBoardView onOpenTask={onOpenTask} onInspectTask={onInspectTask} />);
 
-    expect(await screen.findByRole("heading", { name: "Board" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "All Tasks" })).toBeInTheDocument();
     expect(screen.getByText("Add token refresh")).toBeInTheDocument();
     expect(screen.getByText("Repair OAuth callback")).toBeInTheDocument();
     expect(screen.getByText("Audit authentication")).toBeInTheDocument();
@@ -395,11 +397,11 @@ describe("MissionBoardView", () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "List view" }));
-    expect(screen.getByRole("table", { name: "Board tasks" })).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "All tasks" })).toBeInTheDocument();
     const runningRow = screen.getByRole("row", { name: /Repair OAuth callback/ });
     expect(runningRow.tagName).toBe("DIV");
     expect(runningRow).toContainElement(screen.getByRole("button", { name: "Repair OAuth callback" }));
-    await user.click(screen.getByRole("button", { name: "Board view" }));
+    await user.click(screen.getByRole("button", { name: "Kanban view" }));
 
     const boardGrid = screen.getByTestId("mission-board-grid");
     // One column per stage, always on one row: an auto-fit track count would
@@ -429,7 +431,7 @@ describe("MissionBoardView", () => {
     const user = userEvent.setup();
 
     render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
-    await user.type(await screen.findByRole("textbox", { name: "Search mission board" }), "missing task");
+    await user.type(await screen.findByRole("textbox", { name: "Search all tasks" }), "missing task");
 
     expect(screen.getByRole("heading", { name: "No matching tasks" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "No tasks yet" })).not.toBeInTheDocument();
@@ -452,6 +454,7 @@ describe("MissionBoardView", () => {
     const transition = vi.spyOn(arpV2, "transitionTask").mockResolvedValue(runningTask);
 
     render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
+    await showKanban();
     const card = await screen.findByTestId("mission-board-card-task-paused");
     const workingColumn = screen.getByTestId("mission-board-column-working");
 
@@ -480,6 +483,7 @@ describe("MissionBoardView", () => {
     vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
 
     render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
+    await showKanban();
 
     const attention = await screen.findByTestId("mission-board-column-needs_you");
     // Each card says which of the four different things it wants.
@@ -507,6 +511,7 @@ describe("MissionBoardView", () => {
     const user = userEvent.setup();
 
     render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
+    await showKanban();
 
     const done = await screen.findByTestId("mission-board-column-done");
     expect(done).toHaveTextContent("Ship token refresh");
@@ -527,6 +532,7 @@ describe("MissionBoardView", () => {
     vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
 
     render(<MissionBoardView onOpenTask={onOpenTask} onInspectTask={() => {}} />);
+    await showKanban();
 
     const first = await screen.findByTestId("mission-board-card-task-a");
     // One tab stop for the whole board, then arrows.
@@ -558,6 +564,7 @@ describe("MissionBoardView", () => {
     const user = userEvent.setup();
 
     render(<MissionBoardView onOpenTask={onOpenTask} onInspectTask={() => {}} />);
+    await showKanban();
     const card = await screen.findByTestId("mission-board-card-task-mouse");
 
     // Clicking the body previews, the same as Space. The card body used to be
@@ -582,6 +589,7 @@ describe("MissionBoardView", () => {
     const user = userEvent.setup();
 
     render(<MissionBoardView onOpenTask={onOpenTask} onInspectTask={() => {}} />);
+    await showKanban();
     await screen.findByTestId("mission-board-card-task-controls");
 
     // The title opens rather than previewing, even though the card underneath
@@ -599,6 +607,7 @@ describe("MissionBoardView", () => {
     vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
 
     render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
+    await showKanban();
     const card = await screen.findByTestId("mission-board-card-task-menu");
 
     fireEvent.contextMenu(card);
@@ -631,6 +640,7 @@ describe("MissionBoardView", () => {
     vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(stream);
 
     render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
+    await showKanban();
     // READY has not started, so it waits in Queued until the runtime picks it up.
     expect(await screen.findByTestId("mission-board-column-queued")).toHaveTextContent("Live task");
 

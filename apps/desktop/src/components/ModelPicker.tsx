@@ -1,11 +1,9 @@
 /**
  * Terminus Desktop — the composer's turn-routing control.
  *
- * One pill on the right of the composer states what the next turn runs as —
- * `<model> <effort>` — and opens a small settings popover over it. That shape
- * is deliberate: model and reasoning depth are one decision made in one place,
- * and the composer row previously spent two separate chips plus a context
- * figure saying it.
+ * One pill on the right of the composer names the exact model and its selected
+ * effort. Both come from live provider discovery; opaque project profiles do
+ * not replace the routing choice the operator is actually making.
  *
  * The popover is a pane stack rather than nested menus. The root states the
  * current values and nothing else; a row opens the list behind it. A flyout
@@ -44,6 +42,7 @@ import {
   EFFORT_LABELS,
   billingBadge,
   effortsFor,
+  formatContext,
   formatPricePerMillion,
   type ModelOption,
   type ModelSelection,
@@ -403,9 +402,8 @@ function ModelPickerImpl({
           open && "bg-hover",
         )}
       >
-        {/* The account mark leads: with several accounts connected, "Grok
-            Code" alone does not say which credential the turn bills to, and
-            two accounts can offer the same model. */}
+        {/* The account mark leads: with several accounts connected, the model
+            name alone does not say which credential the turn uses. */}
         {selectedAvailable && selectedAccount ? <ProviderMark mark={selectedAccount.mark} /> : null}
         <span className="truncate font-medium text-primary">{selected.label}</span>
         {effortLabel ? (
@@ -439,6 +437,19 @@ function ModelPickerImpl({
               {effortLabel ? (
                 <SettingRow label="Effort" value={effortLabel} onOpen={() => setPane("effort")} />
               ) : null}
+              <p className="mx-2.5 border-t border-subtle py-2 text-xs leading-relaxed text-tertiary">
+                {[
+                  effortsFor(selected).length > 0
+                    ? `Effort: ${effortsFor(selected).map((level) => EFFORT_LABELS[level].label).join(", ")}`
+                    : null,
+                  formatContext(selected.contextTokens) ? `${formatContext(selected.contextTokens)} context` : null,
+                  formatContext(selected.outputTokens ?? 0) ? `${formatContext(selected.outputTokens ?? 0)} max output` : null,
+                  selected.toolCalling ? "Tools" : null,
+                  selected.structuredOutput ? "Structured output" : null,
+                  selected.imageInput ? "Image input" : null,
+                  selected.parallelToolCalls ? "Parallel tools" : null,
+                ].filter(Boolean).join(" · ") || "No additional capabilities were reported for this model."}
+              </p>
             </div>
           ) : null}
 
@@ -575,6 +586,10 @@ function ModelPickerImpl({
                               <span className="mt-0.5 block truncate text-xs text-tertiary">
                                 {[
                                   model.note ?? providerById(model.provider).label,
+                                  effortsFor(model).length > 0
+                                    ? effortsFor(model).map((level) => EFFORT_LABELS[level].label).join("/")
+                                    : null,
+                                  formatContext(model.contextTokens) ? `${formatContext(model.contextTokens)} context` : null,
                                   // Price is a fact the provider stated, per
                                   // million input tokens. Absent when it
                                   // stated none — never estimated here.

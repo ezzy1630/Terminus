@@ -179,7 +179,7 @@ const PRESETS: Record<string, ErrorPreset> = {
   missingModel: {
     title: "Model not available",
     description:
-      "The configured model could not be loaded. Switch to a different model in Settings → Agents and Models.",
+      "The configured model could not be loaded. Switch to a different model in Settings > Models.",
     severity: "warning",
   },
   missingEditor: {

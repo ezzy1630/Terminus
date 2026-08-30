@@ -4,8 +4,8 @@
  * The first group under "Agents and Models", above the forms that still take a
  * key by hand. It is deliberately a *report*, not a form: these accounts came
  * from credential stores the operator's own tools already keep. Disconnected
- * OpenCode API accounts expose an explicit two-step Connect approval; connected
- * accounts can become the default or be disconnected with the row revision.
+ * Disconnected local accounts expose an explicit two-step Connect approval;
+ * connected accounts can become the default or be disconnected.
  *
  * Written in the same System Settings language as the rest of the pane: a
  * sentence-case heading, then a hairline-closed run of rows, label left and
@@ -198,7 +198,8 @@ function AccountRow({
           </>
         ) : (
           <>
-            {account.source.startsWith("opencode:") && account.status === "disconnected" ? (
+            {(account.source.startsWith("opencode:") || account.source === "codex-chatgpt")
+              && account.status === "disconnected" ? (
               <Button
                 variant="ghost"
                 size="sm"
@@ -247,7 +248,12 @@ function AccountRow({
   );
 }
 
-function CodexLaneSettings(): JSX.Element {
+/**
+ * Operational external-agent controls stay available to a future dedicated
+ * External Agents destination. Accounts settings must not become a second
+ * conversation surface.
+ */
+export function ExternalCodexLaneSettings(): JSX.Element {
   const sessions = useTerminusStore((state) => state.sessions);
   const selectedSessionId = useTerminusStore((state) => state.selectedSessionId);
   const session = sessions.find((candidate) => candidate.id === selectedSessionId) ?? sessions[0] ?? null;
@@ -401,7 +407,6 @@ export function ProviderAccountSettings(): JSX.Element {
 
   return (
     <>
-      <CodexLaneSettings />
       <section className="mb-6" aria-label="Connected accounts">
       <div className="mb-1.5 flex items-center justify-between gap-3">
         <h2 className="text-sm text-tertiary">Connected accounts</h2>

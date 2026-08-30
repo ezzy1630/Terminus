@@ -54,6 +54,18 @@ describe("ReviewPane", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  test("keeps review completion explicitly local when no authoritative endpoint exists", async () => {
+    render(<ReviewPane events={[patchEvent()]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+
+    const localReview = screen.getByRole("button", { name: "Mark reviewed locally" });
+    expect(localReview).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Draft change request" })).toBeDisabled();
+
+    await userEvent.setup().click(localReview);
+    expect(screen.getByRole("button", { name: "Reviewed locally" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("Reviewed in this window")).toBeInTheDocument();
+  });
+
   test("serializes pagination and deduplicates artifacts by immutable hash", async () => {
     let resolveNext: (page: Awaited<ReturnType<typeof api.listTaskArtifacts>>) => void = () => undefined;
     const list = vi.spyOn(api, "listTaskArtifacts")
@@ -159,7 +171,7 @@ describe("ReviewPane", () => {
     await browseArtifacts();
     fireEvent.click((await screen.findByText("sha256:artifact-a")).closest("button")!);
     expect(await screen.findByText("Keep this artifact-specific note.")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Add to composer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Draft change request" }));
     expect(onDraftRevision).toHaveBeenCalledWith(expect.stringContaining("immutable artifact sha256:artifact-a"));
   });
 
@@ -294,16 +306,16 @@ describe("ReviewPane", () => {
     );
     expect(screen.getByText("src/second.ts")).toBeInTheDocument();
     expect(screen.queryByText("Only for the first snapshot.")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add to composer" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Draft change request" })).toBeDisabled();
 
     await user.click(screen.getByRole("combobox", { name: "Change source" }));
     await user.click(await screen.findByRole("option", { name: /event event-first/ }));
     expect(await screen.findByText("Only for the first snapshot.")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Browse artifacts" }));
     expect(await screen.findByText("sha256:log")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add to composer" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Draft change request" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Review event diff" }));
-    fireEvent.click(screen.getByRole("button", { name: "Add to composer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Draft change request" }));
     expect(onDraftRevision).toHaveBeenCalledWith(expect.stringContaining("event event-first"));
   });
 

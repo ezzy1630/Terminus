@@ -2,7 +2,7 @@
  * Terminus Desktop — Theme + density store.
  *
  * Per SPEC §24: "Support System theme, Light theme, Dark theme, Spacious
- * density, Compact density." The task-centered desktop defaults to compact. Theme and
+ * density, Compact density." The task-centered desktop defaults to spacious. Theme and
  * density changes should not require restart."
  *
  * Per SPEC §22: "Respect Reduce Motion."
@@ -13,14 +13,16 @@
 import { create } from "zustand";
 import type { Density, Theme } from "../types";
 
-const STORAGE_KEY = "terminus-desktop.theme.v2";
+// v3 adopts the readable native density as the default. v2 shipped Compact as
+// the implicit first-run value, which made the entire app look miniaturized.
+const STORAGE_KEY = "terminus-desktop.theme.v3";
 
 interface PersistedTheme {
   theme: Theme;
   density: Density;
 }
 
-const DEFAULT_APPEARANCE: PersistedTheme = { theme: "system", density: "compact" };
+const DEFAULT_APPEARANCE: PersistedTheme = { theme: "system", density: "spacious" };
 
 /** null when the payload is missing or unreadable, so callers can tell the two apart. */
 function parsePersisted(raw: string | null): PersistedTheme | null {
@@ -31,7 +33,7 @@ function parsePersisted(raw: string | null): PersistedTheme | null {
     const p = parsed as Partial<PersistedTheme>;
     const theme: Theme =
       p.theme === "light" || p.theme === "dark" || p.theme === "system" ? p.theme : "system";
-    const density: Density = p.density === "spacious" ? "spacious" : "compact";
+    const density: Density = p.density === "compact" ? "compact" : "spacious";
     return { theme, density };
   } catch {
     return null;

@@ -18,7 +18,9 @@
 const VISIBLE_KEY = "terminus-desktop.sidebar-visible.v1";
 const VIEW_KEY = "terminus-desktop.sidebar-view.v1";
 const COLLAPSED_PROJECTS_KEY = "terminus-desktop.sidebar-collapsed-projects.v1";
-const EXPANDED_PROJECTS_KEY = "terminus-desktop.sidebar-expanded-projects.v1";
+// v2 resets the interim build's over-eager expansion state. That build could
+// persist a whole test repository as expanded before the six-row cap existed.
+const EXPANDED_PROJECTS_KEY = "terminus-desktop.sidebar-expanded-projects.v2";
 
 /**
  * A ceiling on the remembered id sets.
@@ -81,18 +83,18 @@ export function writeSidebarVisible(visible: boolean): void {
 /**
  * How the rail files its tasks.
  *
- * Projects is the default because it is the stable map of the workspace.
- * Activity is an explicit second view for returning to running, blocked, and
- * recent work. The old `"projects"` value still means `"project"`, so an
- * existing choice survives the rename.
+ * Threads is the default because the active thread is the product's primary
+ * path. Projects is the alternate stable map of the workspace. The old
+ * `"projects"` value still means `"project"`, so an existing choice survives
+ * the rename.
  */
 export function readSidebarGrouping(): SidebarGrouping {
-  if (typeof window === "undefined") return "project";
+  if (typeof window === "undefined") return "recent";
   try {
     const stored = window.localStorage.getItem(VIEW_KEY);
-    return stored === "recent" ? "recent" : "project";
+    return stored === "project" || stored === "projects" ? "project" : "recent";
   } catch {
-    return "project";
+    return "recent";
   }
 }
 

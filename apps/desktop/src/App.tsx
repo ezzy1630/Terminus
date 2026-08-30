@@ -21,10 +21,9 @@
  * task inspector and operator cockpit are split behind React.lazy boundaries.
  */
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, Ellipsis, FolderClosed, MessageCircle, PanelLeft, PanelRight, Search } from "lucide-react";
+import { MessageCircle, PanelLeft } from "lucide-react";
 import { Layout } from "./components/Layout";
-import { ConnectionBanner, useConnectionIssueVisible } from "./components/ConnectionBanner";
-import { ProviderAccountsNotice } from "./components/ProviderAccountsNotice";
+import { ConnectionBanner } from "./components/ConnectionBanner";
 import { projectUriToPath } from "./lib/projects";
 import { readSidebarVisible, writeSidebarVisible } from "./lib/sidebar-prefs";
 import { useMarkSelectedTaskRead } from "./hooks/use-task-read";
@@ -32,6 +31,8 @@ import { ResizableReviewLayout } from "./components/ResizableReviewLayout";
 import { SHOW_ACTIVITY_EVENT, Sidebar } from "./components/Sidebar";
 import { FOCUS_QUEUE_EVENT } from "./components/TaskQueue";
 import { Composer } from "./components/Composer";
+import { InterventionTray } from "./components/InterventionTray";
+import { ThreadHeader } from "./components/ThreadHeader";
 import { NewTaskScreen } from "./components/NewTaskScreen";
 import { MissionBoardView } from "./components/MissionBoardView";
 import { EmptyState } from "./ui/EmptyState";
@@ -40,6 +41,7 @@ import {
   useSelectedSessionTasks,
   useSelectedTask,
   useSelectedTaskEventHistory,
+  useSelectedTaskApprovals,
   useSelectedTaskEvents,
   useHealthMonitor,
   useSelectedTaskRunActivity,
@@ -52,20 +54,20 @@ import { taskRunIsActiveWith } from "./lib/turn-activity";
 import type { Theme } from "./types";
 import type { SidebarDestination } from "./components/Sidebar";
 import { isSettingCategoryId, type SettingCategoryId } from "./lib/settings-categories";
+import { presentTask } from "./lib/task-presentation";
 
 /**
  * Resolve a requested settings category.
  *
- * Providers and models live under "Agents and Models", but every caller that
- * wants them naturally asks for "providers" or "models" — and an unknown id
- * silently opened Appearance instead, which is how "configure a provider"
- * landed on the theme picker.
+ * Settings requests use task-language aliases. Keep their routing here so the
+ * lazily loaded Settings bundle does not enter the shell's first paint.
  */
 const SETTINGS_CATEGORY_ALIASES: Readonly<Record<string, SettingCategoryId>> = {
-  providers: "agents",
-  provider: "agents",
-  models: "agents",
-  model: "agents",
+  providers: "accounts",
+  provider: "accounts",
+  agents: "accounts",
+  account: "accounts",
+  model: "models",
 };
 
 export function settingsCategoryFor(requested: string | undefined): SettingCategoryId {
@@ -81,7 +83,6 @@ import { buildDefaultCommands } from "./lib/command-catalog";
 import { Button } from "./ui/Button";
 import { DialogSurface } from "./ui/Dialog";
 import { IconButton } from "./ui/IconButton";
-import { Menu, type MenuItem } from "./ui/Menu";
 import { Skeleton, Spinner } from "./ui/Status";
 
 /**
@@ -190,7 +191,7 @@ const SURFACES_WITH_INSPECTOR = new Set<SidebarDestination>(["chat", "board"]);
 
 const ONBOARDING_KEY = "terminus-desktop.onboarding.completed.v1";
 const INSPECTOR_VISIBILITY_KEY = "terminus-desktop.inspector-visible.";
-type AppOverlay = "palette" | "settings" | "onboarding" | null;
+type AppOverlay = "palette" | "onboarding" | null;
 /** Matches `--duration-fast`, which drives the `dialog-out` keyframes. */
 const OVERLAY_EXIT_MS = 140;
 
@@ -332,12 +333,31 @@ export function App(): JSX.Element {
   const selectedTaskId = useTerminusStore((s) => s.selectedTaskId);
   const selectedTaskPage = useTerminusStore((s) => s.selectedSessionId ? s.taskPagesBySession[s.selectedSessionId] : undefined);
   const loadMoreTasks = useTerminusStore((s) => s.loadMoreTasks);
-  const selectTask = useTerminusStore((s) => s.selectTask);
+  const selectTaskInStore = useTerminusStore((s) => s.selectTask);
   const selectSession = useTerminusStore((s) => s.selectSession);
   const stopTask = useTerminusStore((s) => s.stopTask);
   const setDraft = useTerminusStore((s) => s.setDraft);
+  const acknowledgeApprovalResolution = useTerminusStore((s) => s.acknowledgeApprovalResolution);
+  const loadMoreApprovals = useTerminusStore((s) => s.loadMoreApprovals);
+  const refreshApprovals = useTerminusStore((s) => s.refreshApprovals);
   const selectedTask = useSelectedTask();
   const selectedSessionTasks = useSelectedSessionTasks();
+  const selectedEvents = useSelectedTaskEvents();
+  const approvalResource = useSelectedTaskApprovals();
+  const selectedSession = useMemo(
+    () => sessions.find((session) => session.id === selectedTask?.session_id) ?? null,
+    [selectedTask?.session_id, sessions],
+  );
+  const taskPresentation = useMemo(
+    () => selectedTask
+      ? presentTask({
+          task: selectedTask,
+          events: selectedEvents,
+          pendingApprovalCount: approvalResource.approvals.length,
+        })
+      : null,
+    [approvalResource.approvals.length, selectedEvents, selectedTask],
+  );
   // The stored status says ACTIVE for as long as a task exists. What the shell
   // reports is what the run is actually doing.
   const selectedRunActivity = useSelectedTaskRunActivity();
@@ -362,6 +382,10 @@ export function App(): JSX.Element {
   const [activeDestination, setActiveDestination] = useState<SidebarDestination>(() =>
     useTerminusStore.getState().selectedTaskId ? "chat" : "new_task",
   );
+  const selectTask = useCallback((taskId: string | null) => {
+    selectTaskInStore(taskId);
+    if (taskId !== null) setActiveDestination("chat");
+  }, [selectTaskInStore]);
   const [selectedCanonicalTaskId, setSelectedCanonicalTaskId] = useState<string | null>(null);
   const [changesOpen, setChangesOpen] = useState(false);
   const [inspectorVisibilityByTask, setInspectorVisibilityByTask] = useState<Record<string, boolean>>({});
@@ -372,12 +396,6 @@ export function App(): JSX.Element {
   const inspectorVisible = contextTaskId === null
     ? false
     : inspectorVisibilityByTask[contextTaskId] ?? readInspectorVisibility(contextTaskId);
-
-  useEffect(() => {
-    if (selectedTaskId && activeDestination === "new_task") {
-      setActiveDestination("chat");
-    }
-  }, [selectedTaskId, activeDestination]);
 
   // Three separate places toggle the rail — the title-bar button, the
   // shortcut, and the command palette — so this is written on the value
@@ -495,17 +513,17 @@ export function App(): JSX.Element {
   // The connection state is a fact about the whole window, so it is checked and
   // shown here rather than inferred separately by each surface.
   useHealthMonitor();
-  const connectionIssueVisible = useConnectionIssueVisible();
 
   const openSettings = useCallback((category: SettingCategoryId = "appearance"): void => {
-    // Always in-app. Settings used to prefer a second native window, which
-    // meant ⌘, threw the operator out of the task they were reading into a
-    // window with its own Dock entry and its own idea of which project was
-    // current. Every entry point — the menu bar's ⌘,, the sidebar gear, the
-    // palette — routes through here, so they all stay in one window.
+    // Settings is an ordinary destination. A centered focus-trapping sheet
+    // made a basic navigation action feel like an interruption, while a
+    // second native window would split project state across two windows.
     setSettingsRequest((current) => ({ category, nonce: current.nonce + 1 }));
-    openOverlay("settings");
-  }, [openOverlay]);
+    setSelectedCanonicalTaskId(null);
+    setChangesOpen(false);
+    setOverlay(null);
+    setActiveDestination("settings");
+  }, []);
 
   const openProject = useCallback((projectPath?: string): void => {
     // React passes a MouseEvent to unwrapped click handlers. Keep the native
@@ -639,8 +657,7 @@ export function App(): JSX.Element {
       }
       if (matchesShortcut(e, FIXED_SHORTCUTS.settings)) {
         e.preventDefault();
-        if (overlay === "settings") setOverlay(null);
-        else if (overlay === null) openSettings("appearance");
+        openSettings("appearance");
         return;
       }
       if (matchesShortcut(e, FIXED_SHORTCUTS.openProject)) {
@@ -650,7 +667,7 @@ export function App(): JSX.Element {
       }
       if (matchesShortcut(e, FIXED_SHORTCUTS.shortcutReference)) {
         e.preventDefault();
-        if (overlay === null || overlay === "settings") openSettings("shortcuts");
+        if (overlay === null) openSettings("shortcuts");
         return;
       }
       if (overlay !== null) return;
@@ -779,52 +796,6 @@ export function App(): JSX.Element {
     [canStopRun, cycleTheme, goToNewTask, loadMoreTasks, openDestination, openProject, openSettings, selectSession, selectTask, selectedSessionId, selectedTaskId, selectedTaskPage?.nextCursor, sessions, sidebarVisible, stopTarget, stopTask, tasksBySession, toggleDensity, toggleInspector],
   );
 
-  /**
-   * The title bar's `···`. Codex puts the per-document actions here rather
-   * than spreading them across the bar, and every entry below is an action the
-   * app already performs — there is nothing here that only opens a dialog to
-   * say it is unavailable.
-   */
-  const taskOverflowItems = useMemo<MenuItem[]>(() => {
-    if (!selectedTask) return [];
-    const items: MenuItem[] = [
-      {
-        id: "task.copy-id",
-        label: "Copy task ID",
-        onSelect: () => { void navigator.clipboard?.writeText(selectedTask.id); },
-      },
-    ];
-    if (!changesOpen) {
-      items.push(
-        {
-          id: "task.show-changes",
-          label: "Show changes",
-          shortcut: shortcutDisplay(FIXED_SHORTCUTS.showChanges),
-          onSelect: () => setChangesOpen(true),
-        },
-        {
-          id: "task.toggle-inspector",
-          label: inspectorVisible ? "Hide context panel" : "Show context panel",
-          shortcut: shortcutDisplay(FIXED_SHORTCUTS.toggleInspector),
-          onSelect: toggleInspector,
-        },
-      );
-    }
-    // Offered only against a run that can actually be stopped. "Stop" on an
-    // idle task is a button whose only possible outcome is an error.
-    if (selectedRunIsActive) {
-      items.push({
-        id: "task.stop-run",
-        label: "Stop run",
-        shortcut: shortcutDisplay(FIXED_SHORTCUTS.stopRun),
-        separatorBefore: true,
-        danger: true,
-        onSelect: () => { void stopTask(selectedTask.id); },
-      });
-    }
-    return items;
-  }, [changesOpen, inspectorVisible, selectedRunIsActive, selectedTask, stopTask, toggleInspector]);
-
   const showNewTask = selectedTaskId === null && activeDestination === "new_task";
   const showNavigationSurface = selectedTaskId === null && activeDestination === "chat";
   const durableTaskId = selectedTask?.id ?? null;
@@ -856,47 +827,67 @@ export function App(): JSX.Element {
     </Suspense>
   );
 
+  const composerDock = selectedTask ? (
+    <div className="composer-dock shrink-0 pb-3 pt-2">
+      <div className="content-column">
+        <InterventionTray
+          taskId={selectedTask.id}
+          approvals={approvalResource.approvals}
+          approvalState={approvalResource.status}
+          approvalError={approvalResource.error}
+          approvalPage={approvalResource.page}
+          onApprovalResolved={(approvalId) => acknowledgeApprovalResolution(selectedTask.id, approvalId)}
+          onApprovalExpired={() => { void refreshApprovals(selectedTask.id); }}
+          onLoadMoreApprovals={() => { void loadMoreApprovals(selectedTask.id); }}
+          onRetryApprovals={() => { void refreshApprovals(selectedTask.id); }}
+        />
+      </div>
+      <Composer />
+    </div>
+  ) : null;
+
+  const activeThreadSurface = selectedTask && taskPresentation && durableTaskId ? (
+    <div className="flex h-full min-w-0 flex-col">
+      <ThreadHeader
+        presentation={taskPresentation}
+        repository={selectedSession?.title ?? "Terminus"}
+        onOpenChanges={() => setChangesOpen(true)}
+        onOpenDetails={toggleInspector}
+        onStop={() => { void stopTask(selectedTask.id); }}
+      />
+      <div className="min-h-0 flex-1">
+        {changesOpen ? (
+          <ResizableReviewLayout
+            conversation={<div className="flex h-full min-w-0 flex-col">
+              <div className="min-h-0 flex-1">{conversation}</div>
+              {composerDock}
+            </div>}
+            review={<Suspense fallback={<SurfaceLoadingFallback label="Loading review" className="bg-diff" />}>
+              <SelectedTaskReviewPane
+                taskId={durableTaskId}
+                onClose={() => setChangesOpen(false)}
+                onDraftRevision={draftReviewRevision}
+              />
+            </Suspense>}
+          />
+        ) : (
+          <div className="flex h-full flex-col">
+            <div className="min-h-0 flex-1">{conversation}</div>
+            {composerDock}
+          </div>
+        )}
+      </div>
+    </div>
+  ) : null;
+
   return (
     <>
       <Layout
-        banner={(
-          <>
-            {/* A connection problem outranks an announcement, so it is drawn
-                first; both are hairline strips that render nothing when they
-                have nothing to say. */}
-            <ConnectionBanner />
-            {connectionIssueVisible ? null : <ProviderAccountsNotice />}
-          </>
-        )}
+        banner={<ConnectionBanner />}
         sidebarVisible={sidebarVisible}
+        sidebarOverlay={changesOpen}
         inspectorVisible={SURFACES_WITH_INSPECTOR.has(activeDestination) && inspectorVisible && contextTaskId !== null && !changesOpen}
         backgroundInert={overlay !== null}
-        center={activeDestination === "chat" && selectedTask ? (
-          <span className="flex min-w-0 items-center gap-2 text-primary">
-            <FolderClosed size={14} className="shrink-0 text-tertiary" aria-hidden />
-            {/* Native document titles are 13px semibold; the 15px page title
-                made the bar read as a web page header. The run's state is not
-                repeated here — the sidebar row and the composer both show it,
-                and a third copy in the title bar was the one that never moved. */}
-            <span className="truncate text-base font-semibold">{selectedTask.contract?.objective ?? selectedTask.id}</span>
-            <Menu
-              label="Task actions"
-              align="start"
-              items={taskOverflowItems}
-              trigger={(
-                <IconButton
-                  label="Task actions"
-                  icon={<Ellipsis size={15} />}
-                  size="sm"
-                  // `.titlebar-center` is a pointer-transparent overlay so the
-                  // bar stays draggable across the title; the one control in it
-                  // opts back into hit testing, and out of the drag region.
-                  className="icon-button titlebar-no-drag pointer-events-auto h-6 w-6 shrink-0 rounded-md text-tertiary hover:bg-hover hover:text-primary"
-                />
-              )}
-            />
-          </span>
-        ) : undefined}
         sidebar={
           <Sidebar
             activeDestination={activeDestination}
@@ -905,6 +896,9 @@ export function App(): JSX.Element {
               if (destination === "new_task") selectTask(null);
             }}
             onOpenProject={openProject}
+            onSearch={() => openOverlay("palette")}
+            onToggleSidebar={() => setSidebarVisible(false)}
+            onBackFromSettings={navHistory.goBack}
           />
         }
         inspector={
@@ -919,7 +913,15 @@ export function App(): JSX.Element {
         }
         main={
           <Suspense fallback={<SurfaceLoadingFallback label="Loading" />}>
-            {showNewTask ? (
+            {activeDestination === "settings" ? (
+              <Settings
+                open
+                surface
+                onClose={navHistory.goBack}
+                initialCategoryId={settingsCategory}
+                categoryRequest={settingsRequest.nonce}
+              />
+            ) : showNewTask ? (
               <NewTaskScreen onOpenProject={openProject} />
             ) : activeDestination === "board" ? (
               <MissionBoardView
@@ -928,105 +930,22 @@ export function App(): JSX.Element {
               />
             ) : showNavigationSurface ? (
               <ChatDestinationSurface onStartTask={goToNewTask} />
-            ) : changesOpen && durableTaskId ? (
-              <ResizableReviewLayout
-                conversation={<div className="flex h-full min-w-0 flex-col">
-                  <div className="min-h-0 flex-1">{conversation}</div>
-                  <div className="composer-dock shrink-0 pb-3 pt-2">
-                    <Composer />
-                  </div>
-                </div>}
-                review={<Suspense fallback={<SurfaceLoadingFallback label="Loading review" className="bg-diff" />}>
-                  <SelectedTaskReviewPane
-                    taskId={durableTaskId}
-                    onClose={() => setChangesOpen(false)}
-                    onDraftRevision={draftReviewRevision}
-                  />
-                </Suspense>}
-              />
-            ) : (
-              <div className="flex h-full flex-col">
-                <div className="min-h-0 flex-1">
-                  {conversation}
-                </div>
-                <div className="composer-dock shrink-0 pb-3 pt-2">
-                  <Composer />
-                </div>
-              </div>
-            )}
+            ) : activeThreadSurface}
           </Suspense>
         }
-        left={
-          /* The panel toggle owns the column beneath it; back and forward are
-             the shell's navigation. Project switching lives in the project
-             view and command palette, not in the title bar. */
-          <>
-            <IconButton
-              onClick={() => setSidebarVisible((visible) => !visible)}
-              label={sidebarVisible ? "Hide sidebar" : "Show sidebar"}
-              icon={<PanelLeft size={14} />}
-              aria-pressed={sidebarVisible}
-              data-tooltip={sidebarVisible ? "Hide sidebar" : "Show sidebar"}
-              className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary"
-            />
-            <IconButton
-              onClick={navHistory.goBack}
-              disabled={!navHistory.canGoBack}
-              label="Back"
-              icon={<ArrowLeft size={14} />}
-              data-tooltip="Back"
-              className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-default disabled:opacity-30"
-            />
-            <IconButton
-              onClick={navHistory.goForward}
-              disabled={!navHistory.canGoForward}
-              label="Forward"
-              icon={<ArrowRight size={14} />}
-              data-tooltip="Forward"
-              className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-default disabled:opacity-30"
-            />
-            <IconButton
-              onClick={() => openOverlay("palette")}
-              label="Search and commands"
-              icon={<Search size={14} />}
-              data-tooltip={`Search and commands ${shortcutDisplay(FIXED_SHORTCUTS.commandPalette)}`}
-              className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary"
-            />
-          </>
-        }
-        right={
-          <>
-            {SURFACES_WITH_INSPECTOR.has(activeDestination) && !changesOpen ? (
-              <IconButton
-                onClick={toggleInspector}
-                disabled={!contextTaskId}
-                label={inspectorVisible ? "Hide task context" : "Show task context"}
-                icon={<PanelRight size={14} />}
-                aria-pressed={inspectorVisible}
-                data-tooltip={contextTaskId ? (inspectorVisible ? "Hide task context" : "Show task context") : "Task context appears when a task is selected"}
-                className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-35"
-              />
-            ) : null}
-          </>
-        }
+        windowControl={sidebarVisible ? undefined : (
+          <IconButton
+            onClick={() => setSidebarVisible(true)}
+            label="Show sidebar"
+            icon={<PanelLeft size={15} strokeWidth={1.65} />}
+            data-tooltip="Show sidebar"
+            className="icon-button h-7 w-7 rounded-md text-secondary hover:bg-hover hover:text-primary"
+          />
+        )}
       />
       {mountedOverlay === "palette" ? (
         <Suspense fallback={<ModalLoadingFallback label="command palette" onClose={() => setOverlay(null)} />}>
           <CommandPalette open={overlay === "palette"} onClose={() => setOverlay(null)} commands={commands} />
-        </Suspense>
-      ) : null}
-      {mountedOverlay === "settings" ? (
-        <Suspense fallback={<ModalLoadingFallback label="settings" onClose={() => setOverlay(null)} />}>
-          {/* No `key`. Keying on the category tore the whole sheet down and
-              rebuilt it whenever a second entry point asked for a different
-              page — ⌘/ while Settings was already open replayed the entrance
-              animation from scratch. The pane moves; the sheet stays put. */}
-          <Settings
-            open={overlay === "settings"}
-            onClose={() => setOverlay(null)}
-            initialCategoryId={settingsCategory}
-            categoryRequest={settingsRequest.nonce}
-          />
         </Suspense>
       ) : null}
       {overlay === "onboarding" ? (

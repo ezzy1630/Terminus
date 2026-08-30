@@ -1,5 +1,34 @@
 import { describe, expect, test } from "vitest";
-import { packagedRendererAssetPath } from "../electron/shell-guards";
+import {
+  packagedRendererAssetPath,
+  requireLocalTerminusOrigin,
+} from "../electron/shell-guards";
+
+describe("development control origin guard", () => {
+  test.each([
+    "http://127.0.0.1:3050",
+    "http://localhost:3150",
+    "http://127.0.0.1:65535/",
+  ])("accepts an explicit loopback HTTP origin: %s", (origin) => {
+    expect(requireLocalTerminusOrigin(origin, "TERMINUS_API_BASE")).toBe(
+      origin.replace(/\/$/, ""),
+    );
+  });
+
+  test.each([
+    "https://127.0.0.1:3050",
+    "http://0.0.0.0:3050",
+    "http://example.com:3050",
+    "http://127.0.0.1",
+    "http://user@127.0.0.1:3050",
+    "http://127.0.0.1:3050/v1",
+    "http://127.0.0.1:3050?other=1",
+  ])("rejects a non-loopback or non-origin value: %s", (origin) => {
+    expect(() => requireLocalTerminusOrigin(origin, "TERMINUS_API_BASE")).toThrow(
+      /explicit loopback Terminus origin/,
+    );
+  });
+});
 
 describe("packaged renderer protocol guard", () => {
   test.each([

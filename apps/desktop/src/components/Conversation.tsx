@@ -32,7 +32,6 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Message } from "./Message";
 import { ActivityBlock } from "./ActivityBlock";
 import { ReasoningTrace } from "./ReasoningTrace";
-import { ApprovalCard } from "./ApprovalCard";
 import { ErrorState, errorPreset } from "./ErrorState";
 import { ArrowDown, ShieldAlert } from "lucide-react";
 import { cn } from "../lib/cn";
@@ -43,13 +42,11 @@ import {
   MAX_PRESENTATION_EVENT_CHARS,
   PRESENTATION_REJECTION_KEY,
   useSelectedTask,
-  useSelectedTaskApprovals,
   useSelectedTaskEventHistory,
   useSelectedTaskTranscript,
   useSelectedTaskEvents,
   useTerminusStore,
 } from "../hooks/use-terminus";
-import type { PendingApproval } from "../lib/task-surface";
 import type {
   ActivityBlock as ActivityBlockData,
   ActivityEntry,
@@ -1503,8 +1500,6 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
   const events = eventsProp ?? storeEvents;
   const streamState = useTerminusStore((state) => state.streamState);
   const healthStatus = useTerminusStore((state) => state.healthStatus);
-  const acknowledgeApprovalResolution = useTerminusStore((state) => state.acknowledgeApprovalResolution);
-  const loadMoreApprovals = useTerminusStore((state) => state.loadMoreApprovals);
   const lastEventId = events[events.length - 1]?.id;
   const turnInputs = useTurnInputs(events, task?.id ?? null);
 
@@ -1515,12 +1510,10 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
     // event id is included so streaming appends trigger a re-decode, and
     // turnInputs so a prompt re-renders once its artifact resolves.
   }, [events, task?.id, events.length, lastEventId, turnInputs]);
-  const approvalResource = useSelectedTaskApprovals();
   const eventHistory = useSelectedTaskEventHistory();
   const transcript = useSelectedTaskTranscript();
   const loadEarlierTranscript = useTerminusStore((s) => s.loadEarlierTranscript);
   const hydrateTranscript = useTerminusStore((s) => s.hydrateTranscript);
-  const approvals = approvalResource.approvals;
 
   // Build the flattened feed items list.
   const decodedItems = useMemo<FeedItem[]>(() => {
@@ -1943,27 +1936,6 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
           />
         ) : null}
 
-        {approvals.length > 0 ? (
-          <PendingApprovalsBlock
-            approvals={approvals}
-            freshness={approvalResource.status}
-            error={approvalResource.error}
-            page={approvalResource.page}
-            onLoadMore={() => void loadMoreApprovals(task.id)}
-            onResolved={(approvalId) => {
-              if (task) acknowledgeApprovalResolution(task.id, approvalId);
-            }}
-            onExpired={() => void useTerminusStore.getState().refreshApprovals(task.id)}
-          />
-        ) : approvalResource.status !== "ready" ? (
-          <ApprovalReconciliationState
-            status={approvalResource.status}
-            error={approvalResource.error}
-            onRetry={() => {
-              if (task) void useTerminusStore.getState().refreshApprovals(task.id);
-            }}
-          />
-        ) : null}
       </div>
       </div>
       {hasUnseenUpdates ? (
@@ -1979,145 +1951,6 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
           Latest
         </Button>
       ) : null}
-    </div>
-  );
-}
-
-/**
- * Pinned approval interrupt surface (SPEC §17).
- *
- * Approvals are inline — never a modal — but they must not be missable:
- * the block is `position: sticky` at the bottom of the feed so it stays
- * on screen regardless of scroll position, and an assertive live region
- * announces that the task is blocked on a decision. The block clears as
- * soon as each approval is resolved.
- */
-function PendingApprovalsBlock({
-  approvals,
-  freshness,
-  error,
-  page,
-  onLoadMore,
-  onResolved,
-  onExpired,
-}: {
-  approvals: PendingApproval[];
-  freshness: "loading" | "ready" | "stale" | "error";
-  error: string | null;
-  page: { nextCursor: string | null; total: number | null; loadingMore: boolean; error: string | null };
-  onLoadMore: () => void;
-  onResolved: (approvalId: string) => void;
-  onExpired: () => void;
-}): JSX.Element {
-  const count = approvals.length;
-  const total = Math.max(count, page.total ?? count);
-  const countLabel = count < total
-    ? `${count} of ${total} approvals loaded`
-    : count === 1
-      ? "Approval required"
-      : `${count} approvals required`;
-  return (
-    <div
-      className="mt-4 flex flex-col gap-3"
-      style={{ position: "sticky", bottom: 0, paddingTop: 8 }}
-      data-testid="pending-approvals"
-    >
-      <div
-        aria-live="assertive"
-        role="alert"
-        style={{ position: "absolute", left: -9999, width: 1, height: 1, overflow: "hidden" }}
-      >
-        {count < total
-          ? `${total} approvals required before the task can continue; ${count} loaded`
-          : count === 1
-          ? `Approval required: ${approvals[0]?.action ?? ""}`
-          : `${count} approvals required before the task can continue`}
-      </div>
-      {/* A label for the group, not a second alert around the cards. The
-          approval cards below already say what they are; a tinted bar with an
-          uppercase heading on top of them said it twice, louder. */}
-      <div className="flex items-center gap-2 px-0.5">
-        <ShieldAlert size={12} className="flex-none text-warning" aria-hidden />
-        <span className="ui-section-label">{countLabel}</span>
-        <span className="ui-meta ml-auto">Awaiting decision</span>
-      </div>
-      {freshness !== "ready" ? (
-        <p className="ui-meta px-0.5 text-warning" role="status">
-          {freshness === "loading"
-            ? "Reconciling approval state. Decisions are disabled until the control plane confirms this snapshot."
-            : freshness === "stale"
-              ? `Last-confirmed approval snapshot is stale. Decisions are disabled${error ? `: ${error}` : "."}`
-              : `Approval state could not be confirmed. Event-derived requests may be incomplete and decisions are disabled${error ? `: ${error}` : "."}`}
-        </p>
-      ) : null}
-      {approvals.map((approval) => (
-        <ApprovalCard
-          key={approval.id}
-          id={approval.id}
-          action={approval.action}
-          operationHash={approval.operationHash ?? ""}
-          operation={approval.operation}
-          reason={approval.reason ?? "The task needs your permission before this effect can continue."}
-          risk={approval.risk}
-          scope={approval.scope}
-          affectedEnvironment={approval.environment}
-          requestedAt={approval.requestedAt}
-          expiresAt={approval.expiresAt}
-          canPersist={approval.canPersist}
-          supportedDecisions={approval.supportedDecisions}
-          authorizationReady={approval.authorizationReady}
-          decisionsEnabled={freshness === "ready" && Boolean(approval.operationHash)}
-          onResolved={() => onResolved(approval.id)}
-          onExpired={onExpired}
-        />
-      ))}
-      {page.nextCursor ? (
-        <div className="px-0.5">
-          <Button
-            type="button"
-            onClick={onLoadMore}
-            disabled={page.loadingMore || freshness !== "ready"}
-            className="rounded-md px-2 py-1 text-xs font-medium text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-45"
-          >
-            {page.loadingMore ? "Loading more approvals…" : page.error ? "Retry loading approvals" : `Load more approvals${page.total === null ? "" : ` (${approvals.length} of ${page.total})`}`}
-          </Button>
-          {page.error ? <p role="alert" className="mt-1 text-xs text-error">{page.error}</p> : null}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function ApprovalReconciliationState({
-  status,
-  error,
-  onRetry,
-}: {
-  status: "loading" | "stale" | "error";
-  error: string | null;
-  onRetry: () => void;
-}): JSX.Element | null {
-  if (status !== "loading") {
-    return (
-      <div
-        role="alert"
-        data-testid="approval-reconciliation-state"
-        className="mt-4 flex items-center gap-2 rounded-lg border border-subtle px-3 py-2 text-xs text-secondary"
-      >
-        <ShieldAlert size={13} className="flex-none text-warning" aria-hidden />
-        <span className="min-w-0 flex-1 truncate">{error ?? "Approval state could not be refreshed."}</span>
-        <Button type="button" size="sm" onClick={onRetry}>Retry</Button>
-      </div>
-    );
-  }
-  return (
-    <div
-      role="status"
-      data-testid="approval-reconciliation-state"
-      className="mt-4 flex items-center gap-2 px-3 py-2 text-xs text-secondary"
-    >
-      <ShieldAlert size={13} className="text-tertiary" aria-hidden />
-      <span className="min-w-0 flex-1">Checking the control plane for pending approvals.</span>
     </div>
   );
 }

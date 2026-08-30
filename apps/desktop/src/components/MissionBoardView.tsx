@@ -1150,7 +1150,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
               normal case. The stream only speaks up when it has degraded. */}
           <div className="flex items-center gap-2 shrink-0 pr-2 border-r border-subtle">
             <h1 id="mission-board-title" className="ui-page-title text-primary">
-              Board
+              All Tasks
             </h1>
             {streamState !== "live" ? (
               <span className="ui-meta text-warning" role="status">
@@ -1251,7 +1251,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
         <div className="flex items-center gap-2 shrink-0">
           <label className="relative w-44 sm:w-52">
             <Search size={12} aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-tertiary" />
-            <span className="sr-only">Search mission board</span>
+            <span className="sr-only">Search all tasks</span>
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
@@ -1271,16 +1271,16 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
           </label>
 
           {/* Segmented View Switcher [Board | List] */}
-          <div className="flex rounded-md border border-subtle bg-elevated p-0.5" role="group" aria-label="Mission board view">
+          <div className="flex rounded-md border border-subtle bg-elevated p-0.5" role="group" aria-label="All tasks view">
             <Button
               type="button"
               onClick={() => setViewMode("board")}
-              aria-label="Board view"
+              aria-label="Kanban view"
               aria-pressed={viewMode === "board"}
               className={cn("ui-meta flex h-6 items-center gap-1.5 rounded-sm px-2 font-medium transition-colors", viewMode === "board" ? "bg-selected text-primary" : "text-secondary hover:text-primary")}
             >
               <Columns3 size={12} aria-hidden />
-              <span>Board</span>
+              <span>Kanban</span>
             </Button>
             <Button
               type="button"
@@ -1311,7 +1311,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
             </Button>
           ) : null}
 
-          <IconButton label="Refresh board" icon={<RefreshCw size={14} strokeWidth={1.7} aria-hidden />} onClick={resource.retry} disabled={resource.refreshing} size="md" className="h-7 w-7 rounded-md border border-subtle text-tertiary hover:bg-hover hover:text-primary disabled:opacity-50" />
+          <IconButton label="Refresh all tasks" icon={<RefreshCw size={14} strokeWidth={1.7} aria-hidden />} onClick={resource.retry} disabled={resource.refreshing} size="md" className="h-7 w-7 rounded-md border border-subtle text-tertiary hover:bg-hover hover:text-primary disabled:opacity-50" />
         </div>
       </header>
 
@@ -1422,7 +1422,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
 
             </>
           ) : (
-            <div role="table" aria-label="Board tasks" className="overflow-hidden rounded-md border border-subtle bg-card">
+            <div role="table" aria-label="All tasks" className="overflow-hidden rounded-md border border-subtle bg-card">
               <div role="row" className="ui-meta mission-board-list-row grid gap-3 border-b border-subtle px-4 py-2">
                 <span role="columnheader">Session / Task</span><span role="columnheader">State</span><span role="columnheader" className="mission-board-list-secondary">Space</span><span role="columnheader" className="mission-board-list-secondary">Updated</span>
               </div>

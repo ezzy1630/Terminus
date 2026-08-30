@@ -197,13 +197,13 @@ describe("useThemeStore", () => {
   test("persists theme and density", () => {
     useThemeStore.getState().setTheme("dark");
     useThemeStore.getState().setDensity("compact");
-    expect(window.localStorage.getItem("terminus-desktop.theme.v2")).toBe(
+    expect(window.localStorage.getItem("terminus-desktop.theme.v3")).toBe(
       JSON.stringify({ theme: "dark", density: "compact" }),
     );
   });
 
   test("survives unavailable or corrupt storage", () => {
-    window.localStorage.setItem("terminus-desktop.theme.v2", "{bad json");
+    window.localStorage.setItem("terminus-desktop.theme.v3", "{bad json");
     expect(() => useThemeStore.getState().setTheme("light")).not.toThrow();
   });
 });

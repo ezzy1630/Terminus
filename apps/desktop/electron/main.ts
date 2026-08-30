@@ -44,6 +44,7 @@ import {
   isAllowedRendererPermission,
   normalizeWindowTitle,
   packagedRendererAssetPath,
+  requireLocalTerminusOrigin,
   validateDirectoryPath,
 } from "./shell-guards";
 import { StandaloneRuntimeSupervisor } from "./runtime-supervisor";
@@ -111,25 +112,9 @@ let repositoryLinks: { documentationUrl: string | null; issuesUrl: string | null
   documentationUrl: null,
   issuesUrl: null,
 };
-const LOCAL_API_ORIGINS = new Set(["http://127.0.0.1:3050", "http://localhost:3050"]);
-
-function requireLocalOrigin(value: string, allowed: ReadonlySet<string>, variable: string): string {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new Error(`${variable} must be a valid URL`);
-  }
-  if (url.username || url.password || url.origin !== value.replace(/\/$/, "") || !allowed.has(url.origin)) {
-    throw new Error(`${variable} must name an approved local Terminus origin`);
-  }
-  return url.origin;
-}
-
 let terminusApiBase = isDev
-  ? requireLocalOrigin(
+  ? requireLocalTerminusOrigin(
       process.env.TERMINUS_API_BASE ?? "http://127.0.0.1:3050",
-      LOCAL_API_ORIGINS,
       "TERMINUS_API_BASE",
     )
   : "http://127.0.0.1:3050";
@@ -684,8 +669,8 @@ function createMainWindow(): BrowserWindow {
   const window = new BrowserWindow({
     ...placement.bounds,
     title: "Terminus",
-    minWidth: 900,
-    minHeight: 600,
+    minWidth: 1000,
+    minHeight: 680,
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 18 },
     ...macChrome(),

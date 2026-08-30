@@ -17,9 +17,9 @@
  *
  *   - Appearance  → theme + density (useThemeStore, localStorage + native IPC)
  *                   and reduce motion (useSettingsStore, localStorage).
- *   - Agents      → the gateway provider and the local command provider, both
- *                   of which round-trip through the control plane, plus the
- *                   model profiles current sessions actually report.
+ *   - Accounts    → connected accounts and the OpenCode gateway account.
+ *   - Models      → model profiles current projects actually report.
+ *   - Advanced    → local command-provider configuration.
  *   - Shortcuts   → a read-only reference. These are fixed in this build, so
  *                   they are rendered straight from the shortcut map and are
  *                   deliberately *not* settings-store entries: seeding
@@ -30,15 +30,16 @@
  * events so a second Terminus window, if one is ever open, stays in step.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Keyboard, Palette, Search, Wand2, X, RotateCcw } from "lucide-react";
+import { Cpu, Keyboard, Palette, Search, SlidersHorizontal, Users, X, RotateCcw } from "lucide-react";
 import { create } from "zustand";
 import { cn } from "../lib/cn";
 import { useThemeStore } from "../hooks/use-theme";
-import { useTerminusStore } from "../hooks/use-terminus";
+import { useModelInventory } from "../hooks/use-model-inventory";
+import { EFFORT_LABELS, effortsFor, formatContext, formatPricePerMillion } from "../lib/models";
 import { SETTINGS_SHORTCUTS, shortcutSettingValue } from "../lib/shortcuts";
 import type { ShortcutScope } from "../lib/shortcuts";
 import { api, createIdempotencyKey } from "../lib/api";
-import type { Density, ProviderConfiguration, ProviderConfigurationResponse, Session, Theme } from "../types";
+import type { Density, ProviderConfiguration, ProviderConfigurationResponse, Theme } from "../types";
 import { Button } from "../ui/Button";
 import { IconButton } from "../ui/IconButton";
 import { Input, Textarea } from "../ui/Input";
@@ -124,7 +125,7 @@ const CATEGORIES: SettingCategory[] = [
       {
         id: "appearance.density",
         label: "Density",
-        description: "Compact tightens rows and panel padding.",
+        description: "Spacious is the native default; Compact fits more rows.",
         group: "Theme",
         control: {
           kind: "select",
@@ -133,7 +134,7 @@ const CATEGORIES: SettingCategory[] = [
             { value: "compact", label: "Compact" },
           ],
         },
-        defaultValue: "compact",
+        defaultValue: "spacious",
         apply: (v) => useThemeStore.getState().setDensity(v as Density),
       },
       {
@@ -150,10 +151,24 @@ const CATEGORIES: SettingCategory[] = [
     ],
   },
   {
-    id: "agents",
-    label: "Agents and Models",
-    description: "Providers that can route a turn, and the profiles projects report.",
-    icon: <Wand2 size={16} />,
+    id: "accounts",
+    label: "Accounts",
+    description: "Connected provider accounts and their routing availability.",
+    icon: <Users size={16} />,
+    settings: [],
+  },
+  {
+    id: "models",
+    label: "Models",
+    description: "Available models and the capabilities reported by each provider.",
+    icon: <Cpu size={16} />,
+    settings: [],
+  },
+  {
+    id: "advanced",
+    label: "Advanced",
+    description: "Local provider commands and low-level runtime configuration.",
+    icon: <SlidersHorizontal size={16} />,
     settings: [],
   },
   {
@@ -179,19 +194,12 @@ const SHORTCUT_GROUPS: ReadonlyArray<{ scope: ShortcutScope; title: string }> = 
  * in so searching "command palette" reaches the reference that lists it.
  */
 const CATEGORY_KEYWORDS: Record<SettingCategoryId, string> = {
-  agents: "providers provider api key token gateway model models routing opencode zen go local command tools inference connected accounts account codex chatgpt sign in disconnect default credentials",
+  accounts: "providers provider api key token gateway routing opencode zen connected accounts account chatgpt sign in disconnect default credentials",
+  models: "model models reasoning effort context output tools images price inference",
+  advanced: "local command provider program args arguments timeout tools raw gateway diagnostics",
   appearance: "theme dark light density spacing font motion animation accessibility",
   shortcuts: `keyboard keys bindings hotkeys ${SETTINGS_SHORTCUTS.map((s) => s.label).join(" ")}`.toLowerCase(),
 };
-
-export function deriveRuntimeModelProfiles(sessions: Session[]): Array<{ id: string; projectCount: number }> {
-  const counts = new Map<string, number>();
-  for (const session of sessions) {
-    const profile = session.default_model_profile?.trim();
-    if (profile) counts.set(profile, (counts.get(profile) ?? 0) + 1);
-  }
-  return Array.from(counts, ([id, projectCount]) => ({ id, projectCount }));
-}
 
 // ────────────────────────── Settings store ──────────────────────────────────
 
@@ -390,6 +398,8 @@ function Row({
 export interface SettingsProps {
   open: boolean;
   onClose: () => void;
+  /** Render as the app's main Settings destination instead of a modal sheet. */
+  surface?: boolean;
   /** Optional initial category to focus. */
   initialCategoryId?: SettingCategoryId;
   /**
@@ -401,12 +411,15 @@ export interface SettingsProps {
   className?: string;
 }
 
-function SettingsImpl({ open, onClose, initialCategoryId, categoryRequest, className }: SettingsProps): JSX.Element {
+function SettingsImpl({ open, onClose, surface = false, initialCategoryId, categoryRequest, className }: SettingsProps): JSX.Element {
   const [activeCat, setActiveCat] = useState<SettingCategoryId>(initialCategoryId ?? "appearance");
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const sessions = useTerminusStore((state) => state.sessions);
-  const runtimeProfiles = useMemo(() => deriveRuntimeModelProfiles(sessions), [sessions]);
+  const modelInventory = useModelInventory();
+  const modelGroups = useMemo(() => modelInventory.providers.map((provider) => ({
+    provider,
+    models: modelInventory.models.filter((model) => model.provider === provider.id),
+  })).filter((group) => group.models.length > 0), [modelInventory.models, modelInventory.providers]);
   const [providerConfiguration, setProviderConfiguration] = useState<ProviderConfigurationResponse | null>(null);
   const [providerDraft, setProviderDraft] = useState<ProviderConfiguration | null>(null);
   const [providerError, setProviderError] = useState<string | null>(null);
@@ -433,7 +446,7 @@ function SettingsImpl({ open, onClose, initialCategoryId, categoryRequest, class
   }, [categoryRequest, initialCategoryId, open]);
 
   useEffect(() => {
-    if (!open || activeCat !== "agents") return;
+    if (!open || activeCat !== "advanced") return;
     const controller = new AbortController();
     setProviderLoading(true);
     setProviderError(null);
@@ -533,31 +546,13 @@ function SettingsImpl({ open, onClose, initialCategoryId, categoryRequest, class
     else groupedSettings.push({ title: descriptor.group, rows: [descriptor] });
   }
 
-  return (
-    <DialogSurface
-      open={open}
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen) onClose();
-      }}
-      onOpenAutoFocus={focusSearchOnOpen}
-      accessibleTitle="Settings"
-      overlayClassName="bg-black/40"
-      className={cn(
-        "settings-dialog dialog-panel fixed left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border border-subtle bg-elevated text-primary shadow-lg",
-        className,
-      )}
-      style={{
-        width: "min(760px, calc(100vw - 64px))",
-        height: "min(560px, calc(100vh - 64px))",
-      }}
-    >
-      {/* Sheet header. No traffic-light inset and no drag region: this floats
-          inside the app window, so it is not that window's titlebar. */}
+  const content = (
+    <>
       <div className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-subtle px-4">
         <span className="ui-body font-semibold text-primary">Settings</span>
-        <div className="ml-auto flex items-center gap-2">
+        {!surface ? <div className="ml-auto flex items-center gap-2">
           <IconButton onClick={onClose} label="Close settings" icon={<X size={14} aria-hidden />} />
-        </div>
+        </div> : null}
       </div>
       <div className="settings-body flex min-h-0 flex-1">
         {/* Category rail. */}
@@ -640,15 +635,14 @@ function SettingsImpl({ open, onClose, initialCategoryId, categoryRequest, class
                   </Button>
                 ) : null}
 
-                {activeCategory.id === "agents" ? (
+                {activeCategory.id === "accounts" ? (
                   <>
-                    {/* First, because it is where an account normally comes
-                        from: the forms below take a key by hand, which is the
-                        exception now that credentials are discovered. */}
                     <ProviderAccountSettings />
-
                     <GatewayProviderSettings />
+                  </>
+                ) : null}
 
+                {activeCategory.id === "advanced" ? (
                     <SettingGroup title="Local command provider">
                       <Row
                         label="Status"
@@ -748,24 +742,47 @@ function SettingsImpl({ open, onClose, initialCategoryId, categoryRequest, class
                         </Row>
                       )}
                     </SettingGroup>
+                ) : null}
 
-                    <SettingGroup title="Model profiles reported by open projects">
-                      {runtimeProfiles.length > 0 ? (
-                        runtimeProfiles.map((profile) => (
-                          <Row key={profile.id} label={profile.id}>
-                            <span className="ui-meta tabular-nums">
-                              {profile.projectCount} project{profile.projectCount === 1 ? "" : "s"}
-                            </span>
-                          </Row>
-                        ))
-                      ) : (
-                        <div className="py-2.5">
-                          <p className="ui-meta">
-                            No provider-backed model profile has been reported by the control plane.
+                {activeCategory.id === "models" ? (
+                  <>
+                    {modelGroups.map(({ provider, models }) => (
+                      <SettingGroup key={provider.id} title={provider.label}>
+                        {models.map((model) => {
+                          const capabilities = [
+                            effortsFor(model).length > 0
+                              ? effortsFor(model).map((level) => EFFORT_LABELS[level].label).join(", ")
+                              : model.reasoning ? "Fixed provider reasoning" : null,
+                            formatContext(model.contextTokens) ? `${formatContext(model.contextTokens)} context` : null,
+                            formatContext(model.outputTokens ?? 0) ? `${formatContext(model.outputTokens ?? 0)} output` : null,
+                            model.toolCalling ? "Tools" : null,
+                            model.structuredOutput ? "Structured output" : null,
+                            model.imageInput ? "Images" : null,
+                            model.parallelToolCalls ? "Parallel tools" : null,
+                            model.free ? "Free" : formatPricePerMillion(model.inputCostMicros),
+                          ].filter(Boolean);
+                          return (
+                            <Row key={`${provider.id}:${model.id}`} label={model.label} description={model.slug}>
+                              <span className="ui-meta max-w-64 text-right leading-relaxed">
+                                {capabilities.join(" · ") || "No capabilities reported"}
+                              </span>
+                            </Row>
+                          );
+                        })}
+                      </SettingGroup>
+                    ))}
+                    {modelGroups.length === 0 ? (
+                      <SettingGroup title="Available models">
+                        <div className="flex items-center gap-3 py-2.5">
+                          <p className="ui-meta min-w-0 flex-1">
+                            {modelInventory.status === "loading"
+                              ? "Checking connected providers…"
+                              : modelInventory.error ?? "No connected provider reported a model."}
                           </p>
+                          <Button variant="secondary" size="sm" onClick={modelInventory.refresh}>Check again</Button>
                         </div>
-                      )}
-                    </SettingGroup>
+                      </SettingGroup>
+                    ) : null}
                   </>
                 ) : null}
 
@@ -808,6 +825,36 @@ function SettingsImpl({ open, onClose, initialCategoryId, categoryRequest, class
           </div>
         </main>
       </div>
+    </>
+  );
+
+  if (surface) {
+    return (
+      <section aria-label="Settings" className={cn("flex h-full min-w-0 flex-col overflow-hidden bg-canvas text-primary", className)}>
+        {content}
+      </section>
+    );
+  }
+
+  return (
+    <DialogSurface
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) onClose();
+      }}
+      onOpenAutoFocus={focusSearchOnOpen}
+      accessibleTitle="Settings"
+      overlayClassName="bg-black/40"
+      className={cn(
+        "settings-dialog dialog-panel fixed left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border border-subtle bg-elevated text-primary shadow-lg",
+        className,
+      )}
+      style={{
+        width: "min(760px, calc(100vw - 64px))",
+        height: "min(560px, calc(100vh - 64px))",
+      }}
+    >
+      {content}
     </DialogSurface>
   );
 }

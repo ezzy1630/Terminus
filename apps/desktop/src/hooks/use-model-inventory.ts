@@ -114,6 +114,7 @@ function decodeModel(value: unknown): ModelOption | null {
     : null;
   const inputCost = asPositiveNumber(record.input_cost_micros);
   const outputCost = asPositiveNumber(record.output_cost_micros);
+  const cachedInputCost = asPositiveNumber(record.cached_input_micros_per_million);
   return {
     id,
     provider,
@@ -131,6 +132,11 @@ function decodeModel(value: unknown): ModelOption | null {
       ? record.context_tokens
       : 0,
     ...(record.tool_calling === true ? { toolCalling: true } : {}),
+    ...(asPositiveNumber(record.output_tokens) === null ? {} : { outputTokens: asPositiveNumber(record.output_tokens)! }),
+    ...(record.structured_output === true ? { structuredOutput: true } : {}),
+    ...(record.image_input === true ? { imageInput: true } : {}),
+    ...(record.parallel_tool_calls === true ? { parallelToolCalls: true } : {}),
+    ...(record.reasoning_summaries === true ? { reasoningSummaries: true } : {}),
     ...(efforts.length > 0 ? { efforts } : {}),
     // A default outside the reported set would put the picker on a row it does
     // not draw, so it is only honoured when the model offers it.
@@ -139,6 +145,7 @@ function decodeModel(value: unknown): ModelOption | null {
       : {}),
     ...(inputCost === null ? {} : { inputCostMicros: inputCost }),
     ...(outputCost === null ? {} : { outputCostMicros: outputCost }),
+    ...(cachedInputCost === null ? {} : { cachedInputCostMicros: cachedInputCost }),
   };
 }
 

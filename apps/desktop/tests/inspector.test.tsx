@@ -46,9 +46,8 @@ describe("Inspector relevance", () => {
   test("omits task groups that have no supporting runtime evidence", () => {
     render(<Inspector />);
 
-    // Context is the only group backed by fields the decoder requires, so it
-    // is the only group a bare task can justify. Everything else stays out.
-    expect(screen.getByRole("heading", { name: "Context" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    expect(screen.getByText("Status")).toBeInTheDocument();
     expect(screen.queryByText("Context Compiler")).not.toBeInTheDocument();
     for (const name of ["Environment", "Activity", "Approvals"]) {
       expect(screen.queryByRole("heading", { name })).not.toBeInTheDocument();
@@ -78,22 +77,35 @@ describe("Inspector relevance", () => {
       />,
     );
 
-    await userEvent.setup().click(screen.getByRole("tab", { name: "Run" }));
-    for (const name of [/Subagents, 1 working/, "Verification, 1/1"]) {
-      expect(screen.getByRole("button", { name })).toBeInTheDocument();
-    }
-    for (const name of ["Activity", "Approvals"]) expect(screen.getByRole("heading", { name })).toBeInTheDocument();
-    await userEvent.setup().click(screen.getByRole("tab", { name: "Context" }));
-    expect(screen.getByRole("heading", { name: "Environment" })).toBeInTheDocument();
-    // The Changes row carries the +/- counts parsed off the proposed patch and
-    // is the panel's only route into the review surface.
-    const changes = screen.getByRole("button", { name: "Open patch review" });
-    expect(changes).toHaveTextContent("+1");
-    expect(changes).toHaveTextContent("−1");
+    expect(screen.getByText("Subagents")).toBeInTheDocument();
+    expect(screen.getByText("1 active")).toBeInTheDocument();
+    expect(screen.getByText("Verification")).toBeInTheDocument();
+    expect(screen.getByText("1/1 passed")).toBeInTheDocument();
+    // Blocking approvals moved to the intervention tray above the composer;
+    // the details drawer must not duplicate the same authority.
+    expect(screen.queryByRole("heading", { name: "Approvals" })).not.toBeInTheDocument();
+    const changes = screen.getByRole("button", { name: "Open changes review" });
+    expect(changes).toHaveTextContent("1 file");
     expect(screen.queryByRole("button", { name: "Computer Use" })).not.toBeInTheDocument();
 
     await userEvent.setup().click(changes);
     expect(onShowChanges).toHaveBeenCalledTimes(1);
+  });
+
+  test("keeps raw protocol fields behind Evidence advanced details", async () => {
+    vi.spyOn(arpV2, "getTask").mockResolvedValue(null);
+    const user = userEvent.setup();
+    render(<Inspector />);
+
+    expect(screen.queryByText("Risk class")).not.toBeInTheDocument();
+    expect(screen.queryByText("Contract")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Evidence" }));
+    expect(screen.queryByText("Risk class")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Advanced details, Protocol and receipts/ }));
+    expect(screen.getByText("Risk class")).toBeInTheDocument();
+    expect(screen.getByText("Contract")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy task ID" })).toBeInTheDocument();
   });
 
   test("keeps the last sandbox report visibly stale when a manual refresh fails", async () => {
@@ -124,6 +136,7 @@ describe("Inspector relevance", () => {
     const user = userEvent.setup();
     render(<Inspector />);
 
+    await user.click(screen.getByRole("tab", { name: "Environment" }));
     await user.click(await screen.findByRole("button", { name: /^(Sandbox|Permissions), Enforced/ }));
     expect(screen.getByText("seatbelt-v1")).toBeInTheDocument();
     const refresh = screen.getByRole("button", { name: "Refresh sandbox snapshot" });
@@ -147,6 +160,8 @@ describe("Inspector relevance", () => {
     const user = userEvent.setup();
     render(<Inspector />);
 
+    await user.click(screen.getByRole("tab", { name: "Evidence" }));
+    await user.click(screen.getByRole("button", { name: /Advanced details, Protocol and receipts/ }));
     expect(await screen.findByText("canonical probe timed out")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Retry (task record|canonical task)/ }));
     await waitFor(() => expect(arpV2.getTask).toHaveBeenCalledTimes(2));

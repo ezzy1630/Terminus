@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { Composer, describeTurnFailure } from "../src/components/Composer";
 import { useTerminusStore } from "../src/hooks/use-terminus";
 import { api, TerminusApiError } from "../src/lib/api";
-import { EMPTY_INVENTORY, useModelSelection } from "../src/lib/models";
+import { EMPTY_INVENTORY, effortsFor, normalizeEffort, useModelSelection } from "../src/lib/models";
 import type { ModelInventory, ModelOption, Provider } from "../src/lib/models";
 import type { Session, Task } from "../src/types";
 
@@ -43,7 +43,7 @@ vi.mock("../src/lib/api", async () => {
       listProviderModels: vi.fn(async () => ({
         providers: [{ id: "anthropic", label: "Anthropic", available: true }],
         models: [
-          { id: "sonnet", provider: "anthropic", label: "Sonnet", slug: "claude-sonnet-4-6", reasoning: true, context_tokens: 200000 },
+          { id: "sonnet", provider: "anthropic", label: "Sonnet", slug: "claude-sonnet-4-6", reasoning: true, context_tokens: 200000, reasoning_efforts: ["low", "medium", "high", "max"], default_reasoning_effort: "medium" },
           { id: "haiku", provider: "anthropic", label: "Haiku", slug: "claude-haiku-4-6", reasoning: false, context_tokens: 200000 },
         ],
       })),
@@ -54,7 +54,7 @@ vi.mock("../src/lib/api", async () => {
 const now = new Date().toISOString();
 
 function model(overrides: Partial<ModelOption> = {}): ModelOption {
-  return { id: "sonnet", provider: "anthropic", label: "Sonnet", slug: "claude-sonnet-4-6", reasoning: true, contextTokens: 200_000, ...overrides };
+  return { id: "sonnet", provider: "anthropic", label: "Sonnet", slug: "claude-sonnet-4-6", reasoning: true, contextTokens: 200_000, efforts: ["low", "medium", "high", "max"], defaultEffort: "medium", ...overrides };
 }
 
 function account(overrides: Partial<Provider> = {}): Provider {
@@ -94,6 +94,17 @@ function task(overrides: Partial<Task> = {}): Task {
     ...overrides,
   };
 }
+
+test("xhigh remains a distinct selectable reasoning depth", () => {
+  const luna = model({ efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] });
+  expect(normalizeEffort("xhigh")).toBe("xhigh");
+  expect(normalizeEffort("ultra")).toBe("ultra");
+  expect(effortsFor(luna)).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+});
+
+test("does not invent effort levels when a provider reports none", () => {
+  expect(effortsFor(model({ efforts: [] }))).toEqual([]);
+});
 
 beforeEach(() => {
   vi.clearAllMocks();

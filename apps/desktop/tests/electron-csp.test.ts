@@ -9,7 +9,7 @@ import {
   PACKAGED_CSP_API_PLACEHOLDER,
 } from "../electron/csp";
 
-const PACKAGED_POLICY = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+const PACKAGED_POLICY = "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; "
   + "img-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:3050; font-src 'self'; "
   + "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'";
 
@@ -25,6 +25,7 @@ describe("content security policy", () => {
     for (const directive of [
       "default-src",
       "script-src",
+      "worker-src",
       "style-src",
       "img-src",
       "connect-src",
@@ -42,14 +43,29 @@ describe("content security policy", () => {
     const policy = buildContentSecurityPolicy({
       connectSources: devConnectSources("http://localhost:3050"),
       allowInlineScripts: true,
+      allowBlobWorkers: true,
     });
     expect(policy).toContain("script-src 'self' 'unsafe-inline'");
     expect(policy).toContain("ws://localhost:5173");
+    expect(policy).toContain("worker-src 'self' blob:");
     expect(policy).toContain(DEV_RENDERER_ORIGIN);
   });
 
+  test("the dev policy admits the validated alternate control origin", () => {
+    const policy = buildContentSecurityPolicy({
+      connectSources: devConnectSources("http://127.0.0.1:3150"),
+      allowInlineScripts: true,
+      allowBlobWorkers: true,
+    });
+
+    expect(policy).toContain("http://127.0.0.1:3150");
+  });
+
   test("packaged builds never relax script-src", () => {
-    expect(buildContentSecurityPolicy({ connectSources: ["'self'"] })).toContain("script-src 'self';");
+    const policy = buildContentSecurityPolicy({ connectSources: ["'self'"] });
+    expect(policy).toContain("script-src 'self';");
+    expect(policy).toContain("worker-src 'self';");
+    expect(policy).not.toContain("worker-src 'self' blob:");
   });
 
   test("connect sources are de-duplicated", () => {

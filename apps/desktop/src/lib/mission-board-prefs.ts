@@ -36,7 +36,7 @@ interface StoredMissionBoardPreferences extends MissionBoardPreferences {
 
 function defaultPreferences(selectedSessionId: string | null): MissionBoardPreferences {
   return {
-    viewMode: "board",
+    viewMode: "list",
     query: "",
     spaceFilter: selectedSessionId ?? "all",
     statusFilter: "all",

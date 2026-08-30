@@ -1,13 +1,10 @@
 /**
  * Terminus Desktop — Layout shell.
  *
- * Per SPEC §6: adaptive three-region structure with native integrated
- * title bar, persistent left sidebar, primary conversation/working
- * surface, and dynamic right inspector.
+ * Per SPEC §6: adaptive three-region structure with a persistent left
+ * sidebar, primary conversation/working surface, and dynamic right inspector.
  *
  * ┌──────────────────────────────────────────────────────────────┐
- * │ Native integrated title bar (draggable, 40px)                │
- * ├──────────┬───────────────────────────────┬───────────────────┤
  * │ Left     │ Main conversation and working surface              │
  * │ sidebar  │                          ╭─ Dynamic inspector ─╮  │
  * └──────────┴───────────────────────────────┴───────────────────┘
@@ -15,9 +12,9 @@
  * The shell stays desktop-native at every supported window size: columns are
  * docked and both separators can be resized without a phone/rail layout.
  *
- * Per SPEC §5: title bar uses `-webkit-app-region: drag` so the whole
- * bar is draggable; controls inside it opt out with `no-drag`. macOS
- * traffic lights live in the top-left ~80px (we leave that space).
+ * Per SPEC §5: a small drag target remains over the sidebar material. It does
+ * not consume a full application row; controls inside it opt out with
+ * `no-drag`, and macOS traffic lights keep their native inset.
  */
 import { memo, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
@@ -27,33 +24,24 @@ import type { ReactNode } from "react";
 interface LayoutProps {
   sidebar: ReactNode;
   sidebarVisible?: boolean;
+  /** Overlay the sidebar at narrow widths while a technical surface is open. */
+  sidebarOverlay?: boolean;
   main: ReactNode;
   inspector: ReactNode;
   /** Hides the contextual inspector when a technical split needs the width. */
   inspectorVisible?: boolean;
-  /** Optional content for the right side of the title bar (view controls). */
-  right?: ReactNode;
+  /** Native-window control floated beside the traffic lights without a toolbar. */
+  windowControl?: ReactNode;
   /**
-   * Controls that belong to the sidebar, rendered in the title bar's sidebar
-   * band beside the traffic lights. A left-panel toggle sitting at the far
-   * right edge pointed away from the thing it controlled.
-   */
-  left?: ReactNode;
-  /** Optional content for the center of the title bar. */
-  center?: ReactNode;
-  /**
-   * Slim full-width strip rendered directly under the title bar (used for
-   * offline / reconnecting state). Stays out of the drag region.
+   * Slim full-width strip used for offline / reconnecting state.
    */
   banner?: ReactNode;
   /** Makes the shell unavailable to pointer and assistive input behind a modal. */
   backgroundInert?: boolean;
 }
 
-const TITLEBAR_HEIGHT = 40;
-const TRAFFIC_LIGHTS_PAD = 80;
 const SIDEBAR_DEFAULT_WIDTH = 276;
-const SIDEBAR_MIN_WIDTH = 220;
+const SIDEBAR_MIN_WIDTH = 264;
 const SIDEBAR_MAX_WIDTH = 360;
 const INSPECTOR_DEFAULT_WIDTH = 320;
 const INSPECTOR_MIN_WIDTH = 260;
@@ -67,53 +55,6 @@ const RESIZE_HANDLE_WIDTH = 4;
 // width would otherwise pin existing installs to the old, too-narrow rail.
 const SIDEBAR_WIDTH_KEY = "terminus-desktop.sidebar-width.v5";
 const INSPECTOR_WIDTH_KEY = "terminus-desktop.inspector-width.v3";
-interface TitleBarProps {
-  center?: ReactNode;
-  right?: ReactNode;
-  left?: ReactNode;
-}
-
-const TitleBar = memo(function TitleBar({
-  center,
-  right,
-  left,
-}: TitleBarProps): JSX.Element {
-  return (
-    <div
-      className="titlebar-shell titlebar-drag flex items-center justify-between"
-      style={{
-        height: TITLEBAR_HEIGHT,
-        // Leave space for macOS traffic lights on the left.
-        paddingLeft: TRAFFIC_LIGHTS_PAD + 4,
-        paddingRight: 12,
-        WebkitAppRegion: "drag",
-      } as React.CSSProperties}
-    >
-      {/* Sidebar-owned controls, inside the sidebar band. */}
-      <div
-        className="titlebar-actions titlebar-no-drag flex items-center gap-1"
-        style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-      >
-        {left}
-      </div>
-      <div className="flex-1" aria-hidden />
-      {/* Context belongs beside the sidebar, matching native document title bars. */}
-      <div data-testid="titlebar-center" className="titlebar-center flex min-w-0 items-center">
-        {center}
-      </div>
-      {/* Right region — contextual view toggles. The inline app-region repeats
-          the class so the exemption survives even if utility-class ordering
-          changes; Electron only honours the computed value. */}
-      <div
-        className="titlebar-actions titlebar-no-drag flex items-center gap-1"
-        style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-      >
-        {right}
-      </div>
-    </div>
-  );
-});
-
 function readWidth(key: string, fallback: number, min: number, max: number): number {
   if (typeof window === "undefined") return fallback;
   const raw = window.localStorage.getItem(key);
@@ -217,12 +158,11 @@ function ResizeHandle({ label, value, min, max, direction, testId, onChange }: R
 function LayoutImpl({
   sidebar,
   sidebarVisible = true,
+  sidebarOverlay = false,
   main,
   inspector,
   inspectorVisible = true,
-  right,
-  center,
-  left,
+  windowControl,
   banner,
   backgroundInert = false,
 }: LayoutProps): JSX.Element {
@@ -230,13 +170,17 @@ function LayoutImpl({
   const [sidebarWidth, setSidebarWidth] = useState(() => readWidth(SIDEBAR_WIDTH_KEY, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH));
   const [inspectorWidth, setInspectorWidth] = useState(() => readWidth(INSPECTOR_WIDTH_KEY, INSPECTOR_DEFAULT_WIDTH, INSPECTOR_MIN_WIDTH, INSPECTOR_MAX_WIDTH));
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const useSidebarOverlay = sidebarVisible && sidebarOverlay && viewportWidth < 1080;
+  const useInspectorOverlay = inspectorVisible && viewportWidth < 1200;
   const fittedDocks = fitDockWidths({
     viewportWidth,
-    sidebarVisible,
-    inspectorVisible,
+    sidebarVisible: sidebarVisible && !useSidebarOverlay,
+    inspectorVisible: inspectorVisible && !useInspectorOverlay,
     preferredSidebarWidth: sidebarWidth,
     preferredInspectorWidth: inspectorWidth,
   });
+  const renderedSidebarWidth = useSidebarOverlay ? sidebarWidth : fittedDocks.sidebarWidth;
+  const renderedInspectorWidth = useInspectorOverlay ? Math.min(inspectorWidth, 360) : fittedDocks.inspectorWidth;
   const sidebarResizeMax = Math.max(
     SIDEBAR_MIN_WIDTH,
     Math.min(
@@ -278,39 +222,42 @@ function LayoutImpl({
   return (
     <div
       inert={backgroundInert ? true : undefined}
-      className="app-shell flex h-full w-full flex-col bg-canvas text-primary"
+      data-sidebar-visible={sidebarVisible}
+      className="app-shell relative flex h-full w-full flex-col bg-canvas text-primary"
       style={{
         fontFamily: "var(--font-family)",
-        "--titlebar-sidebar-width": sidebarVisible ? `${fittedDocks.sidebarWidth}px` : "0px",
+        "--window-drag-width": sidebarVisible ? `${renderedSidebarWidth}px` : "124px",
       } as React.CSSProperties}
     >
-      <TitleBar
-        left={left ?? null}
-        center={center ?? null}
-        right={right}
-      />
+      <div className="window-drag-zone" aria-hidden />
+      {windowControl ? (
+        <div className="window-control titlebar-no-drag">
+          {windowControl}
+        </div>
+      ) : null}
 
       {banner ?? null}
 
       {/* Three-region body. */}
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         {/* Sidebar. */}
         {sidebarVisible ? <aside
           className={cn(
             "flex h-full flex-col border-r bg-sidebar",
             density === "compact" && "py-0",
+            useSidebarOverlay && "absolute inset-y-0 left-0 z-30 shadow-2xl",
           )}
           style={{
             borderColor: 'var(--sidebar-separator)',
-            width: fittedDocks.sidebarWidth,
-            minWidth: fittedDocks.sidebarWidth,
+            width: renderedSidebarWidth,
+            minWidth: renderedSidebarWidth,
             flexShrink: 0,
           }}
         >
           {sidebar}
         </aside> : null}
 
-        {sidebarVisible ? (
+        {sidebarVisible && !useSidebarOverlay ? (
           <ResizeHandle
             testId="sidebar-resize-handle"
             label="Resize sidebar"
@@ -323,27 +270,32 @@ function LayoutImpl({
         ) : null}
 
         {/* Main working surface and a docked, resizable inspector. */}
-        <main className="app-content flex min-w-0 flex-1">
+        <main className={cn("app-content relative flex min-w-0 flex-1", !sidebarVisible && "app-content-sidebar-hidden")}>
           <section className="flex min-w-0 flex-1 flex-col">
             <div className="min-h-0 flex-1 overflow-hidden">{main}</div>
           </section>
 
           {inspectorVisible ? (
             <>
-              <ResizeHandle
-                testId="inspector-resize-handle"
-                label="Resize inspector"
-                value={fittedDocks.inspectorWidth}
-                min={INSPECTOR_MIN_WIDTH}
-                max={inspectorResizeMax}
-                direction="left"
-                onChange={resizeInspector}
-              />
+              {!useInspectorOverlay ? (
+                <ResizeHandle
+                  testId="inspector-resize-handle"
+                  label="Resize inspector"
+                  value={fittedDocks.inspectorWidth}
+                  min={INSPECTOR_MIN_WIDTH}
+                  max={inspectorResizeMax}
+                  direction="left"
+                  onChange={resizeInspector}
+                />
+              ) : null}
               <div
                 data-testid="inspector-dock"
-                data-layout="docked"
-                className="inspector-dock flex h-full shrink-0 flex-col"
-                style={{ width: fittedDocks.inspectorWidth }}
+                data-layout={useInspectorOverlay ? "overlay" : "docked"}
+                className={cn(
+                  "inspector-dock flex h-full shrink-0 flex-col",
+                  useInspectorOverlay && "absolute inset-y-0 right-0 z-30 shadow-2xl",
+                )}
+                style={{ width: renderedInspectorWidth }}
               >
                 {/* One contextual surface, inset from the transcript. It is
                     still a docked region: resizing and persistence belong to

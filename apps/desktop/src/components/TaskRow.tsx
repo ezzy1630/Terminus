@@ -11,14 +11,10 @@
  *
  * The row is a title. Everything else has to earn its width:
  *
- *   - **The unread dot**, leading, in the accent colour. Read-state is not a
- *     status and must not be dressed as one: "nobody has looked at this" is
- *     orthogonal to "this is blocked", and a task can easily be both. It reads
- *     the way every mail client has taught it — a blue dot in a reserved
- *     gutter, so titles stay aligned whether or not a row is marked.
- *   - **The status mark**, trailing. Only when the agent is moving or a human
- *     is wanted. A dot on every row is decoration, and thirty of them is an
- *     alarm panel.
+ *   - **The outcome mark**, leading. Red means the thread needs attention.
+ *     Blue means completed work has not been read. No lifecycle prose is
+ *     repeated in the row.
+ *   - **The progress ring**, trailing. Only while the agent is moving.
  *   - **The project.** Only when the row's position does not already say. A
  *     list whose rows all come from one repository does not need that word
  *     thirty times, and in a 256px rail it costs ~40% of the line.
@@ -33,7 +29,6 @@ import { memo, type KeyboardEventHandler, type ReactNode } from "react";
 import { Check, Dot, Pin } from "lucide-react";
 import { cn } from "../lib/cn";
 import { lifecycleIsActive, lifecycleShortLabel, type TaskLifecycle } from "../lib/task-lifecycle";
-import { StatusIndicator } from "./StatusIndicator";
 import { Button } from "../ui/Button";
 import { IconButton } from "../ui/IconButton";
 
@@ -124,21 +119,15 @@ export interface TaskRowProps {
  * `StatusIndicator` draws it, here and on the board, so the two surfaces
  * cannot drift into two colour maps for one vocabulary.
  */
-function RowGlyph({ status }: { status: TaskLifecycle }): JSX.Element {
-  return <StatusIndicator status={status} size={8} />;
-}
-
-/**
- * Nobody has looked at this yet.
- *
- * Accent blue, and only ever this — it is the one mark in the rail that is not
- * about what the agent is doing, so it must not be confusable with the amber,
- * red and green that are. The gutter is reserved on every row so a list does
- * not re-align itself as things are read.
- */
-function UnreadDot(): JSX.Element {
+function OutcomeDot({ kind }: { kind: "attention" | "unread-complete" }): JSX.Element {
   return (
-    <span className="block h-1.5 w-1.5 rounded-full bg-accent" aria-hidden />
+    <span
+      className={cn(
+        "block h-1.5 w-1.5 rounded-full",
+        kind === "attention" ? "bg-error" : "bg-accent",
+      )}
+      aria-hidden
+    />
   );
 }
 
@@ -165,17 +154,21 @@ function TaskRowImpl({
   primaryTabIndex,
   onPrimaryKeyDown,
 }: TaskRowProps): JSX.Element {
-  // A mark is earned, not default: the agent is moving, or a human is wanted.
-  // Being unread is not a status and gets its own mark, in its own gutter.
-  const showGlyph = status !== undefined && (lifecycleIsActive(status) || needsYou);
-  const glyph = showGlyph && status ? <RowGlyph status={status} /> : null;
+  const active = status !== undefined && lifecycleIsActive(status);
+  const attention = needsYou || status === "failed";
+  const completedUnread = unread && (status === "done" || status === "review" || status === "cancelled");
+  const outcome = attention ? "attention" : completedUnread ? "unread-complete" : null;
+  const glyph = active ? <span className="spinner-sm" role="img" aria-label="working" /> : null;
 
   // Shelved rows stand a row taller than the history below; only the blocked
   // one is set at full strength. Geometry is otherwise identical everywhere,
   // which is what lets the eye read the whole column as one list.
   const shelved = emphasis !== "normal";
   const loud = emphasis === "queue";
-  const stacked = layout === "stacked";
+  // A second line is reserved for real context such as a project name. Merely
+  // selecting a row does not make lifecycle prose reappear beneath it.
+  const stacked = layout === "stacked" || Boolean(meta || context || detail);
+  const resolvedDetail = detail;
 
   const trailingAction: ReactNode = onTogglePin ? (
     <Button
@@ -216,9 +209,9 @@ function TaskRowImpl({
     />
   ) : null;
 
-  const tooltip = [title, meta, context, detail, reason]
+  const tooltip = [title, meta, context, resolvedDetail, reason]
     .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
-    .join(" — ");
+    .join(" - ");
 
   return (
     <div
@@ -236,9 +229,9 @@ function TaskRowImpl({
         // the nav row's height made these rows *shorter* than task rows in the
         // spacious one.
         height: stacked && selected && context
-          ? 70
+          ? 58
           : stacked
-            ? 58
+            ? 48
             : shelved
               ? "calc(var(--row-height) + 2px)"
               : "var(--row-height)",
@@ -247,13 +240,9 @@ function TaskRowImpl({
         paddingRight: stacked ? 10 : 6,
       }}
     >
-      {/* The unread gutter. Reserved on every row, in every list, so reading
-          one thing does not shift the thirty titles underneath it sideways. */}
-      {stacked ? null : (
-        <span className="flex h-1.5 w-1.5 shrink-0 items-center justify-center">
-          {unread ? <UnreadDot /> : null}
-        </span>
-      )}
+      <span className="flex h-1.5 w-1.5 shrink-0 items-center justify-center">
+        {outcome ? <OutcomeDot kind={outcome} /> : null}
+      </span>
       <Button
         ref={primaryButtonRef}
         variant="bare"
@@ -270,7 +259,7 @@ function TaskRowImpl({
           title,
           meta ? `in ${meta}` : null,
           context ? `using ${context}` : null,
-          detail && detail !== reason ? detail : null,
+          resolvedDetail && resolvedDetail !== reason ? resolvedDetail : null,
           reason ?? (status ? `status ${lifecycleShortLabel(status)}` : null),
           unread ? "unread" : null,
           selected ? "selected" : null,
@@ -288,12 +277,12 @@ function TaskRowImpl({
             <span className={cn("ui-body w-full min-w-0 flex-none truncate text-primary", loud && "font-medium")}>
               {title}
             </span>
-            {meta || detail ? (
+            {meta || resolvedDetail ? (
               <span className="flex w-full min-w-0 items-baseline gap-2">
                 {meta ? <span className="ui-meta min-w-0 flex-1 truncate">{meta}</span> : <span className="flex-1" />}
-                {detail ? (
+                {resolvedDetail ? (
                   <span className="ui-meta max-w-[52%] shrink-0 truncate text-secondary">
-                    {detail}
+                    {resolvedDetail}
                   </span>
                 ) : null}
               </span>

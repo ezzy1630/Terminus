@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, FileDiff, PanelRightClose, Send } from "lucide-react";
+import { ArrowLeft, Check, FileDiff, PanelRightClose, Send } from "lucide-react";
 import { cn } from "../lib/cn";
 import { DiffViewer, parseUnifiedDiff, type DiffCommentAnchor, type DiffFile } from "./DiffViewer";
 import { EmptyState } from "../ui/EmptyState";
@@ -299,6 +299,7 @@ function ReviewPaneImpl({
   const [inventoryRequestVersion, setInventoryRequestVersion] = useState(0);
   const [previewRequestVersion, setPreviewRequestVersion] = useState(0);
   const [revisionQueued, setRevisionQueued] = useState(false);
+  const [reviewedSourceIds, setReviewedSourceIds] = useState<Set<string>>(() => new Set());
   const loadMoreInFlightRef = useRef(false);
 
   useEffect(() => {
@@ -396,6 +397,7 @@ function ReviewPaneImpl({
     setSelectedEventSourceId(null);
     setBrowsingArtifacts(false);
     setLoadingMore(false);
+    setReviewedSourceIds(new Set());
     loadMoreInFlightRef.current = false;
   }, [taskId]);
 
@@ -629,14 +631,12 @@ function ReviewPaneImpl({
           label: "no active review evidence",
         };
   const visibleComments = comments.filter((comment) => comment.sourceId === activeSource.id);
+  const reviewedLocally = reviewedSourceIds.has(activeSource.id);
 
   return (
     <section className="flex h-full min-w-0 flex-1 flex-col bg-diff" aria-label="Changes review">
-      {/* Title, the +/- totals, and the one control that closes the pane.
-          There is no Approve or Request-changes button because there is no
-          endpoint behind either: review decisions live entirely in this
-          client (notes in localStorage), so the only way a review reaches the
-          agent is the "Add to composer" action in the footer. */}
+      {/* Title, bounded change totals, and close. Unsupported editor, restore,
+          apply, and authoritative review controls stay absent. */}
       <header className="ui-view-header">
         {openArtifact ? (
           <Button
@@ -657,7 +657,9 @@ function ReviewPaneImpl({
             {openArtifact.artifact.purpose}
           </span>
         ) : viewerStats.files > 0 ? (
-          <span className="flex-shrink-0 font-mono text-xs tabular-nums">
+          <span className="flex-shrink-0 text-xs tabular-nums text-tertiary">
+            <span>{viewerStats.files} {viewerStats.files === 1 ? "file" : "files"}</span>
+            <span aria-hidden> · </span>
             <span className="text-addition">+{viewerStats.additions.toLocaleString()}</span>
             {" "}
             <span className="text-deletion">&minus;{viewerStats.deletions.toLocaleString()}</span>
@@ -935,23 +937,49 @@ function ReviewPaneImpl({
           </Button>
         </div>
       ) : null}
-      {visibleComments.length > 0 ? (
-        <footer className="flex flex-shrink-0 items-center gap-2 border-t border-subtle px-3 py-2 text-secondary text-xs" >
-          <Send size={13} />
-          <span>{visibleComments.length} {visibleComments.length === 1 ? "review note" : "review notes"} for {activeSource.label}.</span>
+      {viewerFiles.length > 0 ? (
+        <footer className="flex flex-shrink-0 items-center gap-2 border-t border-subtle px-3 py-2 text-secondary text-xs">
+          {reviewedLocally ? <Check size={13} aria-hidden /> : <Send size={13} aria-hidden />}
+          <span>{visibleComments.length} {visibleComments.length === 1 ? "comment" : "comments"}</span>
+          <span className="hidden min-w-0 truncate text-tertiary xl:inline">
+            {reviewedLocally ? "Reviewed in this window" : "Review state is local to this window"}
+          </span>
           <Button
             type="button"
+            variant="secondary"
+            size="sm"
+            aria-pressed={reviewedLocally}
+            data-tooltip="This does not change task, Git, or review state outside this window."
+            onClick={() => {
+              setReviewedSourceIds((current) => {
+                const next = new Set(current);
+                if (next.has(activeSource.id)) next.delete(activeSource.id);
+                else next.add(activeSource.id);
+                return next;
+              });
+            }}
+            className="ml-auto"
+          >
+            {reviewedLocally ? "Reviewed locally" : "Mark reviewed locally"}
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            disabled={visibleComments.length === 0}
+            data-tooltip={visibleComments.length === 0
+              ? "Add at least one comment before drafting a change request."
+              : "Adds these comments to the composer. You choose when to send them."}
             onClick={() => {
               const note = visibleComments.map((comment) => `- [${comment.sourceLabel}] ${comment.filePath}:${comment.anchor}:${comment.lineNo} — ${comment.body}`).join("\n");
               onDraftRevision(`Please address this code review feedback:\n${note}`);
               setRevisionQueued(true);
               window.setTimeout(() => setRevisionQueued(false), 1600);
             }}
-            className="ml-auto rounded-sm px-2 py-1 text-primary hover:bg-hover"
           >
-            {revisionQueued ? "Added" : "Add to composer"}
+            {revisionQueued ? "Drafted" : "Draft change request"}
           </Button>
-          <span className="sr-only" aria-live="polite">{revisionQueued ? "Review notes added to composer" : ""}</span>
+          <span className="sr-only" aria-live="polite">{revisionQueued ? "Review request added to the composer" : ""}</span>
         </footer>
       ) : null}
     </section>

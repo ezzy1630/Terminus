@@ -118,7 +118,7 @@ describe("Conversation accessibility traversal", () => {
     expect(screen.getByText("Live history has a retention gap")).toBeInTheDocument();
   });
 
-  test("keeps provider reasoning visible when no phase event was retained", () => {
+  test("does not expose provider reasoning prose as run detail", () => {
     render(<Conversation events={[
       event("reasoning-start", "turn.started", {
         user_input: "Check the shell",
@@ -131,9 +131,8 @@ describe("Conversation accessibility traversal", () => {
       }),
     ]} />);
 
-    const trace = screen.getByRole("button", { name: /Thought for 1\.0s/ });
-    fireEvent.click(trace);
-    expect(screen.getByText("Checked the packaged shell before changing it.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Run details/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("Checked the packaged shell before changing it.")).not.toBeInTheDocument();
   });
 });
 
@@ -247,15 +246,14 @@ describe("ReasoningTrace", () => {
       ],
     }} />);
 
-    const summary = screen.getByRole("button", { name: /Thought for 4\.5s/ });
+    const summary = screen.getByRole("button", { name: /Run details · 4\.5s/ });
     expect(summary).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("Reading context")).not.toBeInTheDocument();
+    expect(screen.queryByText("Read context")).not.toBeInTheDocument();
 
     fireEvent.click(summary);
     expect(summary).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("This model did not expose a reasoning trace.")).toBeInTheDocument();
-    expect(screen.getByText("Reading context")).toBeInTheDocument();
-    expect(screen.getByText("Thinking")).toBeInTheDocument();
+    expect(screen.getByText("Read context")).toBeInTheDocument();
+    expect(screen.getByText("Model response")).toBeInTheDocument();
   });
 
   test("renders nothing for a settled turn that reported no phases", () => {

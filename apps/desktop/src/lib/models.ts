@@ -63,18 +63,20 @@ export function billingBadge(provider: Provider): string | null {
 }
 
 /**
- * Reasoning depth. Effort and speed are one axis, not two: every step up buys
- * depth by spending time. Exposing them as separate controls would let an
- * operator ask for "max depth, fastest" and get neither.
+ * Provider-reported reasoning depth. Transport speed modes are a separate
+ * capability and must only appear when the model inventory reports them; the
+ * current inventory contract does not, so the desktop never guesses one.
  */
-export const EFFORTS = ["low", "medium", "high", "max"] as const;
+export const EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type Effort = (typeof EFFORTS)[number];
 
 export const EFFORT_LABELS: Record<Effort, { label: string; note: string }> = {
-  low: { label: "Low", note: "Fastest — mechanical edits and lookups" },
-  medium: { label: "Medium", note: "Balanced — the usual default" },
-  high: { label: "High", note: "Slower — multi-file reasoning and design" },
-  max: { label: "Max", note: "Slowest — hard debugging, wide search" },
+  low: { label: "Low", note: "Light reasoning" },
+  medium: { label: "Medium", note: "Balanced reasoning" },
+  high: { label: "High", note: "Deep reasoning" },
+  xhigh: { label: "XHigh", note: "Extra-deep reasoning" },
+  max: { label: "Max", note: "Maximum reasoning" },
+  ultra: { label: "Ultra", note: "Ultra reasoning" },
 };
 
 export interface ModelOption {
@@ -96,14 +98,18 @@ export interface ModelOption {
   /** The model's context window in tokens. One value — models have one. */
   contextTokens: number;
   toolCalling?: boolean;
+  outputTokens?: number;
+  structuredOutput?: boolean;
+  imageInput?: boolean;
+  parallelToolCalls?: boolean;
+  reasoningSummaries?: boolean;
   /**
    * The reasoning depths this model actually accepts, in Terminus's own
-   * vocabulary. Empty means the provider named none, and the picker then
-   * offers all four rather than pretending to know better.
+   * vocabulary. Empty means the provider named none, so the picker offers no
+   * effort control rather than pretending to know the model's ladder.
    *
-   * Provider spellings are folded here rather than shown raw: `minimal` and
-   * `low` are both Low, `xhigh`/`ultra`/`max` are all Max. Two rows that mean
-   * the same depth are a choice the operator cannot make correctly.
+   * Provider spellings are normalized here: `minimal` maps to Low, while
+   * XHigh, Max, and Ultra remain distinct when reported.
    */
   efforts?: readonly Effort[];
   /** What the provider runs this model at when nobody says. */
@@ -114,10 +120,11 @@ export interface ModelOption {
    */
   inputCostMicros?: number;
   outputCostMicros?: number;
+  cachedInputCostMicros?: number;
 }
 
 /**
- * Provider effort spellings → the four Terminus offers.
+ * Provider effort spellings → the five Terminus offers.
  *
  * The control plane clamps the value back to the provider's own set when it
  * renders the request, so this mapping only has to be honest in one direction:
@@ -130,8 +137,8 @@ const EFFORT_ALIASES: Readonly<Record<string, Effort>> = {
   medium: "medium",
   default: "medium",
   high: "high",
-  xhigh: "max",
-  ultra: "max",
+  xhigh: "xhigh",
+  ultra: "ultra",
   max: "max",
 };
 
@@ -139,11 +146,10 @@ export function normalizeEffort(value: string): Effort | null {
   return EFFORT_ALIASES[value.trim().toLowerCase()] ?? null;
 }
 
-/** The depths a model offers, in Terminus's fixed order. Never empty. */
+/** The depths a model explicitly offers, in Terminus's fixed order. */
 export function effortsFor(model: ModelOption): readonly Effort[] {
   const offered = model.efforts ?? [];
-  const kept = EFFORTS.filter((level) => offered.includes(level));
-  return kept.length > 0 ? kept : EFFORTS;
+  return EFFORTS.filter((level) => offered.includes(level));
 }
 
 /** `3_000_000` → `$3/M`. Null when the provider named no price. */
@@ -198,6 +204,7 @@ function isEffort(value: unknown): value is Effort {
 export function effortFor(model: ModelOption, preferred: Effort): Effort | null {
   if (!model.reasoning) return null;
   const offered = effortsFor(model);
+  if (offered.length === 0) return null;
   if (offered.includes(preferred)) return preferred;
   const wanted = EFFORTS.indexOf(preferred);
   let nearest = offered[0] ?? preferred;
@@ -339,7 +346,7 @@ export function useModelSelection(
       contextTokens: 0,
       ...(storedEffort ? { efforts: [storedEffort], defaultEffort: storedEffort } : {}),
     };
-  }, [session?.default_model, session?.default_reasoning_effort, sessionAccountId, sessionId, sessionModel]);
+  }, [session, sessionAccountId, sessionId, sessionModel]);
 
   // A pick belongs to the session it was made in. Switching projects must not
   // carry one project's choice into another's turns.
