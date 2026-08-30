@@ -152,6 +152,8 @@ def _run_request(task_dir: Path) -> RunRequest:
         ),
         random_seed=42,
         budgets=Budgets(),
+        provider_account_id="account-test",
+        provider_endpoint="https://api.example.test/v1",
     )
 
 
@@ -433,13 +435,19 @@ def _attempt_row(
         "cost_source": "free_model_contract",
         "started_at": "2026-08-29T12:00:00+00:00",
         "completed_at": "2026-08-29T12:00:01+00:00",
+        "request_artifact": f"artifact://sha256/{number:064x}",
+        "response_artifact": f"artifact://sha256/{number + 100:064x}",
     }
 
 
 def test_provider_receipts_project_every_immutable_attempt_field() -> None:
     rows = [_attempt_row(), _attempt_row(2, provider_request_id=None)]
 
-    receipts = provider_receipts_from_route(rows)
+    receipts = provider_receipts_from_route(
+        rows,
+        endpoint_hash="sha256:" + "e" * 64,
+        account_hash="sha256:" + "a" * 64,
+    )
 
     assert len(receipts) == 2
     first = receipts[0]
@@ -447,7 +455,7 @@ def test_provider_receipts_project_every_immutable_attempt_field() -> None:
     assert first["receipt_id"] == "attempt-1"
     assert first["provider"] == "acct-chatgpt"
     assert first["model"] == "gpt-5.6"
-    assert first["artifact_ref"] == "provider-request-1"
+    assert first["artifact_ref"] == "artifact://sha256/" + f"{101:064x}"
     assert first["verified"] is True
     assert first["provider_attempt_id"] == "attempt-1"
     assert first["provider_id"] == "acct-chatgpt"
@@ -457,10 +465,11 @@ def test_provider_receipts_project_every_immutable_attempt_field() -> None:
     assert first["provider_request_id"] == "provider-request-1"
     assert first["computed_cost_micros"] == "1234"
     assert first["started_at"] == "2026-08-29T12:00:00+00:00"
-    # An attempt without a provider request id still has a durable Terminus
-    # attempt identity. It is retained as an opaque reference, not dropped.
-    assert receipts[1]["artifact_ref"] == "attempt-2"
+    # An attempt without a provider request id remains visible for accounting,
+    # but cannot qualify as a verified provider receipt.
+    assert receipts[1]["artifact_ref"] == "artifact://sha256/" + f"{102:064x}"
     assert receipts[1]["provider_request_id"] is None
+    assert not has_complete_provider_receipt(receipts[1])
 
 
 @pytest.mark.parametrize(
@@ -496,7 +505,7 @@ def test_provider_receipt_projection_fails_closed_on_partial_or_reordered_rows()
 class _ReceiptStubControlPlane(_StubControlPlane):
     attempt_rows: ClassVar[list[dict[str, Any]]] = [
         _attempt_row(),
-        _attempt_row(2, provider_request_id=None),
+        _attempt_row(2, provider_request_id="provider-request-2"),
     ]
 
 
@@ -561,7 +570,7 @@ def test_live_run_projects_attempts_into_provider_receipts(
     assert len(result.provider_receipts) == 2
     assert all(has_complete_provider_receipt(receipt) for receipt in result.provider_receipts)
     assert result.provider_receipts[0]["receipt_id"] == "attempt-1"
-    assert result.provider_receipts[1]["artifact_ref"] == "attempt-2"
+    assert result.provider_receipts[1]["artifact_ref"] == "artifact://sha256/" + f"{102:064x}"
     assert result.metrics["provider_receipts_complete"] is True
     receipt_artifact = next(
         artifact for artifact in result.artifacts if artifact.get("kind") == "provider_receipts"

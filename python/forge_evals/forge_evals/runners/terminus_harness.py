@@ -40,6 +40,7 @@ Configuration (all required unless a fake server supplies them in tests):
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -213,6 +214,16 @@ class TerminusHarness:
                 original_turn_id=turn_id,
                 original_turn_attempts=turn_attempts,
                 task_detail=task_detail,
+                endpoint_hash=_provider_binding_hash(
+                    admitted_request.provider_endpoint_hash,
+                    admitted_request.provider_endpoint,
+                    missing="provider_endpoint_hash",
+                ),
+                account_hash=_provider_binding_hash(
+                    admitted_request.provider_account_hash,
+                    admitted_request.provider_account_id,
+                    missing="provider_account_hash",
+                ),
             )
         )
         metrics = reconcile_metrics(
@@ -413,6 +424,8 @@ class TerminusHarness:
         original_turn_id: str,
         original_turn_attempts: list[Any] | None,
         task_detail: Mapping[str, Any],
+        endpoint_hash: str = "missing:provider_endpoint_hash",
+        account_hash: str = "missing:provider_account_hash",
     ) -> tuple[list[dict[str, Any]], str, list[str]]:
         """Collect receipts for the proposal turn and every repair continuation.
 
@@ -440,7 +453,11 @@ class TerminusHarness:
 
         receipts: list[dict[str, Any]] = []
         for turn_id, rows in turn_rows:
-            projected = provider_receipts_from_route(rows)
+            projected = provider_receipts_from_route(
+                rows,
+                endpoint_hash=endpoint_hash,
+                account_hash=account_hash,
+            )
             status = _receipt_projection_status(rows, projected)
             if status != "complete":
                 return [], status, turn_ids
@@ -1024,6 +1041,8 @@ _RECEIPT_API_FIELDS = (
     "cost_source",
     "started_at",
     "completed_at",
+    "request_artifact",
+    "response_artifact",
 )
 
 
@@ -1056,7 +1075,12 @@ def _repair_turn_ids(original_turn_id: str, rows: Any) -> list[str] | None:
     return turn_ids
 
 
-def provider_receipts_from_route(rows: Any) -> list[dict[str, Any]]:
+def provider_receipts_from_route(
+    rows: Any,
+    *,
+    endpoint_hash: str = "missing:provider_endpoint_hash",
+    account_hash: str = "missing:provider_account_hash",
+) -> list[dict[str, Any]]:
     """Project the attempts route into opaque, immutable provider receipts.
 
     ``GET /v1/turns/:id/attempts`` is the control plane's typed accounting
@@ -1104,24 +1128,42 @@ def provider_receipts_from_route(rows: Any) -> list[dict[str, Any]]:
         seen_attempt_numbers.add(attempt_number)
         previous_attempt_number = attempt_number
 
-        artifact_ref = _first_nonempty_text(
-            row.get("response_artifact"),
-            row.get("artifact_ref"),
-            row.get("provider_request_id"),
-            attempt_id,
-        )
+        response_artifact = _first_nonempty_text(row.get("response_artifact"))
+        artifact_ref = _first_nonempty_text(response_artifact, row.get("artifact_ref"), attempt_id)
         if artifact_ref is None:
             return []
 
+        provider_request_id = _first_nonempty_text(row.get("provider_request_id"))
+        usage = row["usage"]
+        if not isinstance(usage, Mapping):
+            return []
+        normalized_usage = dict(usage)
+        normalized_usage["input"] = _decimal_as_int(usage.get("input_tokens"))
+        normalized_usage["output"] = _decimal_as_int(usage.get("output_tokens"))
+        binding_verified = (
+            _safe_evidence_hash(endpoint_hash)
+            and _safe_evidence_hash(account_hash)
+            and provider_request_id is not None
+            and response_artifact is not None
+            and response_artifact.startswith("artifact://sha256/")
+        )
+
         receipt: dict[str, Any] = {
             "receipt_id": attempt_id,
+            "receipt_kind": "provider",
             "provider": row["provider_id"],
             "model": row["model"],
+            "request_id": provider_request_id,
+            "endpoint_hash": endpoint_hash,
+            "account_hash": account_hash,
             "artifact_ref": artifact_ref,
+            "request_artifact_ref": row["request_artifact"],
+            "response_artifact_ref": response_artifact,
             # `verified` means this adapter validated the authenticated,
-            # immutable route shape.  Independent task grading remains a
+            # immutable route shape *and* the caller supplied a redacted
+            # endpoint/account binding. Independent task grading remains a
             # separate HarnessResult field and is never inferred here.
-            "verified": True,
+            "verified": binding_verified,
         }
         for key in _RECEIPT_API_FIELDS:
             if key in row:
@@ -1129,6 +1171,7 @@ def provider_receipts_from_route(rows: Any) -> list[dict[str, Any]]:
                 receipt[key] = (
                     dict(value) if key == "usage" and isinstance(value, Mapping) else value
                 )
+        receipt["usage"] = normalized_usage
         # A future control plane can expose the response artifact directly;
         # retain it rather than hiding a stronger immutable reference behind
         # the generic `artifact_ref` field.
@@ -1138,6 +1181,32 @@ def provider_receipts_from_route(rows: Any) -> list[dict[str, Any]]:
         receipts.append(receipt)
 
     return receipts
+
+
+def _provider_binding_hash(explicit: str | None, raw: str | None, *, missing: str) -> str:
+    """Return the identity hash used by :func:`build_evaluation_identity`.
+
+    Raw routing values exist only at the runner boundary. The benchmark
+    artifact receives the same canonical JSON hash, never the endpoint or
+    account identifier itself.
+    """
+    if explicit is not None:
+        return explicit
+    if raw is None:
+        return f"missing:{missing}"
+    encoded = json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _safe_evidence_hash(value: str) -> bool:
+    return value.startswith("sha256:") and len(value) == 71
+
+
+def _decimal_as_int(value: Any) -> int:
+    """Convert a validated non-negative integral accounting value."""
+    if isinstance(value, bool):
+        raise ValueError("boolean is not a token count")
+    return int(value)
 
 
 def _receipt_projection_status(

@@ -6763,6 +6763,8 @@ const routes: Route[] = [
         providerReportedCostMicros: true,
         computedCostMicros: true,
         costSource: true,
+        requestArtifact: true,
+        responseArtifact: true,
         startedAt: true,
         completedAt: true,
       },
@@ -6781,6 +6783,8 @@ const routes: Route[] = [
       provider_reported_cost_micros: attempt.providerReportedCostMicros?.toString() ?? null,
       computed_cost_micros: attempt.computedCostMicros?.toString() ?? null,
       cost_source: attempt.costSource,
+      request_artifact: attempt.requestArtifact,
+      response_artifact: attempt.responseArtifact,
       started_at: attempt.startedAt.toISOString(),
       completed_at: attempt.completedAt?.toISOString() ?? null,
     })));

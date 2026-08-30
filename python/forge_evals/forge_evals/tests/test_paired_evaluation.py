@@ -36,6 +36,8 @@ def _identity(task: str, seed: int, harness: str) -> EvaluationIdentity:
         budget_hash="sha256:budget",
         tool_schema_hash="sha256:tools",
         instruction_hash="sha256:instructions",
+        provider_endpoint_hash="sha256:" + "e" * 64,
+        provider_account_hash="sha256:" + "a" * 64,
     )
 
 
@@ -54,9 +56,15 @@ def _record(task: str, seed: int, harness: str, passed: bool) -> RunRecord:
         provider_receipts=[
             {
                 "receipt_id": f"receipt-{harness}-{task}-{seed}",
+                "receipt_kind": "provider",
                 "provider": "provider",
                 "model": "model-v1",
-                "artifact_ref": f"sha256:{seed:064x}",
+                "request_id": f"request-{harness}-{task}-{seed}",
+                "endpoint_hash": "sha256:" + "e" * 64,
+                "account_hash": "sha256:" + "a" * 64,
+                "artifact_ref": f"artifact://sha256/{seed:064x}",
+                "response_artifact_ref": f"artifact://sha256/{seed:064x}",
+                "usage": {"input": 100, "output": 50},
                 "verified": True,
             }
         ],
