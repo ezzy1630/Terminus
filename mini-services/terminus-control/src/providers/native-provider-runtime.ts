@@ -155,18 +155,28 @@ export async function dispatchNativeRequest(
   });
 
   // Pre-flight: refuse before spending when the prediction exceeds budget.
-  // Preflight uses the FULL expected input (stable prefix + tail) plus the
-  // renderer's output/reasoning reserves, so a passing budget check cannot
-  // be exceeded by the actual generation (Cubic R7 follow-up).
+  // The compiler supplies the full input estimate, while the renderer's
+  // output/reasoning reserves bound generation (Cubic R7 follow-up).
   const outputReserve = rendered.request.outputReserveTokens ?? (0n as TokenCount);
   const reasoningReserve = rendered.request.reasoningReserveTokens ?? (0n as TokenCount);
-  const totalInput = (rendered.predictedCachedTokens + outputReserve + reasoningReserve) as TokenCount;
+  const totalInput = rendered.estimatedInputTokens
+    ?? ((rendered.predictedCachedTokens + outputReserve + reasoningReserve) as TokenCount);
+  // A reusable prefix is only a cheap read after the provider has it. When
+  // the capability declares a distinct write rate, budget for a cold write;
+  // post-response reconciliation will replace this bound with observed usage.
+  const possibleCacheWriteTokens = economics.cacheWriteMicrosPerMillion === undefined
+    ? (0n as TokenCount)
+    : (rendered.predictedCacheWriteTokens ?? rendered.predictedCachedTokens);
+  // Preflight cannot prove that an automatic cache entry is warm. Price a
+  // possible miss at the ordinary input rate; observed reads settle cheaper.
+  const predictedCacheReadTokens = 0n as TokenCount;
   const estimated = estimateCostMicros(
     {
       promptTokens: totalInput,
       predictedOutputTokens: outputReserve,
       predictedReasoningTokens: reasoningReserve,
-      predictedCachedTokens: rendered.predictedCachedTokens,
+      predictedCachedTokens: predictedCacheReadTokens,
+      cacheWriteTokens: possibleCacheWriteTokens,
     },
     economics,
   );
@@ -238,6 +248,7 @@ export async function dispatchNativeRequest(
         predictedOutputTokens: usage.outputTokens,
         predictedReasoningTokens: usage.reasoningTokens,
         predictedCachedTokens: usage.cachedInputTokens,
+        cacheWriteTokens: usage.cacheWriteTokens,
       },
       economics,
     );

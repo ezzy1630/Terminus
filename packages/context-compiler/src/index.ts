@@ -2226,6 +2226,23 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     );
   }
 
+  const fragmentTokenCosts = selectedFragments.map((fragment) => tokenCostFor(
+    fragment,
+    input.model.modelKey,
+    input.provider.providerId,
+    tokenizer,
+  ));
+  const totalFragmentTokens = fragmentTokenCosts.reduce((sum, tokens) => sum + tokens, 0);
+  const toolSchemaTokens = tokenizer.estimateToolSchemaTokens(toolSchemas);
+  const latestCacheBreakpoint = cachePlan.breakpoints.length === 0
+    ? -1
+    : Math.max(...cachePlan.breakpoints);
+  const cacheWriteFragmentTokens = latestCacheBreakpoint < 0
+    ? 0
+    : fragmentTokenCosts
+      .slice(0, latestCacheBreakpoint + 1)
+      .reduce((sum, tokens) => sum + tokens, 0);
+
   // 10. Render with durable manifest authority.
   const rendered = await input.renderer.render({
     provider: input.provider,
@@ -2241,6 +2258,10 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     reasoningReserveTokens: input.budget.reasoningReserve,
     outputReserveTokens: input.budget.outputReserve,
     hardInputLimit: input.budget.hardInputLimit,
+    estimatedInputTokens: BigInt(totalFragmentTokens + toolSchemaTokens) as TokenCount,
+    predictedCacheWriteTokens: BigInt(
+      latestCacheBreakpoint < 0 ? 0 : cacheWriteFragmentTokens + toolSchemaTokens,
+    ) as TokenCount,
     signal: input.signal,
     manifestId: manifest.id,
   });
@@ -2253,15 +2274,7 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     manifest,
     warnings,
     omitted: manifestInput.omitted,
-    totalEstimatedTokens: selectedFragments.reduce(
-      (sum, fragment) => sum + tokenCostFor(
-        fragment,
-        input.model.modelKey,
-        input.provider.providerId,
-        tokenizer,
-      ),
-      0,
-    ),
+    totalEstimatedTokens: totalFragmentTokens,
     overHardLimit: allocation.overHardLimit,
     renderedRequestArtifact,
   };

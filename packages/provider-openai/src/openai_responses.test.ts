@@ -159,6 +159,8 @@ describe("OpenAI Responses Connector", () => {
       reasoningReserveTokens: 500n as TokenCount,
       outputReserveTokens: 4096n as TokenCount,
       hardInputLimit: 100000n as TokenCount,
+      estimatedInputTokens: 100n as TokenCount,
+      predictedCacheWriteTokens: 75n as TokenCount,
       signal: null,
     };
 
@@ -374,6 +376,8 @@ describe("OpenAI Responses Connector", () => {
       reasoningReserveTokens: 500n as TokenCount,
       outputReserveTokens: 4096n as TokenCount,
       hardInputLimit: 100000n as TokenCount,
+      estimatedInputTokens: 100n as TokenCount,
+      predictedCacheWriteTokens: 75n as TokenCount,
       signal: null,
     };
 
@@ -381,6 +385,9 @@ describe("OpenAI Responses Connector", () => {
     const body = rendered.body as Record<string, unknown>;
     expect(body.prompt_cache_key).toBe("a".repeat(64));
     expect(body.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
+    expect(rendered.estimatedInputTokens).toBe(100n as TokenCount);
+    expect(rendered.predictedCacheWriteTokens).toBe(75n as TokenCount);
+    expect(rendered.predictedCachedTokens).toBe(0n as TokenCount);
     expect(body.input).toEqual([
       {
         role: "developer",
@@ -487,7 +494,7 @@ describe("OpenAI Responses Connector", () => {
       yield "event: response.output_item.added\ndata: {\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"search\",\"arguments\":\"\"}}\n\n";
       yield "event: response.function_call_arguments.delta\ndata: {\"output_index\":0,\"delta\":\"{\\\"query\\\":\\\"term\\\"}\"}\n\n";
       yield "event: response.output_item.done\ndata: {\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"search\",\"arguments\":\"{\\\"query\\\":\\\"term\\\"}\"}}\n\n";
-      yield "event: response.completed\ndata: {\"response\":{\"id\":\"resp_999\",\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":40},\"output_tokens_details\":{\"reasoning_tokens\":15}}}}\n\n";
+      yield "event: response.completed\ndata: {\"response\":{\"id\":\"resp_999\",\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":40,\"cache_write_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":15}}}}\n\n";
     }
 
     const chunks: any[] = [];
@@ -514,7 +521,7 @@ describe("OpenAI Responses Connector", () => {
       usage: {
         inputTokens: 100n as TokenCount,
         cachedInputTokens: 40n as TokenCount,
-        cacheWriteTokens: 0n as TokenCount,
+        cacheWriteTokens: 30n as TokenCount,
         outputTokens: 20n as TokenCount,
         reasoningTokens: 15n as TokenCount,
         toolSchemaTokens: 0n as TokenCount,

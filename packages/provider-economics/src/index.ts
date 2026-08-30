@@ -54,6 +54,7 @@ export interface CostEstimateInput {
   readonly predictedOutputTokens: TokenCount;
   readonly predictedReasoningTokens: TokenCount;
   readonly predictedCachedTokens: TokenCount;
+  readonly cacheWriteTokens?: TokenCount | undefined;
 }
 
 export function estimateCostMicros(
@@ -69,7 +70,7 @@ export function estimateCostMicros(
   return computeExactCostMicros({
     inputTokens: input.promptTokens,
     cachedInputTokens: cachedTokens,
-    cacheWriteTokens: 0n as TokenCount,
+    cacheWriteTokens: input.cacheWriteTokens ?? (0n as TokenCount),
     outputTokens: input.predictedOutputTokens,
     reasoningTokens: input.predictedReasoningTokens,
     toolSchemaTokens: 0n as TokenCount,

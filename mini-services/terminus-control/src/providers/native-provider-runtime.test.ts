@@ -29,6 +29,7 @@ function renderedRequest(overrides: Partial<RenderedProviderRequest> = {}): Rend
 const economics: ProviderEconomics = {
   inputMicrosPerMillion: 2_500n as never,
   cachedInputMicrosPerMillion: 1_250n as never,
+  cacheWriteMicrosPerMillion: 3_125n as never,
   outputMicrosPerMillion: 10_000n as never,
   reasoningAccounting: false,
 } as unknown as ProviderEconomics;
@@ -94,6 +95,107 @@ describe("dispatchNativeRequest", () => {
     expect(result.cacheObservation?.cacheReads).toBe(1000n);
     expect(result.costReconciliationMicros).not.toBeNull();
     expect(result.budgetStateAfter?.requestSpent).not.toBe(0n);
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  test("records cache writes and includes their surcharge in actual spend", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    const result = await dispatchNativeRequest(
+      {
+        providerId: "openai",
+        baseUrl: "https://api.openai.test/v1",
+        auth: { kind: "env-bearer", apiKeyEnv: "OPENAI_API_KEY" },
+        endpointPath: "/responses",
+      },
+      depsWith([{
+        kind: "done",
+        usage: {
+          inputTokens: 1_000_000n as never,
+          cachedInputTokens: 200_000n as never,
+          cacheWriteTokens: 300_000n as never,
+          outputTokens: 0n as never,
+          reasoningTokens: 0n as never,
+          toolSchemaTokens: 0n as never,
+          latencyMs: 0,
+          timeToFirstTokenMs: null,
+        },
+      }]),
+      { ...baseInput, rendered: renderedRequest() },
+    );
+
+    expect(result.cacheObservation?.cacheWrites).toBe(300_000n);
+    expect(result.costReconciliationMicros).toBe(2_438n);
+    expect(result.budgetStateAfter?.requestSpent).toBe(2_438n);
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  test("prices a cold explicit-cache write before dispatch", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    let called = false;
+    const deps = depsWith([]);
+    deps.postSse = async () => {
+      called = true;
+      throw new Error("must not be called");
+    };
+    await expect(dispatchNativeRequest(
+      {
+        providerId: "openai",
+        baseUrl: "https://api.openai.test/v1",
+        auth: { kind: "env-bearer", apiKeyEnv: "OPENAI_API_KEY" },
+        endpointPath: "/responses",
+      },
+      deps,
+      {
+        ...baseInput,
+        economics: {
+          inputMicrosPerMillion: 1_000_000n as never,
+          cachedInputMicrosPerMillion: 100_000n as never,
+          cacheWriteMicrosPerMillion: 1_250_000n as never,
+          outputMicrosPerMillion: 0n as never,
+          reasoningAccounting: false,
+        },
+        rendered: renderedRequest({
+          predictedCachedTokens: 100_000n as never,
+          predictedCacheWriteTokens: 1_000_000n as never,
+          estimatedInputTokens: 1_000_000n as never,
+        }),
+        budgetLimits: {
+          requestMicros: 500_000n as never,
+          taskMicros: 500_000n as never,
+          sessionMicros: 500_000n as never,
+        },
+      },
+    )).rejects.toThrow("budget guard");
+    expect(called).toBe(false);
+
+    await expect(dispatchNativeRequest(
+      {
+        providerId: "openai",
+        baseUrl: "https://api.openai.test/v1",
+        auth: { kind: "env-bearer", apiKeyEnv: "OPENAI_API_KEY" },
+        endpointPath: "/responses",
+      },
+      deps,
+      {
+        ...baseInput,
+        economics: {
+          inputMicrosPerMillion: 1_000_000n as never,
+          cachedInputMicrosPerMillion: 100_000n as never,
+          outputMicrosPerMillion: 0n as never,
+          reasoningAccounting: false,
+        },
+        rendered: renderedRequest({
+          predictedCachedTokens: 1_000_000n as never,
+          estimatedInputTokens: 1_000_000n as never,
+        }),
+        budgetLimits: {
+          requestMicros: 500_000n as never,
+          taskMicros: 500_000n as never,
+          sessionMicros: 500_000n as never,
+        },
+      },
+    )).rejects.toThrow("budget guard");
+    expect(called).toBe(false);
     delete process.env.OPENAI_API_KEY;
   });
 
