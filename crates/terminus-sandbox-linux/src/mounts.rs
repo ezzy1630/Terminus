@@ -189,6 +189,24 @@ pub fn plan_mounts(
     empty_root: Option<&Path>,
     broker_dir: Option<&Path>,
 ) -> MountPlan {
+    plan_mounts_with_source_check(profile, layout, empty_root, broker_dir, |source| {
+        Path::new(source).exists()
+    })
+}
+
+/// Build a mount plan with an explicit host-source existence check.
+///
+/// Production planning uses [`plan_mounts`], which consults the real host
+/// filesystem. Parameterizing only this observation keeps the policy and
+/// ordering logic deterministic in cross-platform unit tests without
+/// weakening the runtime's fail-closed source validation.
+pub(crate) fn plan_mounts_with_source_check(
+    profile: &SandboxProfile,
+    layout: &HostLayout,
+    empty_root: Option<&Path>,
+    broker_dir: Option<&Path>,
+    source_exists: impl Fn(&str) -> bool,
+) -> MountPlan {
     let mut plan = MountPlan {
         minimal_root: empty_root.is_some(),
         clears_environment: true,
@@ -287,7 +305,7 @@ pub fn plan_mounts(
                 // a non-git checkout) must therefore be dropped, not
                 // planned — this is the defect the phantom `active-worktree`
                 // rule used to trigger on every single exec.
-                if !Path::new(&rule.path).exists() {
+                if !source_exists(&rule.path) {
                     continue;
                 }
                 plan.mounts
@@ -296,7 +314,7 @@ pub fn plan_mounts(
                     .push((rule.path.clone(), rule.path.clone()));
             }
             FilesystemAccess::ReadWrite => {
-                if !Path::new(&rule.path).exists() {
+                if !source_exists(&rule.path) {
                     continue;
                 }
                 plan.mounts

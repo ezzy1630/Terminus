@@ -905,13 +905,8 @@ mod tests {
     }
 
     #[test]
-    fn build_bwrap_argv_shadows_deny_rules_after_parent_bind() {
-        // Materialized profile like the kernel emits: absolute paths. The
-        // workspace must really exist — bwrap refuses to bind a missing
-        // source, so `plan_mounts` drops binds for paths that are not there.
-        let ws_dir = tempfile::tempdir().unwrap();
-        let ws = ws_dir.path().display().to_string();
-        let ws = ws.as_str();
+    fn mount_plan_shadows_deny_rules_after_parent_bind() {
+        let ws = "/workspace";
         let profile = SandboxProfile {
             id: "materialized".to_string(),
             filesystem: vec![
@@ -934,27 +929,37 @@ mod tests {
             resources: ResourceLimits::default(),
             plugins_ambient_authority: false,
         };
-        let cmd = simple_command("ls");
-        let argv = LinuxSandboxBackend::build_bwrap_argv_with_layout(
-            &cmd,
+        let plan = mounts::plan_mounts_with_source_check(
             &profile,
             &HostLayout::merged_usr_reference(),
+            Some(Path::new("/empty-root")),
+            None,
+            |source| source == ws,
         );
-        let bind_idx = argv
-            .windows(3)
-            .position(|w| w[0] == "--bind" && w[1] == ws && w[2] == ws)
+        let bind_idx = plan
+            .mounts
+            .iter()
+            .position(|op| {
+                matches!(op, mounts::MountOp::Bind(source, destination)
+                    if source == ws && destination == ws)
+            })
             .expect("workspace rw bind");
-        let git_overlay = argv
-            .windows(2)
-            .position(|w| w[0] == "--tmpfs" && w[1] == format!("{ws}/.git"))
+        let git_overlay = plan
+            .mounts
+            .iter()
+            .position(
+                |op| matches!(op, mounts::MountOp::Tmpfs(path) if path == &format!("{ws}/.git")),
+            )
             .expect(".git tmpfs overlay");
-        let terminus_overlay = argv
-            .windows(2)
-            .position(|w| w[0] == "--tmpfs" && w[1] == format!("{ws}/.terminus"))
+        let terminus_overlay = plan
+            .mounts
+            .iter()
+            .position(|op| matches!(op, mounts::MountOp::Tmpfs(path) if path == &format!("{ws}/.terminus")))
             .expect(".terminus tmpfs overlay");
         assert!(
             bind_idx < git_overlay && bind_idx < terminus_overlay,
-            "deny overlays must follow the parent bind: {argv:?}"
+            "deny overlays must follow the parent bind: {:?}",
+            plan.mounts
         );
     }
 
@@ -1066,12 +1071,11 @@ mod tests {
 
     #[test]
     fn readonly_rule_is_bound_read_only() {
-        let ro_dir = tempfile::tempdir().unwrap();
-        let ro_path = ro_dir.path().display().to_string();
+        let ro_path = "/readonly";
         let profile = SandboxProfile {
             id: "test-abs-ro".to_string(),
             filesystem: vec![FilesystemRule {
-                path: ro_path.clone(),
+                path: ro_path.to_string(),
                 access: FilesystemAccess::ReadOnly,
             }],
             network: NetworkAccess::Allow,
@@ -1080,15 +1084,17 @@ mod tests {
             resources: ResourceLimits::default(),
             plugins_ambient_authority: false,
         };
-        let cmd = simple_command("ls");
-        let argv = LinuxSandboxBackend::build_bwrap_argv_with_layout(
-            &cmd,
+        let plan = mounts::plan_mounts_with_source_check(
             &profile,
             &HostLayout::merged_usr_reference(),
+            Some(Path::new("/empty-root")),
+            None,
+            |source| source == ro_path,
         );
-        assert!(argv
-            .windows(3)
-            .any(|w| w[0] == "--ro-bind" && w[1] == ro_path && w[2] == ro_path));
+        assert!(plan.mounts.iter().any(|op| {
+            matches!(op, mounts::MountOp::RoBind(source, destination)
+                if source == ro_path && destination == ro_path)
+        }));
     }
 
     #[test]
@@ -1097,18 +1103,17 @@ mod tests {
         // `--bind <ws>/active-worktree <ws>/active-worktree` of a directory
         // nothing ever created, which makes bwrap exit before the payload
         // runs. Any rule naming a path that is not on disk must be dropped.
-        let ws_dir = tempfile::tempdir().unwrap();
-        let ws = ws_dir.path().display().to_string();
-        let missing = ws_dir.path().join("does-not-exist").display().to_string();
+        let ws = "/workspace";
+        let missing = "/workspace/does-not-exist";
         let profile = SandboxProfile {
             id: "test-missing-source".to_string(),
             filesystem: vec![
                 FilesystemRule {
-                    path: ws.clone(),
+                    path: ws.to_string(),
                     access: FilesystemAccess::ReadWrite,
                 },
                 FilesystemRule {
-                    path: missing.clone(),
+                    path: missing.to_string(),
                     access: FilesystemAccess::ReadOnly,
                 },
             ],
@@ -1118,56 +1123,62 @@ mod tests {
             resources: ResourceLimits::default(),
             plugins_ambient_authority: false,
         };
-        let cmd = simple_command("ls");
-        let argv = LinuxSandboxBackend::build_bwrap_argv_with_layout(
-            &cmd,
+        let plan = mounts::plan_mounts_with_source_check(
             &profile,
             &HostLayout::merged_usr_reference(),
+            Some(Path::new("/empty-root")),
+            None,
+            |source| source == ws,
         );
         assert!(
-            argv.windows(3)
-                .any(|w| w[0] == "--bind" && w[1] == ws && w[2] == ws),
+            plan.mounts.iter().any(|op| {
+                matches!(op, mounts::MountOp::Bind(source, destination)
+                    if source == ws && destination == ws)
+            }),
             "the existing workspace root must still be bound"
         );
         assert!(
-            !argv.iter().any(|a| a == &missing),
-            "a bind of a nonexistent source aborts bwrap: {argv:?}"
+            !plan.mounts.iter().any(|op| match op {
+                mounts::MountOp::Bind(source, _) | mounts::MountOp::RoBind(source, _) => {
+                    source == missing
+                }
+                _ => false,
+            }),
+            "a bind of a nonexistent source aborts bwrap: {:?}",
+            plan.mounts
         );
     }
 
     #[test]
     fn default_profile_makes_the_workspace_root_writable_with_git_overlays() {
-        let ws_dir = tempfile::tempdir().unwrap();
-        let ws = ws_dir.path();
-        std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
-        std::fs::write(ws.join(".git/config"), "[core]\n").unwrap();
-        std::fs::create_dir_all(ws.join(".terminus")).unwrap();
+        let ws = "/workspace";
         let mut profile = SandboxProfile::default_restrictive();
         for rule in &mut profile.filesystem {
             let Some(relative) = rule.path.strip_prefix("workspace://") else {
                 continue;
             };
             rule.path = if relative.is_empty() {
-                ws.display().to_string()
+                ws.to_string()
             } else {
-                ws.join(relative).display().to_string()
+                format!("{ws}/{relative}")
             };
         }
-        let plan = plan_mounts(
+        let hooks = format!("{ws}/.git/hooks");
+        let config = format!("{ws}/.git/config");
+        let plan = mounts::plan_mounts_with_source_check(
             &profile,
             &HostLayout::merged_usr_reference(),
-            shared_empty_root(),
+            Some(Path::new("/empty-root")),
             None,
+            |source| source == ws || source == hooks || source == config,
         );
-        let root = ws.display().to_string();
+        let root = ws.to_string();
         assert!(
             plan.workspace_rw_binds
                 .iter()
                 .any(|(source, _)| source == &root),
             "the workspace root must be the writable root: {plan:?}"
         );
-        let hooks = ws.join(".git/hooks").display().to_string();
-        let config = ws.join(".git/config").display().to_string();
         assert!(plan
             .workspace_ro_binds
             .iter()
@@ -1181,11 +1192,11 @@ mod tests {
         assert!(!plan
             .deny_overlays
             .iter()
-            .any(|p| p == &ws.join(".git").display().to_string()));
+            .any(|p| p == &format!("{ws}/.git")));
         assert!(plan
             .deny_overlays
             .iter()
-            .any(|p| p == &ws.join(".terminus").display().to_string()));
+            .any(|p| p == &format!("{ws}/.terminus")));
         // Ordering: the read-only overlays must follow the writable parent.
         let rw_index = plan
             .mounts
