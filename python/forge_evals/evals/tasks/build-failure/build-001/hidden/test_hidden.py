@@ -1,9 +1,15 @@
-"""Hidden test (SPEC §41.4 — never projected into model context)."""
+"""Private behavioral regression for the build fixture."""
 
-from pathlib import Path
+from src.main import main
+import subprocess
+import sys
 
 
-def test_workdir_exists(tmp_path: Path) -> None:
-    """The workspace workdir exists and is writable."""
-    (tmp_path / "marker").write_text("ok", encoding="utf-8")
-    assert (tmp_path / "marker").read_text() == "ok"
+def test_command_behavior_remains_unchanged() -> None:
+    assert main([]) == 0
+    assert main(["--fail"]) == 1
+
+
+def test_module_entrypoint_executes() -> None:
+    result = subprocess.run([sys.executable, "-m", "src.main"], check=False)
+    assert result.returncode == 0

@@ -23,5 +23,6 @@ Write the tests to `tests/test_parser.py`. The tests must pass against the curre
         - `expected-properties.yaml` — post-run expected property invariants.
         - `policy.yaml` — policy rule overrides for this task.
 
-        This is a *synthetic* minimal task package (audit A3 fix #5). It is
-        self-contained and can be graded without a real agent loop.
+        This is a deterministic local test-generation fixture. The grader runs the
+        submitted tests against the parser and deliberately mutated parsers, so a
+        test file must protect behavior rather than contain boilerplate.

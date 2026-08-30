@@ -1,56 +1,58 @@
-"""Synthetic grader for task package.
-
-Reads JSON on stdin: {"workdir": "...", "objective": "...", ...}.
-Writes JSON on stdout: {"passed": bool, "score": float, "evidence": [...]}.
-"""
+"""Behavioral grader for the cross-file retry feature."""
 
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 
-def check_substring(workdir: Path, needle: str) -> bool:
-    """Return True iff `needle` appears in any file under workdir (depth 2)."""
-    for p in workdir.rglob("*"):
-        if not p.is_file():
-            continue
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if needle in text:
-            return True
-    return False
-
-
 def main() -> int:
     payload = json.load(sys.stdin)
-    workdir = Path(payload["workdir"])
-    checks = [
-        check_substring(workdir, "src/client.py contains `retry: int = 0` in request() signature"),
-        check_substring(workdir, "src/api.py passes retry=3 to at least one request() call"),
-        check_substring(workdir, "src/cli.py passes retry=3 to at least one request() call"),
-        check_substring(workdir, "src/scheduler.py passes retry=3 to at least one request() call"),
-    ]
-    passed_count = sum(1 for c in checks if c)
-    total = len(checks) if checks else 1
-    score = passed_count / total if total else 0.0
-    evidence = [
-        f"passed {passed_count}/{total} acceptance checks",
-    ]
-    for i, ok in enumerate(checks):
-        evidence.append(f"check {i + 1}: {'PASS' if ok else 'FAIL'}")
-    out = {
-        "passed": passed_count == total,
-        "score": score,
-        "evidence": evidence,
-        "metadata": {"checks_total": total, "checks_passed": passed_count},
+    workdir = Path(payload["workdir"]).resolve()
+    script = r'''
+import inspect
+from src.api import API
+from src.cli import show_user
+from src.client import Client
+from src.scheduler import refresh
+
+signature = inspect.signature(Client.request)
+retry = signature.parameters.get("retry")
+assert retry is not None and retry.default == 0
+
+calls = []
+client = Client()
+client.request = lambda path, payload=None, **kwargs: calls.append((path, kwargs)) or {"path": path}
+API(client).list_users()
+show_user(client, "7")
+refresh(client)
+assert calls == [("/users", {"retry": 3}), ("/users/7", {"retry": 3}), ("/refresh", {"retry": 3})]
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=workdir,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    output = (result.stdout + result.stderr).strip()[-1_500:]
+    checks = [("signature and callers preserve behavior", result.returncode == 0, output)]
+    passed = sum(ok for _, ok, _ in checks)
+    result_payload = {
+        "passed": passed == len(checks),
+        "score": passed / len(checks),
+        "evidence": [
+            f"passed {passed}/{len(checks)} behavioral checks",
+            *[f"{name}: {'PASS' if ok else 'FAIL'} {detail}" for name, ok, detail in checks],
+        ],
+        "metadata": {"checks_total": len(checks), "checks_passed": passed},
     }
-    print(json.dumps(out))
-    return 0 if out["passed"] else 1
+    print(json.dumps(result_payload))
+    return 0 if result_payload["passed"] else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

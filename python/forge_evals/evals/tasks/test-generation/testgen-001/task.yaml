@@ -2,8 +2,8 @@ suite: test-generation
 task: testgen-001
 cohort: test_generation
 title: Generate tests for parser edge cases
-source_commit: 0000000000000000000000000000000000000000
-image_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+source_commit: fixture-testgen-001-v2
+image_digest: local:python-3.12-pytest-8
 timeout: 600
 budget:
   max_cost_usd: 1.0
@@ -12,5 +12,13 @@ budget:
   max_turns: 20
 allowed_network: []
 secrets: {}
-grader_version: 0.1.0
+grader_version: 1.0.0
+acceptance_criteria:
+  - id: edge-case-tests
+    statement: tests/test_parser.py asserts all five parser boundary cases
+    verification_hint: pytest plus deterministic mutation checks
+grader:
+  entrypoint: grader/run.py
+  protocol: json_stdio
+  timeout_seconds: 45
 risk_class: normal

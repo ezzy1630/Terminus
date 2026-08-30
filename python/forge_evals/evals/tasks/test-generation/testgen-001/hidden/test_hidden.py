@@ -1,9 +1,11 @@
-"""Hidden test (SPEC §41.4 — never projected into model context)."""
+"""Private mutation-resistant checks for generated parser tests."""
 
-from pathlib import Path
+from src.parser import parse_tokens
 
 
-def test_workdir_exists(tmp_path: Path) -> None:
-    """The workspace workdir exists and is writable."""
-    (tmp_path / "marker").write_text("ok", encoding="utf-8")
-    assert (tmp_path / "marker").read_text() == "ok"
+def test_parser_contract_is_unchanged() -> None:
+    assert parse_tokens("") == []
+    assert parse_tokens("   \t\n") == []
+    assert parse_tokens("solo") == ["solo"]
+    assert parse_tokens("alpha beta\n") == ["alpha", "beta"]
+    assert parse_tokens("café 東京") == ["café", "東京"]

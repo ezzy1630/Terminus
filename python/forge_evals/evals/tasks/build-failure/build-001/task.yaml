@@ -2,8 +2,8 @@ suite: build-failure
 task: build-001
 cohort: build_failure
 title: Fix missing import causing compile error
-source_commit: 0000000000000000000000000000000000000000
-image_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+source_commit: fixture-build-001-v2
+image_digest: local:python-3.12-pytest-8
 timeout: 600
 budget:
   max_cost_usd: 1.0
@@ -12,5 +12,17 @@ budget:
   max_turns: 20
 allowed_network: []
 secrets: {}
-grader_version: 0.1.0
+grader_version: 1.0.0
+rationale: behavioral import and regression checks for a deterministic local fixture
+acceptance_criteria:
+  - id: import-clean
+    statement: src.main imports without an exception
+    verification_hint: python -c import src.main
+  - id: regression-tests
+    statement: the existing command behavior tests pass
+    verification_hint: pytest -q
+grader:
+  entrypoint: grader/run.py
+  protocol: json_stdio
+  timeout_seconds: 30
 risk_class: normal

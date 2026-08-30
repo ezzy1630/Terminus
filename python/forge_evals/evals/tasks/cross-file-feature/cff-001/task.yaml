@@ -2,8 +2,8 @@ suite: cross-file-feature
 task: cff-001
 cohort: cross_file_feature
 title: Add retry option to client and propagate to call sites
-source_commit: 0000000000000000000000000000000000000000
-image_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+source_commit: fixture-cff-001-v2
+image_digest: local:python-3.12-pytest-8
 timeout: 600
 budget:
   max_cost_usd: 1.0
@@ -12,5 +12,16 @@ budget:
   max_turns: 20
 allowed_network: []
 secrets: {}
-grader_version: 0.1.0
+grader_version: 1.0.0
+acceptance_criteria:
+  - id: retry-api
+    statement: Client.request accepts retry with a default of zero
+    verification_hint: inspect.signature and runtime call
+  - id: retry-callers
+    statement: API, CLI, and scheduler pass retry=3
+    verification_hint: recording transport
+grader:
+  entrypoint: grader/run.py
+  protocol: json_stdio
+  timeout_seconds: 30
 risk_class: normal
