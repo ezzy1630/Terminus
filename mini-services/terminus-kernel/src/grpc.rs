@@ -1538,6 +1538,41 @@ impl SecretServiceRpc for GrpcKernel {
             stored: false,
         }))
     }
+
+    async fn inspect(
+        &self,
+        request: Request<protocol::InspectSecretRequest>,
+    ) -> Result<Response<protocol::InspectSecretResponse>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        if request.capability_uri.is_empty() {
+            return Err(Status::invalid_argument("capability_uri is required"));
+        }
+        let presence = self
+            .kernel
+            .secrets
+            .inspect_async(&ctx, &request.capability_uri, &ctx.actor_id)
+            .await
+            .map_err(status)?;
+        let presence = match presence {
+            terminus_secrets::SecretPresence::Present => {
+                protocol::SecretPresenceProto::SecretPresencePresent
+            }
+            terminus_secrets::SecretPresence::Missing => {
+                protocol::SecretPresenceProto::SecretPresenceMissing
+            }
+            terminus_secrets::SecretPresence::Unavailable => {
+                protocol::SecretPresenceProto::SecretPresenceUnavailable
+            }
+        };
+        Ok(Response::new(protocol::InspectSecretResponse {
+            capability_uri: request.capability_uri,
+            presence: presence as i32,
+        }))
+    }
 }
 
 /// Wire form of a discovered credential. Identity and a non-reversible
@@ -1584,7 +1619,20 @@ impl ProviderAccountServiceRpc for GrpcKernel {
                 warnings: discovery.warnings,
                 codex_installed: discovery.codex_installed,
                 opencode_installed: discovery.opencode_installed,
-                opencode_store_status: discovery.opencode_store_status.as_str().to_string(),
+                opencode_store_status: match discovery.opencode_store_status {
+                    terminus_kernel::LocalCredentialStoreStatus::Available => {
+                        protocol::OpencodeStoreStatusProto::OpencodeStoreStatusAvailable as i32
+                    }
+                    terminus_kernel::LocalCredentialStoreStatus::Missing => {
+                        protocol::OpencodeStoreStatusProto::OpencodeStoreStatusMissing as i32
+                    }
+                    terminus_kernel::LocalCredentialStoreStatus::Rejected => {
+                        protocol::OpencodeStoreStatusProto::OpencodeStoreStatusRejected as i32
+                    }
+                    terminus_kernel::LocalCredentialStoreStatus::Unavailable => {
+                        protocol::OpencodeStoreStatusProto::OpencodeStoreStatusUnavailable as i32
+                    }
+                },
             },
         ))
     }
@@ -3893,6 +3941,35 @@ mod tests {
                 String::new()
             },
         }
+    }
+
+    #[test]
+    fn presence_and_store_status_defaults_are_non_authoritative() {
+        let discovery = protocol::DiscoverLocalProviderCredentialsResponse::default();
+        assert_eq!(
+            discovery.opencode_store_status,
+            protocol::OpencodeStoreStatusProto::OpencodeStoreStatusUnspecified as i32
+        );
+        assert_eq!(
+            protocol::SecretPresenceProto::SecretPresenceUnspecified as i32,
+            0
+        );
+        assert_eq!(
+            protocol::OpencodeStoreStatusProto::OpencodeStoreStatusAvailable as i32,
+            1
+        );
+        assert_eq!(
+            protocol::OpencodeStoreStatusProto::OpencodeStoreStatusMissing as i32,
+            2
+        );
+        assert_eq!(
+            protocol::OpencodeStoreStatusProto::OpencodeStoreStatusRejected as i32,
+            3
+        );
+        assert_eq!(
+            protocol::OpencodeStoreStatusProto::OpencodeStoreStatusUnavailable as i32,
+            4
+        );
     }
 
     #[tokio::test]

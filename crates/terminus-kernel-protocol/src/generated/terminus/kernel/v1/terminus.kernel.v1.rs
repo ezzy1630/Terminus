@@ -1099,6 +1099,20 @@ pub struct SecretMutationResponse {
     #[prost(bool, tag="2")]
     pub stored: bool,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InspectSecretRequest {
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+    #[prost(string, tag="2")]
+    pub capability_uri: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InspectSecretResponse {
+    #[prost(string, tag="1")]
+    pub capability_uri: ::prost::alloc::string::String,
+    #[prost(enumeration="SecretPresenceProto", tag="2")]
+    pub presence: i32,
+}
 // =============================================================================
 // Provider account service — credentials already on this machine
 // =============================================================================
@@ -1156,10 +1170,10 @@ pub struct DiscoverLocalProviderCredentialsResponse {
     pub codex_installed: bool,
     #[prost(bool, tag="4")]
     pub opencode_installed: bool,
-    /// "available" | "missing" | "rejected". Callers must not treat a
-    /// rejected store as authoritative absence.
-    #[prost(string, tag="5")]
-    pub opencode_store_status: ::prost::alloc::string::String,
+    /// The protobuf default is non-authoritative. Callers must not treat
+    /// REJECTED or UNAVAILABLE as authoritative absence.
+    #[prost(enumeration="OpencodeStoreStatusProto", tag="5")]
+    pub opencode_store_status: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ImportLocalProviderCredentialRequest {
@@ -1759,6 +1773,76 @@ impl CapabilityOperationProto {
             "CAPABILITY_OPERATION_GIT" => Some(Self::CapabilityOperationGit),
             "CAPABILITY_OPERATION_ARTIFACT_INGEST" => Some(Self::CapabilityOperationArtifactIngest),
             "CAPABILITY_OPERATION_COMPUTER_USE" => Some(Self::CapabilityOperationComputerUse),
+            _ => None,
+        }
+    }
+}
+/// Metadata-only result of checking a secret capability. UNSPECIFIED is the
+/// protobuf default and is never authoritative; callers must treat it as an
+/// indeterminate result rather than as absence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SecretPresenceProto {
+    SecretPresenceUnspecified = 0,
+    SecretPresencePresent = 1,
+    SecretPresenceMissing = 2,
+    SecretPresenceUnavailable = 3,
+}
+impl SecretPresenceProto {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::SecretPresenceUnspecified => "SECRET_PRESENCE_UNSPECIFIED",
+            Self::SecretPresencePresent => "SECRET_PRESENCE_PRESENT",
+            Self::SecretPresenceMissing => "SECRET_PRESENCE_MISSING",
+            Self::SecretPresenceUnavailable => "SECRET_PRESENCE_UNAVAILABLE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SECRET_PRESENCE_UNSPECIFIED" => Some(Self::SecretPresenceUnspecified),
+            "SECRET_PRESENCE_PRESENT" => Some(Self::SecretPresencePresent),
+            "SECRET_PRESENCE_MISSING" => Some(Self::SecretPresenceMissing),
+            "SECRET_PRESENCE_UNAVAILABLE" => Some(Self::SecretPresenceUnavailable),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum OpencodeStoreStatusProto {
+    OpencodeStoreStatusUnspecified = 0,
+    OpencodeStoreStatusAvailable = 1,
+    OpencodeStoreStatusMissing = 2,
+    OpencodeStoreStatusRejected = 3,
+    OpencodeStoreStatusUnavailable = 4,
+}
+impl OpencodeStoreStatusProto {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::OpencodeStoreStatusUnspecified => "OPENCODE_STORE_STATUS_UNSPECIFIED",
+            Self::OpencodeStoreStatusAvailable => "OPENCODE_STORE_STATUS_AVAILABLE",
+            Self::OpencodeStoreStatusMissing => "OPENCODE_STORE_STATUS_MISSING",
+            Self::OpencodeStoreStatusRejected => "OPENCODE_STORE_STATUS_REJECTED",
+            Self::OpencodeStoreStatusUnavailable => "OPENCODE_STORE_STATUS_UNAVAILABLE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "OPENCODE_STORE_STATUS_UNSPECIFIED" => Some(Self::OpencodeStoreStatusUnspecified),
+            "OPENCODE_STORE_STATUS_AVAILABLE" => Some(Self::OpencodeStoreStatusAvailable),
+            "OPENCODE_STORE_STATUS_MISSING" => Some(Self::OpencodeStoreStatusMissing),
+            "OPENCODE_STORE_STATUS_REJECTED" => Some(Self::OpencodeStoreStatusRejected),
+            "OPENCODE_STORE_STATUS_UNAVAILABLE" => Some(Self::OpencodeStoreStatusUnavailable),
             _ => None,
         }
     }

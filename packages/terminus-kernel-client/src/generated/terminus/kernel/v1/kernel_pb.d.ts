@@ -2864,6 +2864,48 @@ export declare type SecretMutationResponse = Message<"terminus.kernel.v1.SecretM
 export declare const SecretMutationResponseSchema: GenMessage<SecretMutationResponse>;
 
 /**
+ * @generated from message terminus.kernel.v1.InspectSecretRequest
+ */
+export declare type InspectSecretRequest = Message<"terminus.kernel.v1.InspectSecretRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: string capability_uri = 2;
+   */
+  capabilityUri: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.InspectSecretRequest.
+ * Use `create(InspectSecretRequestSchema)` to create a new message.
+ */
+export declare const InspectSecretRequestSchema: GenMessage<InspectSecretRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.InspectSecretResponse
+ */
+export declare type InspectSecretResponse = Message<"terminus.kernel.v1.InspectSecretResponse"> & {
+  /**
+   * @generated from field: string capability_uri = 1;
+   */
+  capabilityUri: string;
+
+  /**
+   * @generated from field: terminus.kernel.v1.SecretPresenceProto presence = 2;
+   */
+  presence: SecretPresenceProto;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.InspectSecretResponse.
+ * Use `create(InspectSecretResponseSchema)` to create a new message.
+ */
+export declare const InspectSecretResponseSchema: GenMessage<InspectSecretResponse>;
+
+/**
  * A credential found in a local tool's store. Never carries secret bytes.
  *
  * @generated from message terminus.kernel.v1.LocalProviderCredentialMessage
@@ -2970,12 +3012,12 @@ export declare type DiscoverLocalProviderCredentialsResponse = Message<"terminus
   opencodeInstalled: boolean;
 
   /**
-   * "available" | "missing" | "rejected". Callers must not treat a
-   * rejected store as authoritative absence.
+   * The protobuf default is non-authoritative. Callers must not treat
+   * REJECTED or UNAVAILABLE as authoritative absence.
    *
-   * @generated from field: string opencode_store_status = 5;
+   * @generated from field: terminus.kernel.v1.OpencodeStoreStatusProto opencode_store_status = 5;
    */
-  opencodeStoreStatus: string;
+  opencodeStoreStatus: OpencodeStoreStatusProto;
 };
 
 /**
@@ -4223,6 +4265,75 @@ export enum CapabilityOperationProto {
 export declare const CapabilityOperationProtoSchema: GenEnum<CapabilityOperationProto>;
 
 /**
+ * Metadata-only result of checking a secret capability. UNSPECIFIED is the
+ * protobuf default and is never authoritative; callers must treat it as an
+ * indeterminate result rather than as absence.
+ *
+ * @generated from enum terminus.kernel.v1.SecretPresenceProto
+ */
+export enum SecretPresenceProto {
+  /**
+   * @generated from enum value: SECRET_PRESENCE_UNSPECIFIED = 0;
+   */
+  SECRET_PRESENCE_UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SECRET_PRESENCE_PRESENT = 1;
+   */
+  SECRET_PRESENCE_PRESENT = 1,
+
+  /**
+   * @generated from enum value: SECRET_PRESENCE_MISSING = 2;
+   */
+  SECRET_PRESENCE_MISSING = 2,
+
+  /**
+   * @generated from enum value: SECRET_PRESENCE_UNAVAILABLE = 3;
+   */
+  SECRET_PRESENCE_UNAVAILABLE = 3,
+}
+
+/**
+ * Describes the enum terminus.kernel.v1.SecretPresenceProto.
+ */
+export declare const SecretPresenceProtoSchema: GenEnum<SecretPresenceProto>;
+
+/**
+ * @generated from enum terminus.kernel.v1.OpencodeStoreStatusProto
+ */
+export enum OpencodeStoreStatusProto {
+  /**
+   * @generated from enum value: OPENCODE_STORE_STATUS_UNSPECIFIED = 0;
+   */
+  OPENCODE_STORE_STATUS_UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: OPENCODE_STORE_STATUS_AVAILABLE = 1;
+   */
+  OPENCODE_STORE_STATUS_AVAILABLE = 1,
+
+  /**
+   * @generated from enum value: OPENCODE_STORE_STATUS_MISSING = 2;
+   */
+  OPENCODE_STORE_STATUS_MISSING = 2,
+
+  /**
+   * @generated from enum value: OPENCODE_STORE_STATUS_REJECTED = 3;
+   */
+  OPENCODE_STORE_STATUS_REJECTED = 3,
+
+  /**
+   * @generated from enum value: OPENCODE_STORE_STATUS_UNAVAILABLE = 4;
+   */
+  OPENCODE_STORE_STATUS_UNAVAILABLE = 4,
+}
+
+/**
+ * Describes the enum terminus.kernel.v1.OpencodeStoreStatusProto.
+ */
+export declare const OpencodeStoreStatusProtoSchema: GenEnum<OpencodeStoreStatusProto>;
+
+/**
  * @generated from service terminus.kernel.v1.KernelInfoService
  */
 export declare const KernelInfoService: GenService<{
@@ -4483,6 +4594,14 @@ export declare const SecretService: GenService<{
     methodKind: "unary";
     input: typeof DeleteSecretRequestSchema;
     output: typeof SecretMutationResponseSchema;
+  },
+  /**
+   * @generated from rpc terminus.kernel.v1.SecretService.Inspect
+   */
+  inspect: {
+    methodKind: "unary";
+    input: typeof InspectSecretRequestSchema;
+    output: typeof InspectSecretResponseSchema;
   },
 }>;
 

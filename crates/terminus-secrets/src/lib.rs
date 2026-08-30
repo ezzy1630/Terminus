@@ -28,7 +28,7 @@ mod residue;
 pub use audit::{AuditEntry, SecretAuditLog};
 pub use backend::{SecretBackend, DEV_MODE_ENV, SECRETS_BACKEND_ENV};
 pub use broker::{
-    InMemoryProvider, SecretBroker, SecretHandle, SecretMetadata, SecretProvider,
+    InMemoryProvider, SecretBroker, SecretHandle, SecretMetadata, SecretPresence, SecretProvider,
     WritableSecretProvider, SECRET_RESOLVE_TIMEOUT,
 };
 pub use error::SecretError;
