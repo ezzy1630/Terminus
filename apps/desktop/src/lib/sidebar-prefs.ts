@@ -81,23 +81,18 @@ export function writeSidebarVisible(visible: boolean): void {
 /**
  * How the rail files its tasks.
  *
- * Recent is the default. "By project" answers "what is in this repository",
- * which is a question you ask once you already know where you are going;
- * Recent answers "what happened while I was away", which is the question the
- * window is opened to ask. Opening on the tree meant the first thing on screen
- * was a folder list and yesterday's work was two clicks down.
- *
- * This replaced a two-tab mode switch, and it reads the same storage key so
- * nobody's choice is lost in the change: the old `"projects"` value means the
- * same thing the new `"project"` one does. Anyone who chose the tree keeps it.
+ * Projects is the default because it is the stable map of the workspace.
+ * Activity is an explicit second view for returning to running, blocked, and
+ * recent work. The old `"projects"` value still means `"project"`, so an
+ * existing choice survives the rename.
  */
 export function readSidebarGrouping(): SidebarGrouping {
-  if (typeof window === "undefined") return "recent";
+  if (typeof window === "undefined") return "project";
   try {
     const stored = window.localStorage.getItem(VIEW_KEY);
-    return stored === "project" || stored === "projects" ? "project" : "recent";
+    return stored === "recent" ? "recent" : "project";
   } catch {
-    return "recent";
+    return "project";
   }
 }
 

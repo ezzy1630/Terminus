@@ -41,10 +41,10 @@ announcements or steal focus.
 
 ### 4. Composer
 
-Focus the message composer, type a multiline draft, and use `⌘Enter` (or
-`Ctrl+Enter`) to send or steer. Confirm the field and button names communicate
-the current action. Confirm that `Enter` inserts a newline and that no queue,
-stop, or interrupt shortcut is announced.
+Focus the message composer and type a multiline draft with `Shift+Enter`.
+Confirm that `Enter` sends or queues and `⌘Enter` (or `Ctrl+Enter`) sends or
+steers. Confirm the field and button names communicate the current action and
+that Stop is announced only while a run is active.
 
 ### 5. Command palette
 

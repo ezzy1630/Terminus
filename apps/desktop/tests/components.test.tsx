@@ -733,7 +733,7 @@ describe("CommandPalette", () => {
     const onClose = vi.fn();
     render(<CommandPalette open={true} onClose={onClose} commands={makeCommands()} />);
     expect(screen.getByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Search commands")).toBeInTheDocument();
+    expect(screen.getByLabelText("Search tasks and commands")).toBeInTheDocument();
     expect(screen.getByText("New task")).toBeInTheDocument();
     expect(screen.getByText("Switch theme")).toBeInTheDocument();
     expect(screen.getByText("Open settings")).toBeInTheDocument();
@@ -742,7 +742,7 @@ describe("CommandPalette", () => {
   test("filters results by query (matches label)", async () => {
     const user = userEvent.setup();
     render(<CommandPalette open={true} onClose={vi.fn()} commands={makeCommands()} />);
-    const input = screen.getByLabelText("Search commands");
+    const input = screen.getByLabelText("Search tasks and commands");
     await user.type(input, "theme");
     expect(screen.getByText("Switch theme")).toBeInTheDocument();
     expect(screen.queryByText("New task")).toBeNull();
@@ -752,7 +752,7 @@ describe("CommandPalette", () => {
   test("filters results by keyword (matches 'preferences' → Open settings)", async () => {
     const user = userEvent.setup();
     render(<CommandPalette open={true} onClose={vi.fn()} commands={makeCommands()} />);
-    const input = screen.getByLabelText("Search commands");
+    const input = screen.getByLabelText("Search tasks and commands");
     await user.type(input, "preferences");
     expect(screen.getByText("Open settings")).toBeInTheDocument();
     expect(screen.queryByText("New task")).toBeNull();
@@ -769,7 +769,7 @@ describe("CommandPalette", () => {
         commands={makeCommands({ newTask })}
       />,
     );
-    const input = screen.getByLabelText("Search commands");
+    const input = screen.getByLabelText("Search tasks and commands");
     await user.type(input, "task");
     // First result should be "New task".
     expect(screen.getByText("New task")).toBeInTheDocument();
@@ -799,7 +799,7 @@ describe("CommandPalette", () => {
       },
     ];
     render(<CommandPalette open={true} onClose={vi.fn()} commands={commands} />);
-    const input = screen.getByLabelText("Search commands");
+    const input = screen.getByLabelText("Search tasks and commands");
     await user.type(input, "a"); // matches both Alpha and Beta
     fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -820,7 +820,7 @@ describe("CommandPalette", () => {
       { id: "ime-second", label: "Beta", group: "Navigation", action: second },
     ];
     render(<CommandPalette open={true} onClose={onClose} commands={commands} />);
-    const input = screen.getByLabelText("Search commands");
+    const input = screen.getByLabelText("Search tasks and commands");
     input.focus();
 
     fireEvent.keyDown(input, { key: "ArrowDown", keyCode: 229 });
@@ -857,7 +857,7 @@ describe("CommandPalette", () => {
   test("shows an empty-state message when no commands match", async () => {
     const user = userEvent.setup();
     render(<CommandPalette open={true} onClose={vi.fn()} commands={makeCommands()} />);
-    await user.type(screen.getByLabelText("Search commands"), "zzzzz");
+    await user.type(screen.getByLabelText("Search tasks and commands"), "zzzzz");
     expect(screen.getByText(/No commands match/)).toBeInTheDocument();
   });
 });
@@ -1429,7 +1429,7 @@ describe("NewTaskScreen — first turn lifecycle", () => {
   test("keeps the start surface focused on project context and one composer", () => {
     render(<NewTaskScreen />);
 
-    expect(screen.getByRole("heading", { name: "New task in Terminus" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What should Terminus do?" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change project" })).toHaveTextContent("Terminus");
     expect(screen.getAllByRole("textbox", { name: "Message composer" })).toHaveLength(1);
     expect(screen.queryByText("Map the codebase")).not.toBeInTheDocument();
@@ -1477,11 +1477,11 @@ describe("Sidebar — navigation destinations", () => {
     expect(screen.getByRole("button", { name: /^New (session|task)/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^(Board|Kanban|Sessions)/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Needs you/ })).not.toBeInTheDocument();
-    // These product routes still have no authoritative surface in this build.
-    for (const unsupported of ["Scheduled", "Plugins", "Pull requests", "Sites"]) {
+    // "Agents" joins this list: it rendered a directory of departments,
+    // operators and rooms that no route supplies.
+    for (const unsupported of ["Agents", "Scheduled", "Plugins", "Pull requests", "Sites"]) {
       expect(screen.queryByRole("button", { name: unsupported })).not.toBeInTheDocument();
     }
-    expect(screen.getByRole("button", { name: "Agents" })).toBeInTheDocument();
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /^(Board|Kanban|Sessions)/ }));
@@ -1504,19 +1504,11 @@ describe("Sidebar — navigation destinations", () => {
     window.removeEventListener("terminus:open-settings", listener);
   });
 
-  // The magnifying glass used to unfold a filter field inside the rail that
-  // narrowed the tree in place. It now raises the task search over the
-  // workspace, and the rail underneath does not move.
-  test("the search control raises the task search instead of filtering in place", async () => {
-    const openSearch = vi.fn();
-    window.addEventListener("terminus:open-task-search", openSearch);
+  test("does not duplicate global search inside the rail", () => {
     render(<Sidebar />);
 
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Search tasks" }));
-    expect(openSearch).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Search tasks" })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Search tasks" })).not.toBeInTheDocument();
-    window.removeEventListener("terminus:open-task-search", openSearch);
   });
 
   test("shows task matches without flooding results with every task in the project", async () => {
@@ -2501,7 +2493,8 @@ describe("Sidebar — remembered shape", () => {
     openOnProjectsTree();
     render(<Sidebar />);
     expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Show activity" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Projects" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Activity" })).toHaveAttribute("aria-pressed", "false");
   });
 
   // The question is what the *list* holds, not what the workspace holds. Six

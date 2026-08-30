@@ -44,7 +44,7 @@ function joinClauses(clauses: readonly string[]): string {
 }
 
 /**
- * "Connected 8 providers — 6 from OpenCode, your ChatGPT login and OpenCode Zen."
+ * "Connected 8 providers: 6 from OpenCode, your ChatGPT login and OpenCode Zen."
  *
  * The total leads and each source carries its own count. Writing it as
  * "Connected 8 providers from OpenCode, your ChatGPT login and …" attached the
@@ -87,7 +87,7 @@ export function describeImport(accounts: readonly ProviderAccount[]): string | n
   if (clauses.length === 1 && only.count === total) {
     return `Connected ${total} ${noun} from ${only.label}.`;
   }
-  return `Connected ${total} ${noun} — ${joinClauses(clauses.map((clause) => clause.counted))}.`;
+  return `Connected ${total} ${noun}: ${joinClauses(clauses.map((clause) => clause.counted))}.`;
 }
 
 function readAnnounced(): string | null {

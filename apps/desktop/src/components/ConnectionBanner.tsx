@@ -23,6 +23,27 @@ import { RefreshCw, TriangleAlert, WifiOff } from "lucide-react";
 import { useTerminusStore } from "../hooks/use-terminus";
 import { Button } from "../ui/Button";
 
+/** Whether a connection/data warning currently owns the shell banner row. */
+export function useConnectionIssueVisible(): boolean {
+  const healthStatus = useTerminusStore((s) => s.healthStatus);
+  const streamState = useTerminusStore((s) => s.streamState);
+  const sessionsFreshness = useTerminusStore((s) => s.sessionsFreshness);
+  const selectedSessionId = useTerminusStore((s) => s.selectedSessionId);
+  const selectedTaskId = useTerminusStore((s) => s.selectedTaskId);
+  const taskListFreshness = useTerminusStore((s) =>
+    selectedSessionId ? s.taskListFreshnessBySession[selectedSessionId] : undefined,
+  );
+  const taskFreshness = useTerminusStore((s) =>
+    selectedTaskId ? s.taskFreshnessById[selectedTaskId] : undefined,
+  );
+  const approvalFreshness = useTerminusStore((s) =>
+    selectedTaskId ? s.approvalFreshnessByTask[selectedTaskId] : undefined,
+  );
+  const stale = [sessionsFreshness, taskListFreshness, taskFreshness, approvalFreshness]
+    .some((resource) => resource?.status === "stale" || resource?.status === "error");
+  return healthStatus === "offline" || healthStatus === "degraded" || stale || streamState === "reconnecting";
+}
+
 /** The one strip every variant renders through. */
 function BannerStrip({
   role,

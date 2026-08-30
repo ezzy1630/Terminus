@@ -514,6 +514,8 @@ function ReportList({ label, entries }: { label: string; entries: string[] }): J
 
 interface InspectorProps {
   className?: string;
+  /** Canonical board selection when no v1 conversation task exists. */
+  canonicalTaskId?: string | null;
   /** Opens the review split when the task has patch evidence. */
   onShowChanges?: () => void;
 }
@@ -648,6 +650,7 @@ function NoSelection(): JSX.Element {
 
 function InspectorImpl({
   className,
+  canonicalTaskId = null,
   onShowChanges,
 }: InspectorProps): JSX.Element {
   const task = useSelectedTask();
@@ -707,6 +710,16 @@ function InspectorImpl({
       // Clipboard access can be denied; the row simply does not confirm.
     }
   };
+
+  if (!task && canonicalTaskId) {
+    return (
+      <div className={cn("flex h-full flex-col overflow-y-auto pb-3", className)}>
+        <InspectorGroup title="Task">
+          <TaskV2Panel taskId={canonicalTaskId} />
+        </InspectorGroup>
+      </div>
+    );
+  }
 
   if (!task) {
     return (

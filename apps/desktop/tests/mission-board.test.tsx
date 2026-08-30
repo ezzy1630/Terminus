@@ -409,20 +409,14 @@ describe("MissionBoardView", () => {
     const taskButton = screen.getByRole("button", { name: "Open Repair OAuth callback" });
     await user.click(taskButton);
     expect(onOpenTask).toHaveBeenCalledWith(expect.objectContaining({ id: "task-running" }));
-    // Previewing selects, in the store. The board used to hold its own
-    // `selectedTaskId`, so a card selected here highlighted nothing in the
-    // rail and the shared inspector could not open — two panes listing the
-    // same tasks with two ideas of which one you were looking at. There is no
-    // second detail panel on this surface any more; the app's one inspector
-    // renders for whatever is selected, from wherever it was selected.
+    // Context is a single action. The board used to expose both Quick preview
+    // and View details even though both selected the same task and opened a
+    // competing details surface.
     await user.click(screen.getByRole("button", { name: "Actions for Repair OAuth callback" }));
-    await user.click(screen.getByRole("menuitem", { name: "Quick preview" }));
+    await user.click(screen.getByRole("menuitem", { name: "Show context" }));
     expect(useTerminusStore.getState().selectedTaskId).toBe("task-running");
     expect(screen.queryByRole("complementary", { name: "Task quick view" })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Actions for Repair OAuth callback" }));
-    await user.click(screen.getByRole("menuitem", { name: "View details" }));
-    expect(onInspectTask).toHaveBeenCalledWith("task-running");
+    expect(onInspectTask).toHaveBeenCalledWith(expect.objectContaining({ id: "task-running" }));
     expect(screen.queryByRole("button", { name: "New task" })).not.toBeInTheDocument();
   });
 

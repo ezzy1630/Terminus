@@ -8,10 +8,10 @@ contract narrows it; “reject” means it does not belong in Terminus.
 
 | Pattern | Reference | Decision | Current surface |
 | --- | --- | --- | --- |
-| Three-region shell | macOS, Codex | Adopt; sidebar and inspector remain docked at every supported width | `Layout.tsx` |
+| Three-region shell | macOS, Codex | Adopt; sidebar and inspector remain docked at supported widths | `Layout.tsx` |
 | Shallow project → task hierarchy | Finder, Codex | Adopt; no worktree or provider tree in the UI | `Sidebar.tsx` |
-| Pinned tasks and explicit search | Slack, Linear | Adopt | `Sidebar.tsx` |
-| Compact icon rail | macOS, VS Code | Retain as an explicit shell mode; the packaged window does not enter it by viewport width | `Sidebar.tsx` |
+| Pinned tasks and command search | Slack, Linear | Adopt | `Sidebar.tsx`, `CommandPalette.tsx` |
+| Projects and Activity modes | macOS, Codex | Adopt as a visible labeled switch | `Sidebar.tsx` |
 | Dashboard metric grid | Datadog | Reject; cockpit pages expose task-scoped resources instead | Cockpit views |
 | Always-visible command bar | Linear | Reject; use the command palette | `CommandPalette.tsx` |
 
@@ -24,8 +24,8 @@ contract narrows it; “reject” means it does not belong in Terminus.
 | Stick-to-bottom only when already at bottom | Modern chat clients | Adopt; reading history must not jump | `Conversation.tsx` |
 | Virtualized long feed | Browser data grids | Adopt with measured rows and bounded overscan | `Conversation.tsx` |
 | Per-task draft persistence | Codex | Adopt; drafts are isolated from event updates | `useTerminusStore` |
-| Always-visible send/steer composer | Coding agents | Adopt; `⌘Enter` sends or steers | `Composer.tsx` |
-| Queue and stop controls in the composer | Older agent shells | Reject; no local follow-up queue or renderer stop action | `Composer.tsx` |
+| Always-visible send/steer composer | Coding agents | Adopt; Return sends or queues and `⌘Enter` steers | `Composer.tsx` |
+| Queue and stop controls in the composer | Coding agents | Adopt when backed by the active run; stop remains explicit | `Composer.tsx` |
 
 ## Review and evidence
 

@@ -3,9 +3,9 @@
  *
  * The rail, top to bottom:
  *
- *   Terminus ⌄                      ⌕  ☰   ← project switcher, search, grouping
  *   ✎ New task
  *   ▤ Board
+ *   [ Projects ] [ Activity 2 ]          ← an explicit, remembered view
  *   Needs you                          2   ← the queue: see TaskQueue
  *   • Fix the auth race        Website  !
  *     DB migration             Platform !
@@ -27,13 +27,9 @@
  * queue and in the day groups alike, and reading a task clears it without
  * moving the row anywhere.
  *
- * There used to be an `[ Inbox | Projects ]` segmented control here, and it
- * swapped the entire body between two lists of the same tasks. That is a
- * *display setting* wearing the costume of a navigation mode: nothing about
- * the rail's job changes when you file the same rows by day instead of by
- * repository. It is now one list with a grouping menu in the header, which is
- * the shape every tool that has this problem converges on — and it gave the
- * column a whole horizontal band back.
+ * Projects and Activity are two useful readings of the same work. The switch
+ * stays visible and names both choices. A button whose icon changes between a
+ * bell and a folder makes the current mode legible only after hovering it.
  *
  * Per SPEC §7.1: "Projects contain nested tasks. Do not expose worktrees or
  * branches as another permanent hierarchy level."
@@ -53,7 +49,6 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Activity,
   Bell,
   ChevronDown,
   ChevronRight,
@@ -61,11 +56,8 @@ import {
   Folder,
   FolderOpen,
   Plus,
-  Search,
   Settings,
   SquarePen,
-  Terminal,
-  UsersRound,
 } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/cn";
@@ -103,9 +95,7 @@ interface SidebarProps {
 export type SidebarDestination =
   | "new_task"
   | "chat"
-  | "board"
-  | "agents"
-  | "task_details";
+  | "board";
 
 /** Opens the Activity projection without creating or selecting work. */
 export const SHOW_ACTIVITY_EVENT = "terminus:show-activity";
@@ -195,9 +185,9 @@ function SidebarImpl({
     return names;
   }, [sessions]);
   // Activity is a projection over the same tasks, not a second navigation
-  // column. It is the default because the rail opens to the work that changed,
-  // while the project tree remains one explicit toggle away. The choice is
-  // durable and changing it never creates or selects a task.
+  // destination. Projects is the default because the tree is how a coding
+  // workspace is normally entered; Activity remains one explicit choice away.
+  // The choice is durable and changing it never creates or selects a task.
   const [activityVisible, setActivityVisible] = useState(
     () => readSidebarGrouping() === "recent",
   );
@@ -293,26 +283,6 @@ function SidebarImpl({
     selectTask(taskId);
   }, [selectTask]);
 
-  /**
-   * The rail's one search control.
-   *
-   * It used to unfold a filter field inside the column that narrowed the tree
-   * in place. Search is now a surface over the workspace — recent tasks across
-   * every project, narrowed as you type — so the rail never moves under it.
-   * The palette keeps ⌘K and is reachable from inside the search.
-   */
-  const openTaskSearch = useCallback((): void => {
-    window.dispatchEvent(new Event("terminus:open-task-search"));
-  }, []);
-
-  /**
-   * How the body is filed, and the housekeeping that belongs to the body
-   * rather than to any one group in it.
-   *
-   * Visible at rest as an icon in the header, not revealed on hover: the
-   * project tree is a primary way to navigate, and burying the only route to
-   * it behind a hover target is how the old unlabelled tab pair failed.
-   */
   const unreadSettled = useMemo(() => {
     const rows: Array<{ id: string; updatedAt: string }> = [];
     for (const tasks of Object.values(tasksBySession)) {
@@ -323,6 +293,20 @@ function SidebarImpl({
     }
     return rows;
   }, [seenAtByTask, tasksBySession]);
+
+  const attentionCount = useMemo(() => {
+    let count = 0;
+    for (const tasks of Object.values(tasksBySession)) {
+      for (const task of tasks) {
+        const lifecycle = displayLifecycleWith(task, runActivityByTask[task.id] ?? "unknown");
+        const reason = attentionReason({ lifecycle, domainTask: task });
+        const updatedAt = task.updated_at || task.created_at;
+        const unread = taskIsUnread(updatedAt, seenAtByTask[task.id]);
+        if (taskShelf(lifecycle, reason, unread) === "needs_you") count += 1;
+      }
+    }
+    return count;
+  }, [runActivityByTask, seenAtByTask, tasksBySession]);
 
   const activityMenuItems = useMemo<MenuItem[]>(() => [
     {
@@ -340,52 +324,8 @@ function SidebarImpl({
 
   return (
     <div className="flex h-full flex-col">
-      {/* ── Header: which project, and the two global affordances ─────────── */}
-      <div className="flex items-center gap-0.5 px-2 pb-1 pt-2">
-        <ProjectMenu
-          onProjectSelected={onNewTask}
-          {...(onOpenProject ? { onOpenProject } : {})}
-          trigger={(
-            <Button
-              type="button"
-              variant="bare"
-              aria-label="Switch project"
-              data-tooltip="Switch project"
-              className="flex h-7 min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 text-left hover:bg-hover"
-            >
-              <span className="ui-page-title min-w-0 truncate text-primary">
-                {sessions.find((session) => session.id === selectedSessionId)?.title ?? "Terminus"}
-              </span>
-              <ChevronDown size={12} strokeWidth={2} className="shrink-0 text-tertiary" aria-hidden />
-            </Button>
-          )}
-        />
-        <IconButton
-          label="Search tasks"
-          icon={<Search size={14} strokeWidth={1.7} aria-hidden />}
-          size="sm"
-          onClick={openTaskSearch}
-          data-tooltip="Search tasks  ⌘K"
-          className="h-7 w-7 shrink-0 rounded-md text-tertiary hover:bg-hover hover:text-primary"
-        />
-        <IconButton
-          label={activityVisible ? "Show projects" : "Show activity"}
-          icon={activityVisible
-            ? <Folder size={14} strokeWidth={1.7} aria-hidden />
-            : <Bell size={14} strokeWidth={1.7} aria-hidden />}
-          size="sm"
-          aria-pressed={activityVisible}
-          onClick={() => setActivityVisible((visible) => !visible)}
-          data-tooltip={activityVisible ? "Show projects" : "Show activity"}
-          className={cn(
-            "h-7 w-7 shrink-0 rounded-md hover:bg-hover hover:text-primary",
-            activityVisible ? "bg-selected text-accent" : "text-tertiary",
-          )}
-        />
-      </div>
-
       {/* ── Destinations ──────────────────────────────────────────────────── */}
-      <nav className="flex flex-col px-2 pb-1" aria-label="Workspace navigation">
+      <nav className="flex flex-col px-2 pb-1 pt-2" aria-label="Workspace navigation">
         <NavRow
           icon={<SquarePen size={14} strokeWidth={1.7} aria-hidden />}
           label="New task"
@@ -400,21 +340,54 @@ function SidebarImpl({
           onClick={() => onNavigateRef.current?.("board")}
           tooltip="Board — every task, by stage"
         />
-        <NavRow
-          icon={<Activity size={14} strokeWidth={1.7} aria-hidden />}
-          label="Activity"
-          active={activityVisible}
-          onClick={() => setActivityVisible(true)}
-          tooltip="Activity — recent and attention-needed work"
-        />
-        <NavRow
-          icon={<UsersRound size={14} strokeWidth={1.7} aria-hidden />}
-          label="Agents"
-          active={activeDestination === "agents"}
-          onClick={() => onNavigateRef.current?.("agents")}
-          tooltip="Agent directory"
-        />
       </nav>
+
+      <div className="px-2 pb-1 pt-1">
+        <div
+          role="group"
+          aria-label="Sidebar view"
+          className="grid grid-cols-2 gap-0.5 rounded-lg border border-subtle bg-elevated p-0.5"
+        >
+          <Button
+            type="button"
+            variant="bare"
+            aria-pressed={!activityVisible}
+            onClick={() => setActivityVisible(false)}
+            className={cn(
+              "flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-xs",
+              activityVisible
+                ? "text-tertiary hover:bg-hover hover:text-secondary"
+                : "bg-selected text-primary shadow-sm",
+            )}
+          >
+            <Folder size={13} strokeWidth={1.7} aria-hidden />
+            <span className="truncate">Projects</span>
+          </Button>
+          <Button
+            type="button"
+            variant="bare"
+            aria-pressed={activityVisible}
+            onClick={() => setActivityVisible(true)}
+            className={cn(
+              "flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-xs",
+              activityVisible
+                ? "bg-selected text-primary shadow-sm"
+                : "text-tertiary hover:bg-hover hover:text-secondary",
+            )}
+          >
+            <Bell size={13} strokeWidth={1.7} aria-hidden />
+            <span className="truncate">Activity</span>
+            {attentionCount > 0 ? (
+              <span
+                className="ui-meta ml-auto min-w-4 rounded-full bg-hover px-1 text-center text-warning"
+                aria-label={`${attentionCount} ${attentionCount === 1 ? "task needs" : "tasks need"} you`}
+              >
+                {attentionCount > 99 ? "99+" : attentionCount}
+              </span>
+            ) : null}
+          </Button>
+        </div>
+      </div>
 
       {/* ── The body ──────────────────────────────────────────────────────── */}
       <div className="no-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2 pt-1">
@@ -620,6 +593,8 @@ function SidebarImpl({
                     variant="bare"
                     onClick={() => {
                       selectSession(session.id);
+                      onNavigateRef.current?.("new_task");
+                      selectTask(null);
                       setCollapsedSessions((previous) => {
                         if (!previous.has(session.id)) return previous;
                         const next = new Set(previous);
@@ -727,30 +702,20 @@ function SidebarImpl({
       </div>
 
       {/* ── Footer dock ───────────────────────────────────────────────────── */}
-      <div className="sidebar-dock flex h-11 items-center gap-2 px-2">
-        {/* There is no account here — Terminus has no sign-in — so this is the
-            workspace mark, not a person. Inventing an avatar with initials
-            would be claiming an identity the app does not have. */}
-        <span
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-subtle bg-elevated text-tertiary"
-          aria-hidden
-        >
-          <Terminal size={12} strokeWidth={1.8} />
-        </span>
-        <span className="ui-body min-w-0 flex-1 truncate text-secondary">
-          {sessions.find((session) => session.id === selectedSessionId)?.title ?? "Terminus"}
-        </span>
-        <IconButton
-          label="Settings"
-          icon={<Settings size={14} strokeWidth={1.7} aria-hidden />}
-          size="sm"
+      <div className="sidebar-dock flex h-10 items-center gap-1 px-2">
+        <Button
+          type="button"
+          variant="bare"
           onClick={() => window.dispatchEvent(new CustomEvent("terminus:open-settings", { detail: { category: "appearance" } }))}
           data-tooltip="Settings  ⌘,"
-          className="h-6 w-6 shrink-0 rounded-md text-tertiary hover:bg-hover hover:text-primary"
-        />
-        {/* Keep health textual. A dot is easy to miss and cannot communicate
-            the difference between a service that is starting and one that is
-            offline. */}
+          className="h-7 min-w-0 flex-1 justify-start gap-2 rounded-md px-2 text-xs text-tertiary hover:bg-hover hover:text-primary"
+        >
+          <Settings size={14} strokeWidth={1.7} aria-hidden />
+          <span className="truncate">Settings</span>
+        </Button>
+        {/* One 6px dot instead of a word. It is a button in every state
+            because a manual reconcile is useful whether or not the control
+            plane is currently answering. */}
         <Button
           variant="bare"
           type="button"
@@ -761,7 +726,7 @@ function SidebarImpl({
               ? "Retry connection"
               : "Terminus is starting. Refresh"}
           data-tooltip={healthReady ? "Ready" : healthStatus === "offline" ? "Offline — retry" : "Starting…"}
-          className="ui-meta flex h-6 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-secondary hover:bg-hover hover:text-primary"
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md hover:bg-hover"
         >
           <span
             className={cn(
@@ -770,7 +735,6 @@ function SidebarImpl({
             )}
             aria-hidden
           />
-          <span>{healthReady ? "Ready" : healthStatus === "offline" ? "Offline" : "Starting"}</span>
         </Button>
       </div>
     </div>

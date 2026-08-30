@@ -5,7 +5,7 @@ const SPLIT_KEY = "terminus-desktop.review-split.v1";
 const MIN_PERCENT = 32;
 const MAX_PERCENT = 68;
 const DEFAULT_PERCENT = 47;
-const MIN_SPLIT_CONTAINER_WIDTH = 1_100;
+const MIN_SPLIT_CONTAINER_WIDTH = 840;
 
 function readSplit(): number {
   if (typeof window === "undefined") return DEFAULT_PERCENT;
