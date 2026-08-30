@@ -206,14 +206,23 @@ security:
 e2e:
     bun run test:e2e
 
-# Small deterministic eval suite.
-eval-smoke:
+# Fast fixture coverage for eval schemas, aggregation, and graders. These
+# scripted records are never runtime or release evidence.
+eval-fixture-smoke:
     #!/usr/bin/env bash
     set -eu
     cd python
     for task in build-failure/build-001 test-generation/testgen-001; do
       uv run terminus-eval run --fixture-mode --suite terminus-internal --task "$task" --task-dir "forge_evals/evals/tasks/$task" --harness terminus-minimal --seeds 1 --output-dir evals/results/smoke
     done
+
+# One deterministic task through the real provider -> control -> kernel tool
+# loop. The provider itself is local, so the resulting record stays fixture-only.
+eval-runtime-smoke:
+    TERMINUS_E2E_SCENARIO=runtime-eval-smoke bash scripts/e2e/deterministic.sh
+
+# Per-PR smoke gate: retain fast fixture coverage and require a real runtime path.
+eval-smoke: eval-fixture-smoke eval-runtime-smoke
 
 # Full configured evaluation suite.
 eval-full:

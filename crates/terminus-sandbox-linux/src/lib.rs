@@ -20,10 +20,10 @@
 //!   `.git`/`.terminus` state, and control sockets are invisible unless a
 //!   profile rule mounts them; Deny rules become tmpfs overlays that shadow
 //!   any parent bind.
-//! - When `bwrap` is NOT on `$PATH`, the backend reports `Degraded` with an
-//!   explicit note naming the missing binary. Profiles that require
-//!   namespace isolation (e.g. `network: Deny`) are rejected with
-//!   `SandboxError::Unsupported`.
+//! - When `bwrap` is missing, non-executable, or blocked from creating the
+//!   required namespaces, the backend reports the exact degraded reason.
+//!   Profiles that require namespace isolation (e.g. `network: Deny`) are
+//!   rejected with `SandboxError::Unsupported`.
 //!
 //! This module does not link `bubblewrap` directly; it invokes the binary
 //! on PATH through `std::process::Command` at construction time to verify
@@ -122,14 +122,29 @@ fn reference_plan(layout: &HostLayout) -> Option<MountPlan> {
     Some(plan_mounts(&profile, layout, shared_empty_root(), None))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum BwrapProbeStatus {
+    #[default]
+    Missing,
+    NotExecutable,
+    VersionProbeFailed,
+    NamespaceUnavailable,
+    Ready,
+}
+
+#[derive(Debug, Clone, Default)]
+struct BwrapProbe {
+    path: Option<PathBuf>,
+    status: BwrapProbeStatus,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct LinuxSandboxBackend {
-    /// Resolved absolute path to `bwrap`. `None` means bubblewrap was not
-    /// found on PATH at construction time — the backend MUST report
-    /// `Degraded` for the namespace-backed features and MUST reject profiles
-    /// that require namespace isolation.
+    /// Resolved path to `bwrap`. Discovery and enforcement capability remain
+    /// separate so an installed binary on an incapable runner is never
+    /// reported as absent or trusted as an enforcing backend.
     bwrap_path: Option<PathBuf>,
-    bwrap_verified: bool,
+    bwrap_probe_status: BwrapProbeStatus,
 }
 
 impl LinuxSandboxBackend {
@@ -142,10 +157,10 @@ impl LinuxSandboxBackend {
     /// otherwise it reports `Degraded` and rejects profiles that require
     /// namespace isolation.
     pub fn new() -> Self {
-        let bwrap_path = which_bwrap();
+        let probe = probe_bwrap();
         Self {
-            bwrap_verified: bwrap_path.is_some(),
-            bwrap_path,
+            bwrap_path: probe.path,
+            bwrap_probe_status: probe.status,
         }
     }
 
@@ -165,10 +180,10 @@ impl LinuxSandboxBackend {
     /// absolute and pass the same namespace probe used by [`Self::new`].
     pub fn with_bwrap_path(path: PathBuf) -> Self {
         if path.is_absolute() && std::fs::metadata(&path).is_ok() {
-            let bwrap_verified = probe_bwrap_path(&path);
+            let status = probe_bwrap_candidate(&path);
             Self {
                 bwrap_path: Some(path),
-                bwrap_verified,
+                bwrap_probe_status: status,
             }
         } else {
             Self::default()
@@ -184,14 +199,16 @@ impl LinuxSandboxBackend {
         if available {
             Self {
                 bwrap_path: Some(PathBuf::from("/usr/bin/bwrap")),
-                bwrap_verified: false,
+                bwrap_probe_status: BwrapProbeStatus::NamespaceUnavailable,
             }
         } else {
             Self::default()
         }
     }
 
-    /// True iff the backend verified `bwrap` on PATH at construction time.
+    /// True iff the backend discovered a `bwrap` command or explicit path.
+    /// This does not imply namespace capability; callers must use the
+    /// enforcement report for that decision.
     pub fn is_bubblewrap_available(&self) -> bool {
         self.bwrap_path.is_some()
     }
@@ -311,7 +328,7 @@ impl LinuxSandboxBackend {
         broker_dir: Option<&std::path::Path>,
     ) -> Option<(PathBuf, Vec<String>)> {
         let bwrap_path = self.bwrap_path.as_ref()?;
-        if !self.bwrap_verified {
+        if self.bwrap_probe_status != BwrapProbeStatus::Ready {
             return None;
         }
         let layout = HostLayout::probe();
@@ -391,7 +408,11 @@ impl SandboxBackend for LinuxSandboxBackend {
     /// the mount plan proves filesystem/git/secret features; verified
     /// namespaces + delegated cgroup prove the rest.
     fn enforcement_report(&self) -> EnforcementReport {
-        if let Some(path) = self.bwrap_path.as_ref().filter(|_| self.bwrap_verified) {
+        if let Some(path) = self
+            .bwrap_path
+            .as_ref()
+            .filter(|_| self.bwrap_probe_status == BwrapProbeStatus::Ready)
+        {
             if !enforcement::cgroup_v2_ready() {
                 return EnforcementReport {
                     backend_id: self.id().to_string(),
@@ -468,7 +489,31 @@ impl SandboxBackend for LinuxSandboxBackend {
                 ],
             };
         }
-        // Honest degraded report: bwrap was not verified on PATH.
+        // Honest degraded report: distinguish binary discovery from the
+        // namespace capability that secure execution actually requires.
+        let bwrap_note = match (&self.bwrap_path, self.bwrap_probe_status) {
+            (None, BwrapProbeStatus::Missing) => {
+                "degraded: bubblewrap (bwrap) not found on PATH; namespace isolation unavailable"
+                    .to_string()
+            }
+            (Some(path), BwrapProbeStatus::NotExecutable) => format!(
+                "degraded: bubblewrap found at {} but is not executable; namespace isolation unavailable",
+                path.display()
+            ),
+            (Some(path), BwrapProbeStatus::VersionProbeFailed) => format!(
+                "degraded: bubblewrap found at {} but its version probe failed; namespace isolation unavailable",
+                path.display()
+            ),
+            (Some(path), BwrapProbeStatus::NamespaceUnavailable) => format!(
+                "degraded: bubblewrap found and executable at {} but the namespace probe failed; runner namespace support is unavailable",
+                path.display()
+            ),
+            // A missing path with a non-missing status cannot be constructed
+            // through the public constructors. Keep the report conservative
+            // if internal state is ever extended incorrectly.
+            _ => "degraded: bubblewrap capability state is inconsistent; namespace isolation unavailable"
+                .to_string(),
+        };
         EnforcementReport {
             backend_id: self.id().to_string(),
             status: EnforcementStatus::Degraded,
@@ -489,8 +534,7 @@ impl SandboxBackend for LinuxSandboxBackend {
                 EnforcementFeature::UserNamespace,
             ],
             notes: vec![
-                "degraded: bubblewrap (bwrap) not found or not verified on PATH; namespace isolation unavailable"
-                    .to_string(),
+                bwrap_note,
                 "degraded builds never construct a mount plan: no minimal root, no workspace bind, no overlay protection"
                     .to_string(),
                 "cgroup-style resource limits via setrlimit where available (degraded — not wired in this build)"
@@ -563,38 +607,84 @@ pub fn apply_resource_limits(
     ))
 }
 
-/// Resolve and exercise `bwrap` on `$PATH`. A version string alone is not
-/// evidence of enforcement: the probe must successfully create the
-/// namespaces and launch a command before the path is trusted.
-fn which_bwrap() -> Option<PathBuf> {
-    // Try `bwrap --version` first — that's the canonical existence check.
-    let output = Command::new("bwrap")
+/// Resolve and exercise `bwrap` on `$PATH`. A version string proves only that
+/// the binary was discovered and executed. Namespace capability is a separate
+/// result because hosted runners can install bwrap while denying user
+/// namespaces.
+fn probe_bwrap() -> BwrapProbe {
+    let output = match Command::new("bwrap")
         .arg("--version")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
-        .ok()?;
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return BwrapProbe::default();
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return BwrapProbe {
+                path: Some(PathBuf::from("bwrap")),
+                status: BwrapProbeStatus::NotExecutable,
+            };
+        }
+        Err(_) => {
+            return BwrapProbe {
+                path: Some(PathBuf::from("bwrap")),
+                status: BwrapProbeStatus::VersionProbeFailed,
+            };
+        }
+    };
     if !output.status.success() {
-        return None;
+        return BwrapProbe {
+            path: Some(PathBuf::from("bwrap")),
+            status: BwrapProbeStatus::VersionProbeFailed,
+        };
     }
-    // Resolve to an absolute path via `which`.
+    // Resolve to an absolute path when `which` is present. A failed resolver
+    // does not erase the successful executable probe.
     let which = Command::new("which")
         .arg("bwrap")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !which.status.success() {
-        // `bwrap --version` worked but `which bwrap` failed. Keep the same
-        // functional probe and only retain the bare name if it passes.
-        return probe_bwrap_path(std::path::Path::new("bwrap")).then(|| PathBuf::from("bwrap"));
+        .output();
+    let path = which
+        .ok()
+        .filter(|result| result.status.success())
+        .and_then(|result| {
+            let path = String::from_utf8_lossy(&result.stdout).trim().to_string();
+            (!path.is_empty()).then(|| PathBuf::from(path))
+        })
+        .unwrap_or_else(|| PathBuf::from("bwrap"));
+    BwrapProbe {
+        status: if probe_bwrap_path(&path) {
+            BwrapProbeStatus::Ready
+        } else {
+            BwrapProbeStatus::NamespaceUnavailable
+        },
+        path: Some(path),
     }
-    let path_str = String::from_utf8_lossy(&which.stdout).trim().to_string();
-    if path_str.is_empty() {
-        return probe_bwrap_path(std::path::Path::new("bwrap")).then(|| PathBuf::from("bwrap"));
+}
+
+fn probe_bwrap_candidate(path: &Path) -> BwrapProbeStatus {
+    match Command::new(path)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => {
+            if probe_bwrap_path(path) {
+                BwrapProbeStatus::Ready
+            } else {
+                BwrapProbeStatus::NamespaceUnavailable
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            BwrapProbeStatus::NotExecutable
+        }
+        Ok(_) | Err(_) => BwrapProbeStatus::VersionProbeFailed,
     }
-    let path = PathBuf::from(path_str);
-    probe_bwrap_path(&path).then_some(path)
 }
 
 /// Functional probe used before trusting a resolved `bwrap` path. Mirrors
@@ -685,7 +775,10 @@ mod tests {
     // ---------- enforcement report tests ----------
 
     #[test]
-    fn reports_degraded_without_bubblewrap() {
+    fn reports_precise_degraded_bubblewrap_states() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
         let backend = LinuxSandboxBackend::default();
         let report = backend.enforcement_report();
         assert_eq!(report.status, EnforcementStatus::Degraded);
@@ -707,6 +800,36 @@ mod tests {
             .enforced
             .contains(&EnforcementFeature::SecretIsolation));
         assert!(!report.enforced.contains(&EnforcementFeature::ProtectedGit));
+
+        #[cfg(unix)]
+        {
+            let temp = tempfile::tempdir().expect("temporary bwrap fixture");
+            let bwrap = temp.path().join("bwrap");
+            std::fs::write(
+                &bwrap,
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nexit 1\n",
+            )
+            .expect("write bwrap fixture");
+            let mut permissions = std::fs::metadata(&bwrap)
+                .expect("bwrap fixture metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&bwrap, permissions)
+                .expect("make bwrap fixture executable");
+
+            let backend = LinuxSandboxBackend::with_bwrap_path(bwrap.clone());
+            assert!(
+                backend.is_bubblewrap_available(),
+                "an executable bwrap path must remain discovered"
+            );
+            let report = backend.enforcement_report();
+            assert_eq!(report.status, EnforcementStatus::Degraded);
+            assert!(report.notes.iter().any(|note| {
+                note.contains(&bwrap.display().to_string())
+                    && note.contains("namespace probe failed")
+                    && note.contains("runner namespace support is unavailable")
+            }));
+        }
     }
 
     #[test]

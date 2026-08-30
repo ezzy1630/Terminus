@@ -56,7 +56,7 @@ from typing import Any
 
 import yaml
 
-from ..evidence import EvidenceClass
+from ..evidence import EvidenceClass, has_complete_provider_receipt
 from ..run_record import CostBreakdown, Outcome
 from .control_plane_metrics import TurnMetrics, reconcile_metrics
 from .environment_digest import LiveEnvironmentDigest
@@ -117,6 +117,16 @@ class _ContractAdmission:
     @property
     def admitted(self) -> bool:
         return self.contract is not None
+
+
+@dataclass(frozen=True)
+class _TranscriptEvents:
+    """A bounded transcript projection with an explicit continuation boundary."""
+
+    events: list[dict[str, Any]]
+    source_available: bool
+    truncated: bool
+    continuation_cursor: str | None
 
 
 @dataclass(frozen=True)
@@ -202,7 +212,8 @@ class TerminusHarness:
         )
 
         context_manifests, verification = self._collect_artifacts(task_id)
-        events = self._collect_events(task_id)
+        transcript = self._collect_events(task_id)
+        events = transcript.events
         task_detail = self._optional("GET", f"/v1/tasks/{task_id}") or {}
         # The typed turn routes are the source for usage, cost and stop reason.
         # Both are optional: a control plane older than Phase 0-F2 404s them and
@@ -254,7 +265,8 @@ class TerminusHarness:
 
         elapsed = time.monotonic() - started
         wall_clock_ms = int(elapsed * 1000)
-        selected_model = steering["model"] or request.model_snapshot.model
+        observed_model, observed_provider = _provider_attempt_identity(turn_attempts)
+        selected_model = observed_model or steering["model"] or request.model_snapshot.model
         prices = resolve_model_prices(selected_model, catalog=catalog)
         cost = _cost_breakdown(
             metrics,
@@ -263,11 +275,23 @@ class TerminusHarness:
         )
         outcome = self._map_outcome(state)
 
+        resolved_model_snapshot = live_model_snapshot(
+            admitted_request,
+            steering=steering,
+            catalog=catalog,
+            prices=prices,
+            observed_model=observed_model,
+            observed_provider=observed_provider,
+        )
+        event_summary = control_event_summary(
+            events,
+            source_available=transcript.source_available,
+            truncated=transcript.truncated,
+            continuation_cursor=transcript.continuation_cursor,
+        )
         metrics_payload = {
             **metrics.to_dict(),
-            "model_snapshot": live_model_snapshot(
-                admitted_request, steering=steering, catalog=catalog, prices=prices
-            ),
+            "model_snapshot": resolved_model_snapshot,
             "acceptance_criteria": (
                 list(admitted_criteria) if isinstance(admitted_criteria, list) else []
             ),
@@ -315,16 +339,13 @@ class TerminusHarness:
                     "status": receipt_projection_status,
                     "receipts": provider_receipts,
                 },
+                event_summary,
                 {"kind": "turn_steering", **steering},
             ],
             context_manifests=context_manifests,
             grader_outcomes=[],
             environment_digest=digest.to_digest(),
-            evidence_class=(
-                EvidenceClass.EXTERNAL_LIVE
-                if steering["model"] is not None
-                else EvidenceClass.FIXTURE_ONLY
-            ),
+            evidence_class=_evidence_class(provider_receipts, receipt_projection_status),
             metrics=metrics_payload,
             provider_receipts=provider_receipts,
             notes=json.dumps(
@@ -337,6 +358,7 @@ class TerminusHarness:
                     "receipt_turn_ids": receipt_turn_ids,
                     "wall_seconds": round(elapsed, 3),
                     "event_count": len(events),
+                    "events_truncated": transcript.truncated,
                     "provider_receipts": len(provider_receipts),
                     "provider_receipts_status": receipt_projection_status,
                 },
@@ -949,7 +971,7 @@ class TerminusHarness:
                 manifests.append(artifact)
         return manifests, verification
 
-    def _collect_events(self, task_id: str) -> list[dict[str, Any]]:
+    def _collect_events(self, task_id: str) -> _TranscriptEvents:
         """Read the task's durable event log oldest-first.
 
         ``GET /v1/tasks/:id/transcript`` returns the newest page first and
@@ -960,21 +982,43 @@ class TerminusHarness:
         collected: list[dict[str, Any]] = []
         cursor: str | None = None
         while len(collected) < _TRANSCRIPT_MAX_EVENTS:
-            path = f"/v1/tasks/{task_id}/transcript?limit={_TRANSCRIPT_PAGE_LIMIT}"
+            remaining = _TRANSCRIPT_MAX_EVENTS - len(collected)
+            page_limit = min(_TRANSCRIPT_PAGE_LIMIT, remaining)
+            path = f"/v1/tasks/{task_id}/transcript?limit={page_limit}"
             if cursor:
                 path += f"&before={urllib.parse.quote(cursor)}"
             page = self._optional("GET", path)
             if page is None:
-                break
+                return _TranscriptEvents(
+                    events=collected,
+                    source_available=bool(collected),
+                    truncated=cursor is not None,
+                    continuation_cursor=cursor,
+                )
             raw = page.get("events")
             events = [e for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
             if not events:
-                break
+                return _TranscriptEvents(
+                    events=collected,
+                    source_available=True,
+                    truncated=cursor is not None,
+                    continuation_cursor=cursor,
+                )
             collected = events + collected
             cursor = page.get("earlier_cursor")
             if not isinstance(cursor, str) or not cursor:
-                break
-        return collected
+                return _TranscriptEvents(
+                    events=collected,
+                    source_available=True,
+                    truncated=False,
+                    continuation_cursor=None,
+                )
+        return _TranscriptEvents(
+            events=collected,
+            source_available=True,
+            truncated=cursor is not None,
+            continuation_cursor=cursor,
+        )
 
     def _final_revision(self, workspace_id: str) -> str:
         try:
@@ -1016,6 +1060,105 @@ class TerminusHarness:
             "TIMEOUT": Outcome.TIMEOUT,
             _TASK_PENDING_STATE: Outcome.ERROR,
         }.get(state, Outcome.ERROR)
+
+
+def control_event_summary(
+    events: list[dict[str, Any]],
+    *,
+    source_available: bool = True,
+    truncated: bool = False,
+    continuation_cursor: str | None = None,
+) -> dict[str, Any]:
+    """Return bounded proof of the control-plane path used by a run.
+
+    Raw transcript payloads can contain model or tool content and do not
+    belong in an offline run record. Event counts retain the lifecycle proof;
+    the transcript route does not expose artifact references, so the summary
+    states that limitation instead of presenting their absence as evidence.
+    """
+    counts: dict[str, int] = {}
+    successful_tool_settlements = 0
+    for event in events:
+        event_type = event.get("event_type") or event.get("event")
+        if not isinstance(event_type, str) or not event_type:
+            continue
+        counts[event_type] = counts.get(event_type, 0) + 1
+        if event_type != "tool.settled":
+            continue
+        payload: Any = event.get("payload")
+        if not isinstance(payload, Mapping):
+            raw_data = event.get("data")
+            if isinstance(raw_data, str):
+                with contextlib.suppress(json.JSONDecodeError):
+                    payload = json.loads(raw_data)
+        if isinstance(payload, Mapping) and payload.get("status") == "success":
+            successful_tool_settlements += 1
+    return {
+        "kind": "control_event_summary",
+        "source": "task_transcript",
+        "source_available": source_available,
+        "event_count": len(events),
+        "event_counts": dict(sorted(counts.items())),
+        "successful_tool_settlements": successful_tool_settlements,
+        "truncated": truncated,
+        "continuation_cursor": continuation_cursor,
+        "artifact_refs_available": False,
+    }
+
+
+def _evidence_class(
+    provider_receipts: list[dict[str, Any]],
+    receipt_projection_status: str,
+) -> EvidenceClass:
+    """Require complete, homogeneous external receipts for live evidence.
+
+    A real control/kernel execution path is stronger than a scripted harness,
+    but it is not an authenticated external-provider observation. Missing,
+    malformed, mixed, or local attempt evidence therefore fails closed.
+    """
+    if receipt_projection_status != "complete" or not provider_receipts:
+        return EvidenceClass.FIXTURE_ONLY
+    if not all(has_complete_provider_receipt(receipt) for receipt in provider_receipts):
+        return EvidenceClass.FIXTURE_ONLY
+    models = {str(receipt.get("model") or "").strip().lower() for receipt in provider_receipts}
+    providers = {
+        str(receipt.get("provider") or "").strip().lower() for receipt in provider_receipts
+    }
+    if len(models) != 1 or len(providers) != 1 or "" in models or "" in providers:
+        return EvidenceClass.FIXTURE_ONLY
+    model = next(iter(models))
+    provider = next(iter(providers))
+    if provider in {"fake", "local"} or model.startswith("local/"):
+        return EvidenceClass.FIXTURE_ONLY
+    return EvidenceClass.EXTERNAL_LIVE
+
+
+def _provider_attempt_identity(rows: Any) -> tuple[str | None, str | None]:
+    """Return the single model/provider pair observed across attempt rows.
+
+    The no-steering local provider route intentionally leaves the request's
+    model as a fixture placeholder. Attempt rows are the authoritative record
+    of what actually executed. Mixed or malformed rows fail closed to no
+    override instead of inventing one identity for a heterogeneous run.
+    """
+    if not isinstance(rows, list) or not rows:
+        return None, None
+    models: set[str] = set()
+    providers: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            return None, None
+        model = row.get("model")
+        provider = row.get("provider_id")
+        if not isinstance(model, str) or not model.strip():
+            return None, None
+        if not isinstance(provider, str) or not provider.strip():
+            return None, None
+        models.add(model.strip())
+        providers.add(provider.strip())
+    if len(models) != 1 or len(providers) != 1:
+        return None, None
+    return next(iter(models)), next(iter(providers))
 
 
 _RECEIPT_USAGE_TOKEN_FIELDS = (
@@ -1320,7 +1463,9 @@ def _read_yaml_mapping(path: Path, *, name: str) -> dict[str, Any]:
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
-        raise TerminusControlError(f"CONTRACT_ADMISSION_INVALID: unable to read {name}: {exc}") from exc
+        raise TerminusControlError(
+            f"CONTRACT_ADMISSION_INVALID: unable to read {name}: {exc}"
+        ) from exc
     if not isinstance(loaded, Mapping):
         raise TerminusControlError(f"CONTRACT_ADMISSION_INVALID: {name} must be a mapping")
     return dict(loaded)
@@ -1365,7 +1510,9 @@ def _declared_scope(task: Mapping[str, Any]) -> dict[str, list[str]]:
             scope["external_systems"] = external
         return scope
     if not isinstance(value, Mapping):
-        raise TerminusControlError("CONTRACT_ADMISSION_INVALID: task allowed_scope must be a mapping")
+        raise TerminusControlError(
+            "CONTRACT_ADMISSION_INVALID: task allowed_scope must be a mapping"
+        )
     unknown = sorted(set(value) - {"read_paths", "write_paths", "external_systems"})
     if unknown:
         raise TerminusControlError(
@@ -1488,6 +1635,8 @@ def live_model_snapshot(
     steering: Mapping[str, Any],
     catalog: Mapping[str, Any] | None,
     prices: ModelPrices | None,
+    observed_model: str | None = None,
+    observed_provider: str | None = None,
 ) -> dict[str, Any]:
     """The model/provider identity a live run actually executed on.
 
@@ -1497,7 +1646,7 @@ def live_model_snapshot(
     real GPT-5.6 turn is not evidence of anything, so every field the control
     plane can answer is taken from the resolved account and its catalogue row.
     """
-    model = steering.get("model") or request.model_snapshot.model
+    model = observed_model or steering.get("model") or request.model_snapshot.model
     entry = catalog_model_entry(catalog, model)
     account = catalog_account_entry(catalog, steering.get("provider_account_id"))
     base = request.model_snapshot.to_dict()
@@ -1507,6 +1656,7 @@ def live_model_snapshot(
         str(account.get("label") or "")
         or str(account.get("source") or "")
         or str(entry.get("provider") or "")
+        or str(observed_provider or "")
     )
     context_tokens = _positive_int(entry.get("context_tokens"))
     output_tokens = _positive_int(entry.get("output_tokens"))

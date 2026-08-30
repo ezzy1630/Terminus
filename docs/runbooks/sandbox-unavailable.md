@@ -25,7 +25,7 @@ Use this runbook when the kernel reports that the requested sandbox backend cann
    ```bash
    # Linux
    which bwrap
-   bwrap --ro-bind / / true  # Test basic functionality
+   just linux-enforcement-prereqs
    # macOS
    which sandbox-exec
    # Windows (PowerShell)
@@ -67,6 +67,10 @@ Use this runbook when the kernel reports that the requested sandbox backend cann
    `cpu`, `memory`, and `pids` controllers for children. Set
    `TERMINUS_CGROUP_ROOT` to that subtree. Do not point it at the global
    `/sys/fs/cgroup` root; the backend rejects that unsafe configuration.
+   The release runner must expose the GitHub labels `linux`, `x64`, and
+   `terminus-enforcement`, and delegate `/sys/fs/cgroup/terminus-ci` to the
+   Actions user before a workflow starts. Workflows verify this contract and
+   do not use `sudo` to modify the host hierarchy.
 5. **For macOS unavailable:** fail closed. Install or restore `sandbox-exec`, or select another enforcing backend such as Linux Bubblewrap or a container. Do not accept an unnamed degraded macOS profile.
 6. **For Windows degraded:** the Windows backend honestly reports degraded capability. Accept degraded mode or move to Linux.
 7. **For container backend missing:** install Podman or Docker, or use a different backend (ADR-0027).

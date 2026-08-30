@@ -52,24 +52,38 @@ const isIntegrationSpineTask = renderedBody.includes("PR 7 Turn Integration Spin
 const isPackagedDesktopTask = renderedBody.includes(
   "exercise packaged desktop deterministic task",
 );
+const isBuildFailureTask = renderedBody.includes("build-001")
+  && renderedBody.includes("missing import");
 // Keep the contiguous marker out of this provider source. The model request
 // can contain repository metadata for this file; only the deep read result
 // may satisfy this check.
 const deepReadMarker = ["TERMINUS", "DEEP", "RANGE", "SENTINEL"].join("_");
-function hasDeepReadToolResult(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(hasDeepReadToolResult);
+function hasToolResultContaining(value: unknown, markers: readonly string[]): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasToolResultContaining(entry, markers));
+  }
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
   if (record.role === "tool") {
     const serialized = JSON.stringify(record);
-    return serialized.includes(deepReadMarker)
-      && serialized.includes("e2e-large-fixture.txt")
-      && serialized.includes("40001")
-      && serialized.includes("40002");
+    return markers.every((marker) => serialized.includes(marker));
   }
-  return Object.values(record).some(hasDeepReadToolResult);
+  return Object.values(record).some((entry) => hasToolResultContaining(entry, markers));
 }
-const deepReadSettled = hasDeepReadToolResult(request.body);
+const deepReadSettled = hasToolResultContaining(request.body, [
+  deepReadMarker,
+  "e2e-large-fixture.txt",
+  "40001",
+  "40002",
+]);
+const buildReadSettled = hasToolResultContaining(request.body, [
+  "src/main.py",
+  "file_sha256",
+]);
+const buildPatchSettled = hasToolResultContaining(request.body, [
+  "src/main.py",
+  "new_sha256",
+]);
 const emitDone = (): void => {
   console.log(JSON.stringify({
     kind: "done",
@@ -87,13 +101,16 @@ const emitDone = (): void => {
 };
 
 const restartCrashBoundary = "TERMINUS_E2E_CRASH_BOUNDARY";
+const sleep = (milliseconds: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+};
 if (rawRequest.includes(restartCrashBoundary)) {
   // The supervisor kills control while this bounded provider attempt is
   // running. The restart reconciler, rather than a user-interrupt handler,
   // must own the resulting BLOCKED/INTERRUPTED transition.
-  await Bun.sleep(9_000);
+  sleep(9_000);
 } else {
-  await Bun.sleep(250);
+  sleep(250);
 }
 
 // Exercise the real model-facing tool loop. The first minimal-profile request
@@ -108,6 +125,64 @@ if (!renderedBody.includes('"role":"tool"')) {
       tool_name: "capability",
       arguments: { action: "activate_workspace" },
     },
+  }));
+  emitDone();
+  process.exit(0);
+}
+
+if (isBuildFailureTask && !buildReadSettled) {
+  console.log(JSON.stringify({
+    kind: "tool_call",
+    tool_call: {
+      tool_call_id: "fixture-build-read",
+      tool_name: "read",
+      arguments: { path: "src/main.py", render: "raw" },
+    },
+  }));
+  emitDone();
+  process.exit(0);
+}
+
+if (isBuildFailureTask && !buildPatchSettled) {
+  const expectedUtf8 = `"""Small command entry point with an import-time build failure."""
+
+from .runner import run
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the command and return its process status."""
+    if argv is None:
+        argv = []
+    return run(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+`;
+  const replacementUtf8 = expectedUtf8.replace(
+    "from .runner import run",
+    "import sys\n\nfrom .runner import run",
+  );
+  console.log(JSON.stringify({
+    kind: "tool_call",
+    tool_call: {
+      tool_call_id: "fixture-build-patch",
+      tool_name: "patch",
+      arguments: {
+        path: "src/main.py",
+        expected_utf8: expectedUtf8,
+        replacement_utf8: replacementUtf8,
+      },
+    },
+  }));
+  emitDone();
+  process.exit(0);
+}
+
+if (isBuildFailureTask) {
+  console.log(JSON.stringify({
+    kind: "text",
+    text: "Added the missing sys import after reading and patching src/main.py.",
   }));
   emitDone();
   process.exit(0);
