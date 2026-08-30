@@ -285,4 +285,63 @@ describe("packaged standalone runtime", () => {
     expect(environments.kernel.TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN).toBe("b".repeat(43));
     expect(environments.control.TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN).toBe("b".repeat(43));
   });
+
+  it("preserves explicit per-user auth roots without exposing them to migration or control", () => {
+    const environments = runtimeEnvironments({
+      userDataPath: "/tmp/terminus-user-data",
+      userHomePath: "/Users/example",
+      userXdgDataHome: "/Users/example/Library/Application Support",
+      userCodexHome: "/Users/example/.config/codex",
+      database: "/tmp/terminus-user-data/runtime/control.db",
+      kernelData: "/tmp/terminus-user-data/runtime/kernel-data",
+      kernelSocket: "/tmp/terminus-user-data/runtime/kernel.sock",
+      log: "/tmp/terminus-user-data/runtime/runtime.log",
+      controlToken: "c".repeat(43),
+      controlInstanceNonce: "n".repeat(43),
+      bootstrapToken: "b".repeat(43),
+      candidateCommit: COMMIT,
+      version: VERSION,
+      parentPid: process.pid,
+    });
+
+    expect(environments.kernel.XDG_DATA_HOME).toBe("/Users/example/Library/Application Support");
+    expect(environments.kernel.CODEX_HOME).toBe("/Users/example/.config/codex");
+    expect(environments.control).not.toHaveProperty("XDG_DATA_HOME");
+    expect(environments.control).not.toHaveProperty("CODEX_HOME");
+    expect(environments.migration).not.toHaveProperty("XDG_DATA_HOME");
+  });
+
+  it("ignores relative custom auth roots", () => {
+    const environments = runtimeEnvironments({
+      userDataPath: "/tmp/terminus-user-data",
+      userHomePath: "/Users/example",
+      userXdgDataHome: "relative-xdg",
+      userCodexHome: "relative-codex",
+      database: "/tmp/terminus-user-data/runtime/control.db",
+      kernelData: "/tmp/terminus-user-data/runtime/kernel-data",
+      kernelSocket: "/tmp/terminus-user-data/runtime/kernel.sock",
+      log: "/tmp/terminus-user-data/runtime/runtime.log",
+      controlToken: "c".repeat(43),
+      controlInstanceNonce: "n".repeat(43),
+      bootstrapToken: "b".repeat(43),
+      candidateCommit: COMMIT,
+      version: VERSION,
+      parentPid: process.pid,
+    });
+
+    expect(environments.control).not.toHaveProperty("XDG_DATA_HOME");
+    expect(environments.control).not.toHaveProperty("CODEX_HOME");
+  });
+
+  it("includes common Finder-invisible user toolchain shims", () => {
+    const path = userToolchainPath("/Users/example", "/usr/bin:/bin");
+    expect(path.split(":")).toEqual(expect.arrayContaining([
+      "/Users/example/.local/share/mise/shims",
+      "/Users/example/.asdf/shims",
+      "/Users/example/.nodenv/shims",
+      "/Users/example/.nvm/current/bin",
+      "/Users/example/.pyenv/shims",
+      "/Users/example/go/bin",
+    ]));
+  });
 });

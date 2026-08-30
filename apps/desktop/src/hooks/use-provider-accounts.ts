@@ -34,6 +34,9 @@ const EMPTY_DISCOVERY: ProviderAccountDiscovery = {
   warnings: [],
 };
 
+const CODEX_SUBSCRIPTION_UNAVAILABLE =
+  "A ChatGPT/Codex subscription login was detected, but Terminus-native routing is unavailable. Use an API provider or a future official Codex adapter.";
+
 /** Set by the dev mock so design review has rows to look at. */
 declare global {
   interface Window {
@@ -68,6 +71,23 @@ function messageFor(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.trim().length > 0 ? error.message : fallback;
 }
 
+/**
+ * A Codex CLI login is an observed local credential, not a supported
+ * Terminus-native model route. Keep it visible so the operator understands
+ * what was found, but do not present the current raw-token bridge as usable.
+ */
+function normalizeAccounts(accounts: readonly ProviderAccount[]): readonly ProviderAccount[] {
+  return accounts.map((account) => {
+    if (account.source !== "codex-chatgpt" || account.status !== "connected") return account;
+    return {
+      ...account,
+      status: "unsupported",
+      status_detail: CODEX_SUBSCRIPTION_UNAVAILABLE,
+      is_default: false,
+    };
+  });
+}
+
 export function useProviderAccounts(): ProviderAccountsState {
   const [state, setState] = useState<{
     accounts: readonly ProviderAccount[];
@@ -92,7 +112,7 @@ export function useProviderAccounts(): ProviderAccountsState {
           ?? await api.listProviderAccounts(controller.signal);
         if (controller.signal.aborted) return;
         setState({
-          accounts: response.accounts,
+          accounts: normalizeAccounts(response.accounts),
           discovery: response.discovery,
           status: response.supported ? "ready" : "unavailable",
           // Not an error: a control plane without the route has not failed at
@@ -121,7 +141,7 @@ export function useProviderAccounts(): ProviderAccountsState {
     const response = await api.listProviderAccounts(null);
     if (!mounted.current) return;
     setState({
-      accounts: response.accounts,
+      accounts: normalizeAccounts(response.accounts),
       discovery: response.discovery,
       status: response.supported ? "ready" : "unavailable",
       error: null,
@@ -139,7 +159,7 @@ export function useProviderAccounts(): ProviderAccountsState {
       if (!mounted.current) return;
       setLastSweep({ imported: response.imported });
       setState({
-        accounts: response.accounts,
+        accounts: normalizeAccounts(response.accounts),
         discovery: response.discovery,
         status: "ready",
         error: null,
@@ -228,7 +248,7 @@ export function useProviderAccounts(): ProviderAccountsState {
  * showed it raw would be asking the reader to know the naming scheme.
  */
 export function accountSourceLabel(source: string): string {
-  if (source === "codex-chatgpt") return "Codex CLI login";
+  if (source === "codex-chatgpt") return "Codex CLI login (subscription routing unavailable)";
   if (source === "zen") return "OpenCode Zen";
   if (source.startsWith("opencode:")) return "OpenCode auth store";
   return source;
@@ -256,18 +276,38 @@ export function discoveryHints(
 ): readonly string[] {
   const hints: string[] = [];
   const installed = (tool: string): boolean => discovery.installed_tools.includes(tool);
-  const hasCodex = accounts.some((account) => account.source === "codex-chatgpt");
-  const hasVendorKeys = accounts.some((account) => account.source.startsWith("opencode:"));
-  const hasZen = accounts.some((account) => account.source === "zen");
+  const codexAccounts = accounts.filter((account) => account.source === "codex-chatgpt");
+  const opencodeAccounts = accounts.filter((account) => account.source.startsWith("opencode:"));
+  const hasCodex = codexAccounts.some((account) => account.status === "connected");
+  const hasUnsupportedCodex = codexAccounts.some((account) => account.status === "unsupported");
+  const hasVendorKeys = opencodeAccounts.some((account) => account.status === "connected");
+  const hasZen = accounts.some((account) => account.source === "zen" && account.status === "connected");
   if (!installed("codex")) {
-    hints.push("Codex CLI not installed — no ChatGPT login was found to import.");
+    hints.push("Codex CLI is not installed — install it, then run `codex` to connect ChatGPT.");
   } else if (!hasCodex) {
-    hints.push("Codex CLI is installed but not signed in — run `codex` to sign in.");
+    const expired = codexAccounts.some((account) => account.status === "expired");
+    hints.push(hasUnsupportedCodex
+      ? CODEX_SUBSCRIPTION_UNAVAILABLE
+      : expired
+      ? "ChatGPT login is expired — run `codex` to sign in again."
+      : "Codex CLI is installed but no usable ChatGPT login was found — run `codex` to sign in.");
   }
   if (!installed("opencode")) {
-    hints.push("OpenCode not installed — no API keys were found to import.");
+    hints.push("OpenCode is not installed — install it, then run `opencode auth login` to connect a provider.");
   } else if (!hasVendorKeys && !hasZen) {
-    hints.push("OpenCode is installed but its auth store holds no usable key — run `opencode auth login`.");
+    const errored = opencodeAccounts.find((account) => account.status === "error");
+    const expired = opencodeAccounts.some((account) => account.status === "expired");
+    if (errored !== undefined) {
+      const detail = errored.status_detail.trim();
+      hints.push(
+        `OpenCode provider login is unavailable — ${detail || "the stored credential could not be used."} `
+        + "Run `opencode auth login` to reconnect it.",
+      );
+    } else if (expired) {
+      hints.push("OpenCode provider login is expired — run `opencode auth login` to sign in again.");
+    } else {
+      hints.push("OpenCode is installed but no usable provider login was found — run `opencode auth login`.");
+    }
   }
   return hints;
 }
