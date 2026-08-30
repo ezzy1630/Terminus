@@ -310,7 +310,7 @@ describe("mapLocalCredential", () => {
     expect(online.statusDetail).toContain("models.dev has no provider");
   });
 
-  test("the Codex login is visible but unsupported by the Terminus-owned transport", () => {
+  test("a ChatGPT login maps to the Terminus-owned Codex transport", () => {
     const mapping = mapLocalCredential({
       credential: credential({
         source: "codex-chatgpt",
@@ -324,14 +324,21 @@ describe("mapLocalCredential", () => {
     expect(mapping).toMatchObject({
       vendorId: "openai",
       billing: "subscription",
-      status: "unsupported",
+      status: "connected",
+      baseUrl: "https://chatgpt.com/backend-api/codex",
+      host: "chatgpt.com",
+      protocol: "responses",
+      connectorId: "chatgpt-codex",
+      renderProfile: "chatgpt_codex",
     });
-    expect(mapping.baseUrl).toBe("");
-    expect(mapping.host).toBe("");
-    expect(mapping.metadataJson).toBe("{}");
+    expect(JSON.parse(mapping.metadataJson)).toEqual({
+      account_id: "acct-1",
+      plan_type: "plus",
+      email: "user@example.test",
+    });
   });
 
-  test("an expired ChatGPT token remains unsupported, not routable", () => {
+  test("an expired ChatGPT token is visible but not routable", () => {
     const mapping = mapLocalCredential({
       credential: credential({
         source: "codex-chatgpt",
@@ -341,8 +348,8 @@ describe("mapLocalCredential", () => {
       catalog: CATALOG,
       nowMs: NOW_MS,
     });
-    expect(mapping.status).toBe("unsupported");
-    expect(mapping.statusDetail).toContain("App Server");
+    expect(mapping.status).toBe("expired");
+    expect(mapping.statusDetail).toContain("expired");
     expect(mapping.expiresAt?.getTime()).toBe((Math.floor(NOW_MS / 1_000) - 60) * 1_000);
   });
 });
@@ -698,7 +705,7 @@ describe("discoverAndConnectLocalAccounts", () => {
     expect(result.imported).toHaveLength(0);
     expect(store.imports).toHaveLength(0);
     expect(result.accounts.find((row) => row.source === "opencode:cerebras")?.status).toBe("disconnected");
-    expect(result.accounts.find((row) => row.source === "codex-chatgpt")?.status).toBe("unsupported");
+    expect(result.accounts.find((row) => row.source === "codex-chatgpt")?.status).toBe("disconnected");
     expect(store.rows.get("opencode:amazon-bedrock")?.credentialUri).toBe("");
     expect(store.rows.get("opencode:amazon-bedrock")?.status).toBe("unsupported");
   });
@@ -1105,7 +1112,7 @@ describe("discoverAndConnectLocalAccounts", () => {
     expect(store.imports).toEqual([]);
   });
 
-  test("Codex credentials cannot be imported even with consent", async () => {
+  test("a ChatGPT credential imports only after explicit consent", async () => {
     const store: FakeStore = { rows: new Map(), imports: [] };
     const { dependencies } = fakeDependencies({
       credentials: [credential({ source: "codex-chatgpt", authKind: "chatgpt" })],
@@ -1113,14 +1120,15 @@ describe("discoverAndConnectLocalAccounts", () => {
     });
     const detected = await discoverAndConnectLocalAccounts(dependencies);
     const codex = detected.accounts.find((row) => row.source === "codex-chatgpt");
-    expect(codex?.status).toBe("unsupported");
-    await expect(connectLocalProviderAccount(connectDependencies({
+    expect(codex?.status).toBe("disconnected");
+    const connected = await connectLocalProviderAccount(connectDependencies({
       discovery: dependencies,
       store,
       account: codex!,
       userConsent: true,
-    }))).rejects.toThrow("Codex");
-    expect(store.imports).toHaveLength(0);
+    }));
+    expect(store.imports).toEqual([expect.objectContaining({ source: "codex-chatgpt" })]);
+    expect(connected).toMatchObject({ status: "connected", secretState: "bound" });
   });
 
   test("an existing secret binding must be reconciled before connect", async () => {
@@ -1302,6 +1310,7 @@ describe("resolveTurnProvider", () => {
   test("no accounts at all is the legacy chain", () => {
     expect(resolveTurnProvider({ accounts: [], hasModel: true })).toEqual({ kind: "legacy" });
   });
+
 });
 
 describe("account projections", () => {

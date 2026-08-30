@@ -116,6 +116,8 @@ import {
   type ProviderModelsResult,
 } from "./provider-models.js";
 import {
+  CODEX_HOST,
+  CODEX_PATH_PREFIX,
   ZEN_SOURCE,
   ZEN_VENDOR_ID,
   chooseDefaultAccount,
@@ -123,6 +125,7 @@ import {
   connectLocalProviderAccount,
   discoverAndConnectLocalAccounts,
   mapGatewayConfiguration,
+  parseProviderAccountMetadata,
   providerAccountCapabilityScope,
   providerAccountHasApprovedBinding,
   providerAccountProviderId,
@@ -367,7 +370,13 @@ import {
 } from "@terminus/provider-zen";
 import { ANTHROPIC_MODEL_PROFILES } from "@terminus/provider-anthropic";
 import { GOOGLE_MODEL_PROFILES } from "@terminus/provider-google";
-import { CodexTurnState, OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
+import {
+  ChatGptCodexRenderer,
+  CodexTurnState,
+  OPENAI_MODEL_PROFILES,
+  chatGptCodexRequestHeaders,
+  type ChatGptCodexModelProfile,
+} from "@terminus/provider-openai";
 import {
   CODEX_EXTERNAL_HARNESS,
   CodexAppServerError,
@@ -8658,7 +8667,7 @@ const routes: Route[] = [
         "conflict",
       );
     }
-    if (!account.source.startsWith("opencode:")) {
+    if (!account.source.startsWith("opencode:") && account.source !== "codex-chatgpt") {
       return sendError(
         res,
         409,
@@ -12109,6 +12118,7 @@ async function executeGatewayProviderRequest(
   // built once at turn start, and the token only exists after a response.
   const extraHeaders = {
     ...(gateway.extraHeaders ?? {}),
+    ...(gateway.codexTurnState?.requestHeaders() ?? {}),
   };
   const transport = new GatewayTransport({
     credentialBindingId: gateway.secretUri,
@@ -12129,7 +12139,11 @@ async function executeGatewayProviderRequest(
     }
   } finally {
     // In `finally` because the head frame carries these on a 429 as well as a
-    // 200 — quota receipts must not be discarded when a request throws.
+    // 200 — quota receipts and turn continuity must survive a thrown request.
+    gateway.codexTurnState?.observe(client.responseHeaders());
+    if (gateway.accountId !== undefined) {
+      recordProviderAccountUsageHeaders(gateway.accountId, client.responseHeaders());
+    }
   }
   const providerError = chunks.find((chunk) => chunk.kind === "error");
   if (providerError?.kind === "error") {
@@ -13976,7 +13990,6 @@ async function deleteOwnedProviderCredential(account: ProviderAccountRecord): Pr
 async function settleProviderAccountCleanup(
   initial: ProviderAccountRecord,
 ): Promise<ProviderAccountRecord> {
-  const codex = initial.source === "codex-chatgpt" || initial.renderProfile === "chatgpt_codex";
   return settleProviderAccountSecretCleanup({
     account: initial,
     markRevokePending: async (pending) => reconcileProviderAccountRecord(providerAccountUpsertFromRecord(pending, {
@@ -13997,19 +14010,9 @@ async function settleProviderAccountCleanup(
       approvedCatalogDigest: "",
       secretState: "none",
       secretOperationId: "",
-      status: codex ? "unsupported" : "disconnected",
-      statusDetail: codex
-        ? "ChatGPT subscriptions require the separate Codex App Server lane."
-        : "Credential cleanup completed; connect again to approve the current credential and destination.",
+      status: "disconnected",
+      statusDetail: "Credential cleanup completed; connect again to approve the current credential and destination.",
       metadataJson: canonicalMetadataForAccount(pending.source, pending.metadataJson),
-      ...(codex ? {
-        fingerprint: "",
-        baseUrl: "",
-        catalogDigest: "",
-        host: "",
-        connectorId: "",
-        renderProfile: "openai_responses",
-      } : {}),
     }), providerAccountSecuritySnapshot(pending)),
   });
 }
@@ -14018,13 +14021,12 @@ async function settleProviderAccountCleanup(
 async function recoverProviderAccountSecretState(): Promise<void> {
   const rows = await listProviderAccountRecords();
   for (const row of rows) {
-    const codex = row.source === "codex-chatgpt" || row.renderProfile === "chatgpt_codex";
     const legacyCopiedCredential = row.secretState === "none"
       && row.credentialUri !== ""
-      && (codex || row.source.startsWith("opencode:"));
+      && (row.source === "codex-chatgpt" || row.source.startsWith("opencode:"));
     const legacyOrphan = row.secretState === "none"
       && row.credentialUri === ""
-      && (codex || row.source.startsWith("opencode:"));
+      && (row.source === "codex-chatgpt" || row.source.startsWith("opencode:"));
     if (legacyOrphan) {
       try {
         const recovered = await recoverLegacyProviderAccountCredential({
@@ -14045,33 +14047,10 @@ async function recoverProviderAccountSecretState(): Promise<void> {
       || legacyCopiedCredential
     ) {
       await settleProviderAccountCleanup(row);
-      if (codex) {
-        await db.providerAccountModelDiscovery.deleteMany({ where: { accountId: row.id } });
-        providerAccountModelCache.delete(row.id);
-      }
       continue;
     }
     const metadataJson = canonicalMetadataForAccount(row.source, row.metadataJson);
-    if (codex) {
-      await reconcileProviderAccountRecord(providerAccountUpsertFromRecord(row, {
-        fingerprint: "",
-        baseUrl: "",
-        catalogDigest: "",
-        credentialFingerprint: "",
-        approvedBaseUrl: "",
-        approvedCatalogDigest: "",
-        secretState: "none",
-        secretOperationId: "",
-        host: "",
-        connectorId: "",
-        renderProfile: "openai_responses",
-        status: "unsupported",
-        statusDetail: "ChatGPT subscriptions require the separate Codex App Server lane.",
-        metadataJson: "{}",
-      }), providerAccountSecuritySnapshot(row));
-      await db.providerAccountModelDiscovery.deleteMany({ where: { accountId: row.id } });
-      providerAccountModelCache.delete(row.id);
-    } else if (metadataJson !== row.metadataJson) {
+    if (metadataJson !== row.metadataJson) {
       await reconcileProviderAccountRecord(providerAccountUpsertFromRecord(row, { metadataJson }), providerAccountSecuritySnapshot(row));
     }
   }
@@ -14297,7 +14276,6 @@ async function connectProviderAccountWithConsent(
 function providerAccountEndpoint(account: ProviderAccountRecord): KernelConnectorEndpoint {
   const profile = account.renderProfile as ProviderRenderProfile;
   if (profile === "zen_gateway") return ZEN_GATEWAY_ENDPOINT;
-  if (profile === "chatgpt_codex") throw new Error("ChatGPT subscriptions require the separate Codex App Server lane");
   if (
     account.secretState !== "bound"
     || account.credentialUri === ""
@@ -14306,6 +14284,15 @@ function providerAccountEndpoint(account: ProviderAccountRecord): KernelConnecto
     || account.approvedCatalogDigest !== account.catalogDigest
   ) {
     throw new Error("provider account has no current approved credential and destination binding");
+  }
+  if (profile === "chatgpt_codex") {
+    return {
+      connectorId: "chatgpt-codex",
+      host: CODEX_HOST,
+      port: 443,
+      allowedPathPrefixes: [CODEX_PATH_PREFIX],
+      label: account.displayName,
+    };
   }
   const base = new URL(account.approvedBaseUrl);
   const prefix = base.pathname === "/" ? "/" : `${base.pathname.replace(/\/+$/, "")}/`;
@@ -14316,6 +14303,23 @@ function providerAccountEndpoint(account: ProviderAccountRecord): KernelConnecto
     allowedPathPrefixes: [prefix],
     label: account.displayName,
   };
+}
+
+/** Honest non-credential headers for one connected ChatGPT account. */
+function providerAccountRequestHeaders(
+  account: ProviderAccountRecord,
+  sessionId: string | null,
+  threadId?: string | null,
+): Readonly<Record<string, string>> {
+  if ((account.renderProfile as ProviderRenderProfile) !== "chatgpt_codex") return {};
+  const metadata = parseProviderAccountMetadata(account.metadataJson);
+  return chatGptCodexRequestHeaders({
+    originator: "terminus",
+    userAgent: `terminus/${CONTROL_BUILD_VERSION}`,
+    accountId: metadata.account_id ?? null,
+    sessionId,
+    threadId: threadId ?? null,
+  });
 }
 
 function providerAccountClient(
@@ -14360,6 +14364,7 @@ async function discoverAndPersistProviderAccountModels(
     client: providerAccountClient(account, context),
     observedAt: now(),
     catalog: (await fetchModelsDevRaw()).catalog,
+    headers: providerAccountRequestHeaders(account, null),
     ...(signal === undefined || signal === null ? {} : { signal }),
     discoverZen: async () => {
       // Account discovery owns its credential binding. Requiring the retired
@@ -14598,9 +14603,8 @@ async function loadThreadReasoningReplay(threadId: string): Promise<readonly Rea
 /**
  * The renderer for one account model.
  *
- * Connected accounts reuse the provider-neutral gateway renderer. Unsupported
- * external-harness accounts are rejected during account resolution and never
- * reach this function.
+ * ChatGPT Codex has a measured Responses dialect; other accounts reuse the
+ * provider-neutral gateway renderer.
  */
 function providerAccountRenderer(
   routing: {
@@ -14612,8 +14616,48 @@ function providerAccountRenderer(
   reasoningEffort: ReasoningEffort | null,
   promptCacheKey: string,
   reasoningReplay: ReasoningReplayLedger,
-): GatewayRenderer {
+): ChatGptCodexRenderer | GatewayRenderer {
+  if ((routing.account.renderProfile as ProviderRenderProfile) === "chatgpt_codex") {
+    const profile: ChatGptCodexModelProfile = {
+      slug: routing.model.id,
+      reasoningLevels: [...routing.model.reasoningEfforts],
+      defaultReasoningLevel: routing.model.defaultReasoningEffort,
+      supportsParallelToolCalls: routing.model.supportsParallelToolCalls,
+      supportsReasoningSummaries: routing.model.supportsReasoningSummaries,
+    };
+    return new ChatGptCodexRenderer(routing.providerId, {
+      reasoningEffort,
+      promptCacheKey,
+      profile,
+      reasoningReplay,
+    });
+  }
   return new GatewayRenderer([routing.gatewayModel], { reasoningEffort, reasoningReplay });
+}
+
+/** Record the provider's own plan-window receipt without changing routing. */
+function recordProviderAccountUsageHeaders(
+  accountId: string,
+  headers: Readonly<Record<string, string>>,
+): void {
+  const usedPercent = headers["x-codex-primary-used-percent"];
+  const resetAfterSeconds = headers["x-codex-primary-reset-after-seconds"];
+  if (usedPercent === undefined && resetAfterSeconds === undefined) return;
+  const parts: string[] = [];
+  if (usedPercent !== undefined) parts.push(`${usedPercent}% of the plan window used`);
+  if (resetAfterSeconds !== undefined) {
+    const seconds = Number(resetAfterSeconds);
+    parts.push(Number.isFinite(seconds) && seconds > 0
+      ? `resets in ${Math.max(1, Math.round(seconds / 60))} min`
+      : `resets in ${resetAfterSeconds}s`);
+  }
+  const detail = parts.join(", ");
+  void writerTransaction((tx) => tx.providerAccount.updateMany({
+    where: { id: accountId, status: "connected" },
+    data: { statusDetail: detail },
+  })).catch((error: unknown) => {
+    console.warn(`[terminus-control] recording provider account usage failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
 }
 
 const providerAccountRevisionSchema = z.object({
@@ -17139,6 +17183,11 @@ async function agentLoop(turnId: string): Promise<void> {
               workspaceAccess,
             }),
             endpoint: providerAccountEndpoint(selectedProviderAccount),
+            extraHeaders: providerAccountRequestHeaders(
+              selectedProviderAccount,
+              turn.thread.sessionId,
+              turn.threadId,
+            ),
             scope: providerAccountCapabilityScope(selectedProviderAccount),
           };
         })();
@@ -17283,6 +17332,8 @@ async function agentLoop(turnId: string): Promise<void> {
         ? (localProviderCommand?.toolsEnabled ?? false)
         : gatewayModel.toolCalling;
     const toolsEnabledForTurn = toolsEnabled;
+    // One per Terminus turn: provider continuity must not leak into the next.
+    const codexTurnState = new CodexTurnState();
     // The dispatch target for this turn. An account carries its own connector
     // and its non-credential headers.
     const providerGatewayConfig: ProviderGatewayConfig | null = gatewayModel === null
@@ -17294,6 +17345,9 @@ async function agentLoop(turnId: string): Promise<void> {
             ? {}
             : {
                 endpoint: accountRouting.endpoint,
+                extraHeaders: accountRouting.extraHeaders,
+                codexTurnState,
+                accountId: accountRouting.account.id,
               }),
         };
     const requestedToolCapabilities = [...new Set(
@@ -19528,7 +19582,6 @@ async function agentLoop(turnId: string): Promise<void> {
             claims: stop.kind === "completion_proposal" ? stop.proposal.claims : [],
             workspaceMutationObserved: turnMayHaveChangedWorkspace,
             workspaceMutationAttempted: turnAttemptedWorkspaceMutation,
-            writePaths: contract.allowedScope.writePaths,
             continuationAdmitted: intentOnlyContinuationCount >= INTENT_ONLY_CONTINUATION_LIMIT,
           });
           if (recovery.kind === "continue") {
@@ -20100,6 +20153,11 @@ async function agentLoop(turnId: string): Promise<void> {
             plan.nodes.map((node) => [node.id, node.acceptanceCriterionId]),
           );
           for (const r of newlyEvaluatedResults) {
+            // A skipped predicate is absence of proof, not a failed check.
+            // `verification.plan_completed` below carries the explicit
+            // no-runnable outcome; do not publish a success- or
+            // failure-shaped node event for work the verifier never ran.
+            if (r.status === "skipped") continue;
             await emit({
               eventType: r.status === "pass" ? "verification.node_passed" : "verification.node_failed",
               aggregateType: "verification_result",
@@ -20132,7 +20190,7 @@ async function agentLoop(turnId: string): Promise<void> {
         if (noRunnableChecks) {
           // Nothing in this repository implements the required predicates.
           // Record why, settle the turn on the model's final message, and
-          // return the task to ACTIVE — a skipped check is not proof, so the
+          // return the task to review — a skipped check is not proof, so the
           // completion gate is deliberately not entered.
           const skipReasons = skippedRequiredNodes.map((nodeId) => ({
             node_id: nodeId,
@@ -20174,8 +20232,8 @@ async function agentLoop(turnId: string): Promise<void> {
           });
           await verificationCoordinator.settleWithoutRunnableChecks(task.id, turnId, {
             reason: "no_runnable_checks",
-            // The task stays ACTIVE (a skipped check is not proof); this is
-            // the sentence the client shows so the state is not a mystery.
+            // The task remains steerable (a skipped check is not proof); this
+            // sentence and REVIEW phase keep it out of the running state.
             detail: notRunnableDetail,
             detected_runners: detectedRunners,
             skipped_nodes: skipReasons.map((entry) => entry.node_id),

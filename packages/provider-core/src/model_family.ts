@@ -147,7 +147,9 @@ export function resolveMaxOutputTokens(input: MaxOutputInput): number {
  * | `low` | 4,096 | short chains; subagents and mechanical edits |
  * | `medium` | 16,384 | the OpenAI default effort |
  * | `high` | 32,768 | the Anthropic default effort; daily agentic coding |
- * | `max` (vendor `xhigh`/`max`/`ultra`) | 65,536 | Anthropic advises `max_tokens` >= 64k at these levels |
+ * | `xhigh` | 65,536 | preserve the former top-rung reserve while exposing the wire level exactly |
+ * | `max` | 65,536 | maximum provider reasoning |
+ * | `ultra` | 65,536 | distinct provider ultra mode when advertised |
  *
  * An unset effort takes the `medium` rung: the request will carry whichever
  * default the vendor applies, and reserving the middle rung neither starves a
@@ -157,13 +159,15 @@ export const REASONING_RESERVE_TOKENS_BY_EFFORT = {
   low: 4_096,
   medium: 16_384,
   high: 32_768,
+  xhigh: 65_536,
   max: 65_536,
-} as const satisfies Record<"low" | "medium" | "high" | "max", number>;
+  ultra: 65_536,
+} as const satisfies Record<"low" | "medium" | "high" | "xhigh" | "max" | "ultra", number>;
 
 export const DEFAULT_REASONING_RESERVE_TOKENS = REASONING_RESERVE_TOKENS_BY_EFFORT.medium;
 
 export function resolveReasoningReserveTokens(
-  effort: "low" | "medium" | "high" | "max" | null | undefined,
+  effort: "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | null | undefined,
 ): number {
   if (effort === undefined || effort === null) return DEFAULT_REASONING_RESERVE_TOKENS;
   return REASONING_RESERVE_TOKENS_BY_EFFORT[effort];

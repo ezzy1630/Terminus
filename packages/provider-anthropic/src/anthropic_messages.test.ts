@@ -12,6 +12,7 @@ import type {
 import { ReasoningReplayLedger } from "@terminus/provider-core";
 import {
   AnthropicRenderer,
+  anthropicEffort,
   anthropicBetaHeader,
   anthropicRequiredBetas,
   anthropicSupportsEffort,
@@ -322,6 +323,10 @@ describe("Anthropic Messages Connector", () => {
     expect(body).not.toHaveProperty("temperature");
     expect(body).not.toHaveProperty("top_p");
     expect(JSON.stringify(body)).not.toContain("budget_tokens");
+  });
+
+  test("maps canonical xhigh onto Anthropic's deepest supported effort", () => {
+    expect(anthropicEffort("xhigh")).toBe("max");
   });
 
   test("omits output_config when the user chose no effort", async () => {

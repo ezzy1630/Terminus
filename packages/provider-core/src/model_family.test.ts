@@ -122,6 +122,7 @@ describe("reasoning reserve", () => {
     expect(resolveReasoningReserveTokens("low")).toBe(4_096);
     expect(resolveReasoningReserveTokens("medium")).toBe(16_384);
     expect(resolveReasoningReserveTokens("high")).toBe(32_768);
+    expect(resolveReasoningReserveTokens("xhigh")).toBe(65_536);
     expect(resolveReasoningReserveTokens("max")).toBe(65_536);
   });
 

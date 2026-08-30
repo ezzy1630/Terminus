@@ -41,6 +41,8 @@ const MODEL_RESPONSE_HEADERS: &[&str] = &[
     "request-id",
     "x-request-id",
 ];
+/** ChatGPT plan usage, turn continuity, and model-catalog receipts. */
+const CODEX_RESPONSE_HEADERS: &[&str] = &["x-codex-*", "x-models-*"];
 /// Hosts admitted regardless of which connectors are registered. `opencode.ai`
 /// is the historical gateway floor; `models.dev` is the model-catalog source
 /// fetched through `web-fetch`. Kept as Rust constants so no shipped
@@ -50,6 +52,19 @@ pub const EGRESS_FLOOR_HOSTS: &[&str] = &["opencode.ai", "models.dev"];
 const GATEWAY_HOST: &str = "opencode.ai";
 const OPENAI_API_HOST: &str = "api.openai.com";
 const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
+const CHATGPT_HOST: &str = "chatgpt.com";
+
+/** Non-credential identity and continuity headers accepted by Codex. */
+const CHATGPT_CODEX_REQUEST_HEADERS: &[&str] = &[
+    "chatgpt-account-id",
+    "session-id",
+    "thread-id",
+    "x-codex-turn-state",
+    "x-client-request-id",
+    "accept-encoding",
+    "originator",
+    "user-agent",
+];
 
 /// Feature-flag headers the caller may set on any model connector.
 ///
@@ -73,6 +88,14 @@ fn model_response_headers() -> Vec<String> {
     MODEL_RESPONSE_HEADERS
         .iter()
         .map(|h| (*h).to_string())
+        .collect()
+}
+
+fn codex_response_headers() -> Vec<String> {
+    MODEL_RESPONSE_HEADERS
+        .iter()
+        .chain(CODEX_RESPONSE_HEADERS.iter())
+        .map(|header| (*header).to_string())
         .collect()
 }
 
@@ -113,6 +136,18 @@ pub fn default_connector_registry() -> Vec<(&'static str, ConnectorDescriptor)> 
                 .with_hosts(gateway_hosts)
                 .with_response_headers(model_response_headers())
                 .with_allowed_request_headers(OPENCODE_GATEWAY_REQUEST_HEADERS.iter().copied()),
+        ),
+        (
+            "chatgpt-codex",
+            ConnectorDescriptor::new(AuthStyle::Bearer)
+                .with_timeouts(ConnectorTimeouts::with_idle(
+                    MODEL_TOTAL_TIMEOUT,
+                    MODEL_IDLE_TIMEOUT,
+                ))
+                .with_bounds(MODEL_MAX_REQUEST_BYTES, MODEL_MAX_RESPONSE_BYTES)
+                .with_hosts(HostPolicy::Fixed(vec![CHATGPT_HOST.to_string()]))
+                .with_response_headers(codex_response_headers())
+                .with_allowed_request_headers(CHATGPT_CODEX_REQUEST_HEADERS.iter().copied()),
         ),
         (
             "openai-responses",
@@ -206,7 +241,7 @@ mod tests {
                 "floor host {host} denied"
             );
         }
-        for host in [OPENAI_API_HOST, ANTHROPIC_API_HOST] {
+        for host in [OPENAI_API_HOST, ANTHROPIC_API_HOST, CHATGPT_HOST] {
             assert!(
                 policy.matches(host, 443, "https"),
                 "{host} must be admitted"
@@ -221,7 +256,6 @@ mod tests {
             "evil.example.com",
             "integrate.api.nvidia.com",
             "api.openai.com.evil.com",
-            "chatgpt.com",
             "auth.openai.com",
         ] {
             assert!(!policy.matches(host, 443, "https"), "{host} must be denied");
@@ -236,7 +270,11 @@ mod tests {
         for (id, descriptor) in default_connector_registry() {
             if !matches!(
                 id,
-                "openai-responses" | "openai-chat" | "anthropic-messages" | "openai-compatible"
+                "openai-responses"
+                    | "openai-chat"
+                    | "anthropic-messages"
+                    | "chatgpt-codex"
+                    | "openai-compatible"
             ) {
                 continue;
             }
@@ -277,13 +315,36 @@ mod tests {
     }
 
     #[test]
-    fn retired_subscription_connectors_are_not_registered_or_admitted() {
+    fn chatgpt_codex_is_registered_but_oauth_exchange_is_not() {
         let registry = default_connector_registry();
-        assert!(!registry.iter().any(|(id, _)| *id == "chatgpt-codex"));
+        assert!(registry.iter().any(|(id, _)| *id == "chatgpt-codex"));
         assert!(!registry.iter().any(|(id, _)| *id == "openai-oauth"));
         let policy = connector_egress_policy(&registry);
-        assert!(!policy.matches("chatgpt.com", 443, "https"));
+        assert!(policy.matches("chatgpt.com", 443, "https"));
         assert!(!policy.matches("auth.openai.com", 443, "https"));
+    }
+
+    #[test]
+    fn chatgpt_codex_admits_only_its_non_credential_headers() {
+        let descriptor = descriptor_for("chatgpt-codex");
+        for header in CHATGPT_CODEX_REQUEST_HEADERS {
+            assert!(descriptor
+                .allowed_request_headers
+                .iter()
+                .any(|value| value == header));
+        }
+        for forbidden in ["authorization", "cookie", "version", "x-oai-attestation"] {
+            assert!(!descriptor
+                .allowed_request_headers
+                .iter()
+                .any(|value| value == forbidden));
+        }
+        for pattern in CODEX_RESPONSE_HEADERS {
+            assert!(descriptor
+                .response_headers
+                .iter()
+                .any(|value| value == pattern));
+        }
     }
 
     #[test]
@@ -346,6 +407,7 @@ mod tests {
         for id in [
             "opencode-gateway",
             "opencode-gateway-anonymous",
+            "chatgpt-codex",
             "openai-responses",
             "openai-chat",
             "anthropic-messages",
