@@ -10,8 +10,8 @@
 //! Two guarantees hold at this boundary:
 //!
 //! 1. **Secret bytes never cross the API.** [`ProviderAccountService::discover_local`]
-//!    returns identity plus a non-reversible fingerprint (first 12 hex of
-//!    SHA-256). [`ProviderAccountService::import_local`] re-reads the store,
+//!    returns identity plus a non-reversible SHA-256 digest.
+//!    [`ProviderAccountService::import_local`] re-reads the store,
 //!    writes through [`SecretBroker::store`], and returns only the capability
 //!    URI it stored under. Nothing here is cached between calls.
 //! 2. **The reads fail closed and stay bounded.** A store larger than 64 KiB,
@@ -137,10 +137,6 @@ pub struct LocalCredentialMetadata {
     /// ChatGPT plan type (`chatgpt_plan_type` claim), e.g. a subscription tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<String>,
-    /// The store's own `metadata` object for this entry, verbatim. Not a
-    /// secret: it is where a Cloudflare account id lives.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_metadata: Option<serde_json::Value>,
 }
 
 impl LocalCredentialMetadata {
@@ -154,10 +150,7 @@ impl LocalCredentialMetadata {
     /// True when no non-secret metadata was found for this credential.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.account_id.is_none()
-            && self.email.is_none()
-            && self.plan_type.is_none()
-            && self.provider_metadata.is_none()
+        self.account_id.is_none() && self.email.is_none() && self.plan_type.is_none()
     }
 }
 
@@ -167,7 +160,7 @@ pub struct LocalProviderCredential {
     /// Stable source id: `opencode:<providerID>` or `codex-chatgpt`.
     pub source: String,
     pub auth_kind: LocalAuthKind,
-    /// First 12 hex characters of SHA-256 over the secret bytes.
+    /// Full lowercase SHA-256 digest over the secret bytes.
     pub fingerprint: String,
     pub metadata: LocalCredentialMetadata,
     /// Unix seconds at which the credential expires; `0` when it does not.
@@ -183,6 +176,30 @@ pub struct LocalCredentialDiscovery {
     pub warnings: Vec<String>,
     pub codex_installed: bool,
     pub opencode_installed: bool,
+    pub opencode_store_status: LocalCredentialStoreStatus,
+}
+
+/// Whether the supported local store was authoritatively read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LocalCredentialStoreStatus {
+    /// No auth store exists at the supported location.
+    #[default]
+    Missing,
+    /// The store was bounded, valid JSON and decoded under the allowlist.
+    Available,
+    /// A store exists but is unreadable, unsafe, oversized or malformed.
+    Rejected,
+}
+
+impl LocalCredentialStoreStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Available => "available",
+            Self::Rejected => "rejected",
+        }
+    }
 }
 
 /// Result of moving one discovered credential into the OS keyring.
@@ -355,12 +372,13 @@ impl ProviderAccountService {
             "local provider credential discovery authorized",
         );
 
-        let (entries, warnings) = self.collect();
+        let (entries, warnings, opencode_store_status) = self.collect();
         let discovery = LocalCredentialDiscovery {
             credentials: entries.into_iter().map(|entry| entry.credential).collect(),
             warnings,
             codex_installed: self.binary_on_path(CODEX_BINARY),
             opencode_installed: self.binary_on_path(OPENCODE_BINARY),
+            opencode_store_status,
         };
         tracing::info!(
             target: "terminus_kernel_audit",
@@ -389,6 +407,7 @@ impl ProviderAccountService {
         ctx: &RequestContext,
         source: &str,
         capability_uri: &str,
+        expected_fingerprint: &str,
     ) -> KernelResult<ImportedLocalCredential> {
         let requested_scope = Scope {
             workspace_paths: Vec::new(),
@@ -411,6 +430,15 @@ impl ProviderAccountService {
                 "Codex subscription credentials are not importable; use the separate Codex App Server lane",
             ));
         }
+        if expected_fingerprint.len() != 64
+            || !expected_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(invalid(
+                "expected_fingerprint must be the approved SHA-256 digest",
+            ));
+        }
         tracing::info!(
             target: "terminus_kernel_audit",
             event = "authorized",
@@ -425,7 +453,7 @@ impl ProviderAccountService {
 
         // Re-read at call time: discovery results are never cached, so an
         // import always moves the credential that is on disk right now.
-        let (entries, _warnings) = self.collect();
+        let (entries, _warnings, _store_status) = self.collect();
         let entry = entries
             .into_iter()
             .find(|entry| entry.credential.source == source)
@@ -437,6 +465,14 @@ impl ProviderAccountService {
                     false,
                 )
             })?;
+        if entry.credential.fingerprint != expected_fingerprint {
+            return Err(KernelError::new(
+                ErrorCode::TransactionConflict,
+                ErrorCategory::Conflict,
+                "local credential changed after approval; discover and approve it again",
+                false,
+            ));
+        }
 
         self.broker
             .store(capability_uri, &entry.secret)
@@ -469,21 +505,31 @@ impl ProviderAccountService {
 
     /// Read the supported local store. Codex installation status is still
     /// reported by `binary_on_path`, but its auth store is never opened.
-    fn collect(&self) -> (Vec<DiscoveredEntry>, Vec<String>) {
+    fn collect(
+        &self,
+    ) -> (
+        Vec<DiscoveredEntry>,
+        Vec<String>,
+        LocalCredentialStoreStatus,
+    ) {
         let mut entries = Vec::new();
         let mut warnings = Vec::new();
 
-        match load_store(
+        let status = match load_store(
             self.roots.opencode_store().as_deref(),
             LocalCredentialStore::OpencodeAuthStore,
         ) {
-            StoreRead::Missing => {}
-            StoreRead::Rejected(warning) => warnings.push(warning),
+            StoreRead::Missing => LocalCredentialStoreStatus::Missing,
+            StoreRead::Rejected(warning) => {
+                warnings.push(warning);
+                LocalCredentialStoreStatus::Rejected
+            }
             StoreRead::Loaded(document) => {
                 decode_opencode_store(&document, &mut entries, &mut warnings);
+                LocalCredentialStoreStatus::Available
             }
-        }
-        (entries, warnings)
+        };
+        (entries, warnings, status)
     }
 
     /// `which`-style probe: is `binary` an executable file on `PATH`? The
@@ -646,10 +692,7 @@ fn decode_opencode_store(
                     LocalAuthKind::Api,
                     key,
                     0,
-                    entry
-                        .get("metadata")
-                        .filter(|value| value.is_object())
-                        .cloned(),
+                    admitted_account_id(entry.get("metadata")),
                 )
             }),
             "wellknown" => match (
@@ -673,7 +716,7 @@ fn decode_opencode_store(
             },
             _ => None,
         };
-        let Some((auth_kind, secret, expires_at_unix, provider_metadata)) = decoded else {
+        let Some((auth_kind, secret, expires_at_unix, account_id)) = decoded else {
             continue;
         };
         entries.push(DiscoveredEntry {
@@ -682,7 +725,7 @@ fn decode_opencode_store(
                 auth_kind,
                 fingerprint: fingerprint(secret.as_bytes()),
                 metadata: LocalCredentialMetadata {
-                    provider_metadata,
+                    account_id,
                     ..LocalCredentialMetadata::default()
                 },
                 expires_at_unix,
@@ -691,6 +734,26 @@ fn decode_opencode_store(
             secret: secret.into_bytes(),
         });
     }
+}
+
+/// Admit the one provider metadata field Terminus has a defined use for.
+/// OpenCode plugins may persist arbitrary objects here; copying that bag into
+/// Terminus state would turn an untrusted extension field into routing input.
+fn admitted_account_id(metadata: Option<&serde_json::Value>) -> Option<String> {
+    let object = metadata?.as_object()?;
+    let value = object
+        .get("accountId")
+        .or_else(|| object.get("account_id"))?
+        .as_str()?;
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return None;
+    }
+    Some(value.to_string())
 }
 
 /// Provider ids become part of a `source` id that reaches the database, the
@@ -706,12 +769,11 @@ fn is_admissible_provider_id(id: &str) -> bool {
 
 // ---------- helpers ----------
 
-/// First 12 hex characters of SHA-256 over the secret bytes: enough to notice
-/// a rotated credential, never enough to reconstruct one.
+/// Full SHA-256 digest over the secret bytes. This is non-reversible and binds
+/// an approval to the exact credential bytes rather than a display-length
+/// collision domain. Clients may abbreviate it only when rendering.
 fn fingerprint(secret: &[u8]) -> String {
-    let digest = Sha256::digest(secret);
-    let full = hex::encode(digest);
-    full.chars().take(12).collect()
+    hex::encode(Sha256::digest(secret))
 }
 
 fn json_string(value: &serde_json::Value) -> Option<String> {
@@ -793,9 +855,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fingerprint_is_twelve_hex_characters() {
+    fn fingerprint_is_a_full_sha256_digest() {
         let value = fingerprint(b"fixture-not-a-real-key");
-        assert_eq!(value.len(), 12);
+        assert_eq!(value.len(), 64);
         assert!(value.bytes().all(|b| b.is_ascii_hexdigit()));
         assert_ne!(value, fingerprint(b"fixture-not-a-real-key-2"));
     }

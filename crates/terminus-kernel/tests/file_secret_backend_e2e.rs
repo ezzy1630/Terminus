@@ -33,6 +33,10 @@ use terminus_secrets::SecretNamespace;
 
 const ACCOUNT_URI: &str = "secret://provider-account/0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b";
 
+fn fingerprint(secret: &str) -> String {
+    hex::encode(sha2::Sha256::digest(secret.as_bytes()))
+}
+
 #[tokio::test]
 async fn file_backend_carries_a_provider_account_from_import_to_resolve() {
     // ---------- 1. a kernel wired to the file backend ----------
@@ -68,7 +72,12 @@ async fn file_backend_carries_a_provider_account_from_import_to_resolve() {
     let token = secret_token(&kernel, ACCOUNT_URI);
     let imported = kernel
         .provider_accounts
-        .import_local(&ctx(&token), "opencode:opencode-provider", ACCOUNT_URI)
+        .import_local(
+            &ctx(&token),
+            "opencode:opencode-provider",
+            ACCOUNT_URI,
+            &fingerprint(access_token),
+        )
         .expect("the OpenCode login imports into the file backend");
     assert!(imported.stored);
     assert_eq!(imported.capability_uri, ACCOUNT_URI);

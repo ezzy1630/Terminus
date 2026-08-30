@@ -809,14 +809,14 @@ export interface LocalProviderCredentialMessage {
   /** "api" | "oauth" | "wellknown" | "chatgpt". */
   authKind: string;
   /**
-   * First 12 hex characters of SHA-256 over the secret bytes, so a rotated
-   * key is noticed without the key ever being seen.
+   * Full lowercase SHA-256 digest over the secret bytes, so approval binds to
+   * exact bytes without the key ever being seen.
    */
   fingerprint: string;
   /**
-   * Non-secret metadata as canonical JSON. Keys: "account_id", "plan_type",
-   * "email" (chatgpt), and "provider_metadata" (the store's own metadata
-   * object, e.g. a Cloudflare account id). Absent keys are omitted.
+   * Non-secret metadata as canonical JSON. Only allowlisted identity keys are
+   * carried. Arbitrary provider/plugin metadata never crosses this boundary.
+   * Current key: "account_id". Absent keys are omitted.
    */
   metadataJson: string;
   /** Unix seconds at which the credential expires; 0 when it does not. */
@@ -842,6 +842,11 @@ export interface DiscoverLocalProviderCredentialsResponse {
   /** PATH lookups, so the client can say "install/sign in" precisely. */
   codexInstalled: boolean;
   opencodeInstalled: boolean;
+  /**
+   * "available" | "missing" | "rejected". Callers must not treat a
+   * rejected store as authoritative absence.
+   */
+  opencodeStoreStatus: string;
 }
 
 export interface ImportLocalProviderCredentialRequest {
@@ -856,6 +861,12 @@ export interface ImportLocalProviderCredentialRequest {
    * scoped to exactly this URI, as SecretService.Store does.
    */
   capabilityUri: string;
+  /**
+   * Full lowercase SHA-256 digest returned by the discovery record the user
+   * approved. Import re-reads the store and refuses a rotated credential
+   * rather than copying different bytes under stale consent.
+   */
+  expectedFingerprint: string;
 }
 
 export interface ImportLocalProviderCredentialResponse {
@@ -8588,7 +8599,7 @@ export const DiscoverLocalProviderCredentialsRequest: MessageFns<DiscoverLocalPr
 };
 
 function createBaseDiscoverLocalProviderCredentialsResponse(): DiscoverLocalProviderCredentialsResponse {
-  return { credentials: [], warnings: [], codexInstalled: false, opencodeInstalled: false };
+  return { credentials: [], warnings: [], codexInstalled: false, opencodeInstalled: false, opencodeStoreStatus: "" };
 }
 
 export const DiscoverLocalProviderCredentialsResponse: MessageFns<DiscoverLocalProviderCredentialsResponse> = {
@@ -8604,6 +8615,9 @@ export const DiscoverLocalProviderCredentialsResponse: MessageFns<DiscoverLocalP
     }
     if (message.opencodeInstalled !== false) {
       writer.uint32(32).bool(message.opencodeInstalled);
+    }
+    if (message.opencodeStoreStatus !== "") {
+      writer.uint32(42).string(message.opencodeStoreStatus);
     }
     return writer;
   },
@@ -8647,6 +8661,14 @@ export const DiscoverLocalProviderCredentialsResponse: MessageFns<DiscoverLocalP
           message.opencodeInstalled = reader.bool();
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.opencodeStoreStatus = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8669,12 +8691,13 @@ export const DiscoverLocalProviderCredentialsResponse: MessageFns<DiscoverLocalP
     message.warnings = object.warnings?.map((e) => e) || [];
     message.codexInstalled = object.codexInstalled ?? false;
     message.opencodeInstalled = object.opencodeInstalled ?? false;
+    message.opencodeStoreStatus = object.opencodeStoreStatus ?? "";
     return message;
   },
 };
 
 function createBaseImportLocalProviderCredentialRequest(): ImportLocalProviderCredentialRequest {
-  return { context: undefined, source: "", capabilityUri: "" };
+  return { context: undefined, source: "", capabilityUri: "", expectedFingerprint: "" };
 }
 
 export const ImportLocalProviderCredentialRequest: MessageFns<ImportLocalProviderCredentialRequest> = {
@@ -8687,6 +8710,9 @@ export const ImportLocalProviderCredentialRequest: MessageFns<ImportLocalProvide
     }
     if (message.capabilityUri !== "") {
       writer.uint32(26).string(message.capabilityUri);
+    }
+    if (message.expectedFingerprint !== "") {
+      writer.uint32(34).string(message.expectedFingerprint);
     }
     return writer;
   },
@@ -8722,6 +8748,14 @@ export const ImportLocalProviderCredentialRequest: MessageFns<ImportLocalProvide
           message.capabilityUri = reader.string();
           continue;
         }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.expectedFingerprint = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8745,6 +8779,7 @@ export const ImportLocalProviderCredentialRequest: MessageFns<ImportLocalProvide
       : undefined;
     message.source = object.source ?? "";
     message.capabilityUri = object.capabilityUri ?? "";
+    message.expectedFingerprint = object.expectedFingerprint ?? "";
     return message;
   },
 };

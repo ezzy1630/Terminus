@@ -63,12 +63,18 @@ const CATALOG = {
 } as const;
 
 const NOW_MS = Date.parse("2026-08-28T12:00:00.000Z");
+const FINGERPRINT_0 = "0123456789abcdef".repeat(4);
+const FINGERPRINT_A = "a".repeat(64);
+const FINGERPRINT_B = "b".repeat(64);
+const FINGERPRINT_C = "c".repeat(64);
+const FINGERPRINT_D = "d".repeat(64);
+const FINGERPRINT_F = "f".repeat(64);
 
 function credential(overrides: Partial<LocalProviderCredential> = {}): LocalProviderCredential {
   return {
     source: "opencode:cerebras",
     authKind: "api",
-    fingerprint: "0123456789ab",
+    fingerprint: FINGERPRINT_0,
     metadataJson: "{}",
     expiresAtUnix: 0,
     store: "local-auth-store",
@@ -84,7 +90,7 @@ function account(overrides: Partial<ProviderAccountRecord> = {}): ProviderAccoun
     vendorId: "cerebras",
     authKind: "api",
     credentialUri: providerAccountSecretUri("account-1"),
-    fingerprint: "0123456789ab",
+    fingerprint: FINGERPRINT_0,
     baseUrl: "https://api.cerebras.ai/v1",
     host: "api.cerebras.ai",
     protocol: "chat_completions",
@@ -129,11 +135,11 @@ describe("mapLocalCredential", () => {
     expect(mapping.baseUrl).toBe("https://integrate.api.nvidia.com/v1");
   });
 
-  test("substitutes the Cloudflare account id from the store's own metadata", () => {
+  test("substitutes only the allowlisted Cloudflare account id", () => {
     const mapping = mapLocalCredential({
       credential: credential({
         source: "opencode:cloudflare-workers-ai",
-        metadataJson: JSON.stringify({ provider_metadata: { accountId: "acc0unt1d" } }),
+        metadataJson: JSON.stringify({ account_id: "acc0unt1d" }),
       }),
       catalog: CATALOG,
       nowMs: NOW_MS,
@@ -311,6 +317,7 @@ describe("gateway row migration", () => {
 interface FakeStore {
   readonly rows: Map<string, ProviderAccountRecord>;
   readonly imports: { source: string; capabilityUri: string; fingerprint: string }[];
+  readonly revocations?: string[];
 }
 
 function fakeDependencies(input: {
@@ -318,6 +325,7 @@ function fakeDependencies(input: {
   readonly store?: FakeStore;
   readonly gateway?: Parameters<typeof mapGatewayConfiguration>[0] | null;
   readonly opencodeInstalled?: boolean;
+  readonly opencodeStoreStatus?: "available" | "missing" | "rejected";
   /** Omitted entirely when absent, so the default (no probe) is exercised. */
   readonly credentialResolves?: (credentialUri: string) => Promise<boolean>;
 }): { readonly dependencies: Parameters<typeof discoverAndConnectLocalAccounts>[0]; readonly store: FakeStore } {
@@ -334,12 +342,17 @@ function fakeDependencies(input: {
         warnings: ["local-auth-store: one entry did not decode"],
         codexInstalled: true,
         opencodeInstalled: input.opencodeInstalled ?? false,
+        opencodeStoreStatus: input.opencodeStoreStatus ?? "available",
       }),
       importLocal: async ({ source, capabilityUri, fingerprint }) => {
         store.imports.push({ source, capabilityUri, fingerprint });
         return { capabilityUri, stored: true };
       },
       listAccounts: async () => [...store.rows.values()],
+      revokeCredential: async (credentialUri) => {
+        store.revocations?.push(credentialUri);
+        return true;
+      },
       upsertAccount: async (upsert: ProviderAccountUpsert) => {
         const current = store.rows.get(upsert.source) ?? null;
         const row: ProviderAccountRecord = {
@@ -359,6 +372,44 @@ function fakeDependencies(input: {
       now: () => new Date(NOW_MS),
       warn: () => {},
     },
+  };
+}
+
+function connectDependencies(input: {
+  readonly discovery: Parameters<typeof discoverAndConnectLocalAccounts>[0];
+  readonly store: FakeStore;
+  readonly account: ProviderAccountRecord;
+  readonly userConsent: boolean;
+  readonly expectedFingerprint?: string;
+}): Parameters<typeof connectLocalProviderAccount>[0] {
+  const expectedFingerprint = input.expectedFingerprint ?? input.account.fingerprint;
+  return {
+    account: input.account,
+    expectedRevision: input.account.revision,
+    expectedFingerprint,
+    expectedDestination: input.account.baseUrl,
+    capabilityUri: providerAccountSecretUri(uuidV7()),
+    userConsent: input.userConsent,
+    discoverLocal: input.discovery.discoverLocal,
+    fetchCatalog: input.discovery.fetchCatalog,
+    importLocal: async ({ source, capabilityUri, expectedFingerprint: approvedFingerprint }) => {
+      input.store.imports.push({ source, capabilityUri, fingerprint: approvedFingerprint });
+      return { capabilityUri, stored: true, fingerprint: approvedFingerprint };
+    },
+    commitAccount: async (upsert, revision, fingerprint) => {
+      const current = input.store.rows.get(upsert.source);
+      if (current === undefined || current.revision !== revision || current.fingerprint !== fingerprint) {
+        return null;
+      }
+      const row: ProviderAccountRecord = {
+        ...current,
+        ...upsert,
+        revision: current.revision + 1,
+      };
+      input.store.rows.set(upsert.source, row);
+      return row;
+    },
+    now: () => new Date(NOW_MS),
   };
 }
 
@@ -389,12 +440,12 @@ describe("discoverAndConnectLocalAccounts", () => {
   test("discovery never imports local credentials or chooses an API account", async () => {
     const { dependencies, store } = fakeDependencies({
       credentials: [
-        credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" }),
-        credential({ source: "opencode:amazon-bedrock", fingerprint: "bbbbbbbbbbbb" }),
+        credential({ source: "opencode:cerebras", fingerprint: FINGERPRINT_A }),
+        credential({ source: "opencode:amazon-bedrock", fingerprint: FINGERPRINT_B }),
         credential({
           source: "codex-chatgpt",
           authKind: "chatgpt",
-          fingerprint: "cccccccccccc",
+          fingerprint: FINGERPRINT_C,
           expiresAtUnix: Math.floor(NOW_MS / 1_000) + 86_400,
         }),
       ],
@@ -413,7 +464,7 @@ describe("discoverAndConnectLocalAccounts", () => {
 
   test("a second run with unchanged fingerprints imports nothing again", async () => {
     const store: FakeStore = { rows: new Map(), imports: [] };
-    const credentials = [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })];
+    const credentials = [credential({ source: "opencode:cerebras", fingerprint: FINGERPRINT_A })];
     await discoverAndConnectLocalAccounts(fakeDependencies({ credentials, store }).dependencies);
     const before = store.rows.get("opencode:cerebras")!;
     store.imports.length = 0;
@@ -427,14 +478,14 @@ describe("discoverAndConnectLocalAccounts", () => {
   test("a rotated key stays disconnected until an explicit connect", async () => {
     const store: FakeStore = { rows: new Map(), imports: [] };
     await discoverAndConnectLocalAccounts(fakeDependencies({
-      credentials: [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })],
+      credentials: [credential({ source: "opencode:cerebras", fingerprint: FINGERPRINT_A })],
       store,
     }).dependencies);
     const before = store.rows.get("opencode:cerebras")!;
     store.imports.length = 0;
 
     const rotated = await discoverAndConnectLocalAccounts(fakeDependencies({
-      credentials: [credential({ source: "opencode:cerebras", fingerprint: "dddddddddddd" })],
+      credentials: [credential({ source: "opencode:cerebras", fingerprint: FINGERPRINT_D })],
       store,
     }).dependencies);
 
@@ -442,13 +493,73 @@ describe("discoverAndConnectLocalAccounts", () => {
     expect(rotated.imported).toEqual([]);
     const after = store.rows.get("opencode:cerebras")!;
     expect(after.id).toBe(before.id);
-    expect(after.fingerprint).toBe("dddddddddddd");
+    expect(after.fingerprint).toBe(FINGERPRINT_D);
     expect(after.revision).toBeGreaterThan(before.revision);
+  });
+
+  test("authoritative logout revokes the copied key and disables the account", async () => {
+    const oldUri = providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b");
+    const revocations: string[] = [];
+    const store: FakeStore = {
+      rows: new Map([["opencode:cerebras", account({ credentialUri: oldUri, status: "connected" })]]),
+      imports: [],
+      revocations,
+    };
+    const result = await discoverAndConnectLocalAccounts(fakeDependencies({
+      credentials: [],
+      store,
+      opencodeStoreStatus: "available",
+    }).dependencies);
+
+    expect(revocations).toEqual([oldUri]);
+    expect(result.accounts[0]).toMatchObject({ status: "disconnected", credentialUri: "", fingerprint: "" });
+  });
+
+  test("a rejected store disables routing without treating it as logout", async () => {
+    const oldUri = providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b");
+    const revocations: string[] = [];
+    const store: FakeStore = {
+      rows: new Map([["opencode:cerebras", account({ credentialUri: oldUri, status: "connected" })]]),
+      imports: [],
+      revocations,
+    };
+    const result = await discoverAndConnectLocalAccounts(fakeDependencies({
+      credentials: [],
+      store,
+      opencodeStoreStatus: "rejected",
+    }).dependencies);
+
+    expect(revocations).toEqual([]);
+    expect(result.accounts[0]).toMatchObject({ status: "error", credentialUri: oldUri });
+  });
+
+  test("rotation revokes old copied material before offering reconnect", async () => {
+    const oldUri = providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b");
+    const revocations: string[] = [];
+    const store: FakeStore = {
+      rows: new Map([[
+        "opencode:cerebras",
+        account({ credentialUri: oldUri, fingerprint: FINGERPRINT_A, status: "connected" }),
+      ]]),
+      imports: [],
+      revocations,
+    };
+    const result = await discoverAndConnectLocalAccounts(fakeDependencies({
+      credentials: [credential({ fingerprint: FINGERPRINT_B })],
+      store,
+    }).dependencies);
+
+    expect(revocations).toEqual([oldUri]);
+    expect(result.accounts[0]).toMatchObject({
+      status: "disconnected",
+      credentialUri: "",
+      fingerprint: FINGERPRINT_B,
+    });
   });
 
   test("the singleton gateway row is the default until an API account is connected", async () => {
     const { dependencies, store } = fakeDependencies({
-      credentials: [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })],
+      credentials: [credential({ source: "opencode:cerebras", fingerprint: FINGERPRINT_A })],
       gateway: {
         deployment: "zen",
         protocol: "chat_completions",
@@ -496,7 +607,7 @@ describe("discoverAndConnectLocalAccounts", () => {
 
   test("a credential the kernel can no longer resolve becomes disconnected", async () => {
     const store: FakeStore = { rows: new Map(), imports: [] };
-    const credentials = [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })];
+    const credentials = [credential({ source: "opencode:cerebras", fingerprint: FINGERPRINT_A })];
     await discoverAndConnectLocalAccounts(
       fakeDependencies({ credentials, store, credentialResolves: async () => true }).dependencies,
     );
@@ -527,7 +638,7 @@ describe("discoverAndConnectLocalAccounts", () => {
 
   test("a disconnected credential remains disconnected during discovery", async () => {
     const store: FakeStore = { rows: new Map(), imports: [] };
-    const credentials = [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })];
+    const credentials = [credential({ source: "opencode:cerebras", fingerprint: FINGERPRINT_A })];
     await discoverAndConnectLocalAccounts(
       fakeDependencies({ credentials, store, credentialResolves: async () => true }).dependencies,
     );
@@ -540,13 +651,19 @@ describe("discoverAndConnectLocalAccounts", () => {
     expect(second.imported).toHaveLength(0);
   });
 
-  test("a failing resolution probe does not import during discovery", async () => {
-    const store: FakeStore = { rows: new Map(), imports: [] };
-    const credentials = [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })];
-    await discoverAndConnectLocalAccounts(
-      fakeDependencies({ credentials, store, credentialResolves: async () => true }).dependencies,
-    );
-    store.imports.length = 0;
+  test("a failing resolution probe disables routing without importing or deleting", async () => {
+    const credentialUri = providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b");
+    const revocations: string[] = [];
+    const store: FakeStore = {
+      rows: new Map([["opencode:cerebras", account({
+        credentialUri,
+        fingerprint: FINGERPRINT_A,
+        status: "connected",
+      })]]),
+      imports: [],
+      revocations,
+    };
+    const credentials = [credential({ source: "opencode:cerebras", fingerprint: FINGERPRINT_A })];
 
     const warnings: string[] = [];
     const { dependencies } = fakeDependencies({
@@ -561,35 +678,38 @@ describe("discoverAndConnectLocalAccounts", () => {
 
     expect(store.imports).toHaveLength(0);
     expect(result.imported).toHaveLength(0);
-    expect(warnings.join("\n")).not.toContain("kernel restarting");
+    expect(revocations).toHaveLength(0);
+    expect(warnings.join("\n")).toContain("kernel restarting");
+    expect(store.rows.get("opencode:cerebras")).toMatchObject({
+      credentialUri,
+      status: "error",
+    });
   });
 
   test("explicit consent is required before an OpenCode API key import", async () => {
     const store: FakeStore = { rows: new Map(), imports: [] };
     const { dependencies } = fakeDependencies({
-      credentials: [credential({ fingerprint: "aaaaaaaaaaaa" })],
+      credentials: [credential({ fingerprint: FINGERPRINT_A })],
       store,
     });
     const detected = await discoverAndConnectLocalAccounts(dependencies);
     const detectedAccount = detected.accounts.find((row) => row.source === "opencode:cerebras");
     expect(detectedAccount?.status).toBe("disconnected");
     expect(detectedAccount).toBeDefined();
-    await expect(connectLocalProviderAccount({
-      ...dependencies,
-      importLocal: dependencies.importLocal!,
+    await expect(connectLocalProviderAccount(connectDependencies({
+      discovery: dependencies,
+      store,
       account: detectedAccount!,
-      expectedRevision: detectedAccount!.revision,
       userConsent: false,
-    })).rejects.toThrow("explicit user consent");
+    }))).rejects.toThrow("explicit user consent");
     expect(store.imports).toHaveLength(0);
 
-    const connected = await connectLocalProviderAccount({
-      ...dependencies,
-      importLocal: dependencies.importLocal!,
+    const connected = await connectLocalProviderAccount(connectDependencies({
+      discovery: dependencies,
+      store,
       account: detectedAccount!,
-      expectedRevision: detectedAccount!.revision,
       userConsent: true,
-    });
+    }));
     expect(store.imports).toHaveLength(1);
     expect(store.imports[0]?.source).toBe("opencode:cerebras");
     expect(connected.credentialUri).toMatch(/^secret:\/\/provider-account\//);
@@ -605,14 +725,97 @@ describe("discoverAndConnectLocalAccounts", () => {
     const detected = await discoverAndConnectLocalAccounts(dependencies);
     const codex = detected.accounts.find((row) => row.source === "codex-chatgpt");
     expect(codex?.status).toBe("unsupported");
-    await expect(connectLocalProviderAccount({
-      ...dependencies,
-      importLocal: dependencies.importLocal!,
+    await expect(connectLocalProviderAccount(connectDependencies({
+      discovery: dependencies,
+      store,
       account: codex!,
-      expectedRevision: codex!.revision,
       userConsent: true,
-    })).rejects.toThrow("Codex");
+    }))).rejects.toThrow("Codex");
     expect(store.imports).toHaveLength(0);
+  });
+
+  test("an existing secret binding must be reconciled before connect", async () => {
+    const store: FakeStore = { rows: new Map(), imports: [] };
+    const existing = account({
+      credentialUri: providerAccountSecretUri("0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b"),
+      fingerprint: FINGERPRINT_A,
+      status: "connected",
+    });
+    store.rows.set(existing.source, existing);
+    const { dependencies } = fakeDependencies({
+      credentials: [credential({ fingerprint: FINGERPRINT_A })],
+      store,
+    });
+
+    await expect(connectLocalProviderAccount(connectDependencies({
+      discovery: dependencies,
+      store,
+      account: existing,
+      userConsent: true,
+    }))).rejects.toThrow("already has a credential binding");
+    expect(store.imports).toHaveLength(0);
+  });
+
+  test("a rotated fingerprint cannot inherit an earlier approval", async () => {
+    const store: FakeStore = { rows: new Map(), imports: [] };
+    const { dependencies } = fakeDependencies({
+      credentials: [credential({ fingerprint: FINGERPRINT_B })],
+      store,
+    });
+    const detected = await discoverAndConnectLocalAccounts(dependencies);
+    const detectedAccount = detected.accounts.find((row) => row.source === "opencode:cerebras")!;
+
+    await expect(connectLocalProviderAccount(connectDependencies({
+      discovery: dependencies,
+      store,
+      account: detectedAccount,
+      userConsent: true,
+      expectedFingerprint: FINGERPRINT_A,
+    }))).rejects.toThrow("credential changed");
+    expect(store.imports).toHaveLength(0);
+  });
+
+  test("a kernel response for different bytes is never committed", async () => {
+    const store: FakeStore = { rows: new Map(), imports: [] };
+    const { dependencies } = fakeDependencies({ credentials: [credential()], store });
+    const detected = await discoverAndConnectLocalAccounts(dependencies);
+    const detectedAccount = detected.accounts.find((row) => row.source === "opencode:cerebras")!;
+    const connect = connectDependencies({
+      discovery: dependencies,
+      store,
+      account: detectedAccount,
+      userConsent: true,
+    });
+
+    await expect(connectLocalProviderAccount({
+      ...connect,
+      importLocal: async ({ capabilityUri }) => ({
+        capabilityUri,
+        stored: true,
+        fingerprint: FINGERPRINT_F,
+      }),
+    })).rejects.toThrow("kernel did not confirm");
+    expect(store.rows.get("opencode:cerebras")?.status).toBe("disconnected");
+  });
+
+  test("a concurrent row change makes the final account commit fail closed", async () => {
+    const store: FakeStore = { rows: new Map(), imports: [] };
+    const { dependencies } = fakeDependencies({ credentials: [credential()], store });
+    const detected = await discoverAndConnectLocalAccounts(dependencies);
+    const detectedAccount = detected.accounts.find((row) => row.source === "opencode:cerebras")!;
+    const connect = connectDependencies({
+      discovery: dependencies,
+      store,
+      account: detectedAccount,
+      userConsent: true,
+    });
+
+    await expect(connectLocalProviderAccount({
+      ...connect,
+      commitAccount: async () => null,
+    })).rejects.toThrow("changed while connecting");
+    expect(store.rows.get("opencode:cerebras")?.status).toBe("disconnected");
+    expect(store.imports).toHaveLength(1);
   });
 });
 
@@ -720,6 +923,7 @@ describe("account projections", () => {
         expiresAt: new Date(NOW_MS + 1_000),
       }),
       12,
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     );
     expect(wire.metadata).toEqual({
       account_id: "acct-1",
@@ -727,6 +931,9 @@ describe("account projections", () => {
       email: "user@example.test",
     });
     expect(wire.model_count).toBe(12);
+    expect(wire.credential_fingerprint).toBe(FINGERPRINT_0);
+    expect(wire.connection_destination).toBe("https://api.cerebras.ai/v1");
+    expect(wire.catalog_digest).toBe("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     expect(wire.discovered_at).toBe(new Date(NOW_MS).toISOString());
     expect(wire.last_verified_at).toBe(new Date(NOW_MS).toISOString());
     expect(wire.expires_at).toBe(new Date(NOW_MS + 1_000).toISOString());

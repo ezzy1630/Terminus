@@ -29,7 +29,7 @@ function account(overrides: Partial<ProviderAccountRecord> = {}): ProviderAccoun
     vendorId: "cerebras",
     authKind: "api",
     credentialUri: "secret://provider-account/account-1",
-    fingerprint: "0123456789ab",
+    fingerprint: "0123456789abcdef".repeat(4),
     baseUrl: "https://api.cerebras.ai/v1",
     host: "api.cerebras.ai",
     protocol: "chat_completions",

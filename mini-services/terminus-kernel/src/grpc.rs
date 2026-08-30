@@ -1584,6 +1584,7 @@ impl ProviderAccountServiceRpc for GrpcKernel {
                 warnings: discovery.warnings,
                 codex_installed: discovery.codex_installed,
                 opencode_installed: discovery.opencode_installed,
+                opencode_store_status: discovery.opencode_store_status.as_str().to_string(),
             },
         ))
     }
@@ -1609,10 +1610,18 @@ impl ProviderAccountServiceRpc for GrpcKernel {
         if request.capability_uri.is_empty() {
             return Err(Status::invalid_argument("capability_uri is required"));
         }
+        if request.expected_fingerprint.is_empty() {
+            return Err(Status::invalid_argument("expected_fingerprint is required"));
+        }
         let imported = self
             .kernel
             .provider_accounts
-            .import_local(&ctx, &request.source, &request.capability_uri)
+            .import_local(
+                &ctx,
+                &request.source,
+                &request.capability_uri,
+                &request.expected_fingerprint,
+            )
             .map_err(status)?;
         Ok(Response::new(
             protocol::ImportLocalProviderCredentialResponse {
