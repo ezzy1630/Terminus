@@ -1,8 +1,9 @@
 """Private behavioral regression for the build fixture."""
 
-from src.main import main
 import subprocess
 import sys
+
+from src.main import main
 
 
 def test_command_behavior_remains_unchanged() -> None:
