@@ -16,10 +16,9 @@
  * No credential material appears anywhere in this file, and every id is
  * obviously fake.
  */
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { ProviderAccountSettings } from "../src/components/ProviderAccountSettings";
@@ -113,19 +112,40 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-describe("the external Codex session surface", () => {
-  test("keeps the external controls and ownership label explicit", async () => {
-    const source = readFileSync(resolve(process.cwd(), "src/components/ProviderAccountSettings.tsx"), "utf8");
-    expect(source).toContain("Open external Codex session");
-    expect(source).toContain("Resume external Codex session");
-    expect(source).toContain("Message external Codex session");
-    expect(source).toContain("Codex owns the tools, agent loop, and evidence");
-    expect(source).toContain("Interrupt turn");
-    expect(source).not.toContain("Terminus completed");
+describe("the Accounts settings surface", () => {
+  test("does not embed an operational external-agent conversation", () => {
+    render(<ProviderAccountSettings />);
+    expect(screen.queryByRole("heading", { name: "Codex subscription" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Message external Codex session" })).not.toBeInTheDocument();
   });
 });
 
 describe("the connected accounts section", () => {
+  test("settles a successful ChatGPT connection under React Strict Mode", async () => {
+    const disconnected = account({
+      id: "mock-account-chatgpt",
+      source: "codex-chatgpt",
+      display_name: "ChatGPT",
+      auth_kind: "chatgpt",
+      billing: "subscription",
+      status: "disconnected",
+      connection_destination: "https://chatgpt.com/backend-api/codex",
+    });
+    installList(response([disconnected]));
+    vi.mocked(api.connectProviderAccount).mockResolvedValue(response([
+      { ...disconnected, status: "connected", revision: disconnected.revision + 1 },
+    ]));
+    const user = userEvent.setup();
+    render(<StrictMode><ProviderAccountSettings /></StrictMode>);
+
+    const row = await screen.findByTestId("provider-account-mock-account-chatgpt");
+    await user.click(within(row).getByRole("button", { name: "Connect ChatGPT" }));
+    await user.click(within(row).getByRole("button", { name: "Approve and connect ChatGPT" }));
+
+    await waitFor(() => expect(row).toHaveTextContent("Connected"));
+    expect(within(row).queryByText("Connecting…")).not.toBeInTheDocument();
+  });
+
   test("requires explicit consent before connecting a disconnected OpenCode account", async () => {
     const disconnected = account({
       id: "mock-account-disconnected",
@@ -198,12 +218,9 @@ describe("the connected accounts section", () => {
 
     const chatgpt = await screen.findByTestId("provider-account-mock-account-chatgpt");
     expect(chatgpt).toHaveTextContent("ChatGPT");
-    expect(chatgpt).toHaveTextContent("Codex CLI login");
-    expect(chatgpt).toHaveTextContent("Unsupported");
-    expect(chatgpt).toHaveTextContent("ChatGPT/Codex subscription login was detected");
-    // The current local credential bridge is not an approved Terminus-native
-    // model route, so it must not claim to be the active default.
-    expect(within(chatgpt).queryByText("Default")).not.toBeInTheDocument();
+    expect(chatgpt).toHaveTextContent("ChatGPT subscription login");
+    expect(chatgpt).toHaveTextContent("Connected");
+    expect(within(chatgpt).getByText("Default")).toBeInTheDocument();
     expect(chatgpt).toHaveTextContent("4 models");
     // Rendered in the reader's own locale and zone, so the assertion is on the
     // clause rather than on one spelling of the date.
@@ -428,11 +445,11 @@ describe("install and sign-in hints", () => {
     ]);
   });
 
-  test("does not claim a detected ChatGPT login can route a Terminus turn", () => {
+  test("offers exact approval when a detected ChatGPT login is disconnected", () => {
     expect(discoveryHints(discovery(), [
-      account({ id: "codex", source: "codex-chatgpt", status: "unsupported" }),
+      account({ id: "codex", source: "codex-chatgpt", status: "disconnected" }),
     ])).toEqual([
-      "A ChatGPT/Codex subscription login was detected. Use the separate external Codex lane; it is not Terminus-native routing.",
+      "ChatGPT login is available — select Connect to approve its exact credential and destination.",
       "OpenCode is installed but no usable provider login was found — run `opencode auth login`.",
     ]);
   });
@@ -501,7 +518,7 @@ describe("the first-launch notice", () => {
     const view = render(<ProviderAccountsNotice />);
 
     expect(await screen.findByTestId("provider-accounts-notice"))
-      .toHaveTextContent("Connected 1 provider from OpenCode.");
+      .toHaveTextContent("Connected 2 providers: 1 from OpenCode and your ChatGPT login.");
 
     await user.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByTestId("provider-accounts-notice")).not.toBeInTheDocument();

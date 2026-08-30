@@ -8,10 +8,9 @@
  *   - Only actionable project context
  *   - No dashboard, no statistics, no wall of recent activity
  *
- * The composer is docked at the bottom of the window rather than sitting under
- * the heading. The prompt remains centered in the usable surface above it,
- * while the composer lands in the same place as the chat view after the first
- * turn starts.
+ * The heading and composer form one start surface. Pinning the composer to the
+ * window's bottom left a dead half-screen between the question and the only
+ * control that can answer it, especially on a tall display.
  *
  * No starter chips. Four generic prompts ("Explain this codebase",
  * "Find a bug", …) occupied the space under the composer on every launch and
@@ -135,25 +134,21 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
 
   return (
     <div className={cn("flex h-full w-full flex-col overflow-hidden bg-canvas", className)}>
-      {/* Center the prompt in the usable surface. The composer is independently
-          docked below, so starting a task never moves the input. */}
-      <main className="scrollable flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-8 py-10">
-        <h1 id="new-task-heading" className="ui-display-title max-w-[24ch] text-balance text-center text-primary">
-          What should Terminus do?
-        </h1>
-      </main>
+      <main className="scrollable flex min-h-0 flex-1 justify-center overflow-y-auto px-8">
+        <div className="flex w-full max-w-[var(--content-width)] flex-col items-center pt-[clamp(112px,22vh,190px)]">
+          <h1 id="new-task-heading" className="ui-display-title max-w-[24ch] text-balance text-center text-primary">
+            What should we build in {session?.title ?? "this project"}?
+          </h1>
 
-      {/* Docked with the same padding as the chat view's composer (App.tsx),
-          not just the same inline axis: sending the first message swaps this
-          screen for the conversation, and the input the user is looking at
-          must not move a pixel when it does. */}
-      <div className="composer-dock shrink-0 pb-3 pt-2">
-        <Composer
-          onCreateTask={createTask}
-          {...(onOpenProject ? { onChangeProject: onOpenProject } : {})}
-          className="w-full"
-        />
-      </div>
+          <div className="mt-[clamp(92px,16vh,148px)] w-full pb-8">
+            <Composer
+              onCreateTask={createTask}
+              {...(onOpenProject ? { onChangeProject: onOpenProject } : {})}
+              className="w-full"
+            />
+          </div>
+        </div>
+      </main>
     </div>
   );
 }

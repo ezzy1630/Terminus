@@ -265,7 +265,7 @@ describe("providerAccountModelsWire", () => {
           id: "gpt-5.6-sol",
           name: "GPT-5.6 Sol",
           reasoning: true,
-          reasoningEfforts: ["low", "medium", "high", "ultra"],
+          reasoningEfforts: ["low", "medium", "high", "xhigh", "ultra"],
           defaultReasoningEffort: "medium",
           inputMicrosPerMillion: 0,
           outputMicrosPerMillion: 0,
@@ -322,8 +322,14 @@ describe("providerAccountModelsWire", () => {
       expect(typeof entry.default_reasoning_effort).toBe("string");
     }
     const codexModel = (wire.models as Record<string, unknown>[]).find((entry) => entry.provider === "account-2");
-    // `ultra` has no Terminus rung of its own; it folds onto `max`.
-    expect(codexModel?.reasoning_efforts).toEqual(["low", "medium", "high", "max"]);
+    // Terminus preserves both account-advertised top rungs independently.
+    expect(codexModel?.reasoning_efforts).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "ultra",
+    ]);
     expect(codexModel?.default_reasoning_effort).toBe("medium");
   });
 
@@ -371,9 +377,9 @@ describe("providerAccountModelsWire", () => {
 });
 
 describe("foldReasoningEfforts", () => {
-  test("folds provider level names onto the four Terminus efforts, in order", () => {
-    expect(foldReasoningEfforts(["ultra", "low", "xhigh", "medium", "minimal", "high"]))
-      .toEqual(["low", "medium", "high", "max"]);
+  test("preserves xhigh and ultra separately while folding aliases, in order", () => {
+    expect(foldReasoningEfforts(["ultra", "low", "xhigh", "medium", "minimal", "high", "max"]))
+      .toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
   });
 
   test("drops a level with no Terminus equivalent rather than offering it", () => {

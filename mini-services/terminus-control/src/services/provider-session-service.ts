@@ -36,6 +36,10 @@ export interface ProviderGatewayConfig {
    * account id, originator, session id). The bearer is injected in the kernel.
    */
   readonly extraHeaders?: Readonly<Record<string, string>> | undefined;
+  /** Per-turn continuity returned by the ChatGPT Codex endpoint. */
+  readonly codexTurnState?: import("@terminus/provider-openai").CodexTurnState | undefined;
+  /** Connected account receiving provider quota receipts. */
+  readonly accountId?: string | undefined;
 }
 
 /** Vendor-direct dispatch target resolved by the caller (ADR-0039 §10). */

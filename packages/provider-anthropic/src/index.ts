@@ -80,7 +80,7 @@ export function anthropicSupportsEffort(modelId: string): boolean {
   return anthropicThinkingGeneration(modelId) === "adaptive";
 }
 
-/** Terminus efforts map 1:1 onto Anthropic's ladder; `max` is a real level. */
+/** Anthropic has no xhigh/ultra rung, so those canonical depths saturate at max. */
 export function anthropicEffort(effort: ReasoningEffort | null | undefined): "low" | "medium" | "high" | "max" | null {
   switch (effort) {
     case "low":
@@ -88,6 +88,9 @@ export function anthropicEffort(effort: ReasoningEffort | null | undefined): "lo
     case "high":
     case "max":
       return effort;
+    case "xhigh":
+    case "ultra":
+      return "max";
     default:
       // Absent means "the user did not choose": send nothing and take
       // Anthropic's own default (`high`), rather than pinning a level the
@@ -673,4 +676,3 @@ export function renderRequest(
 
 export * from "./model_profiles.js";
 export * from "./stream.js";
-

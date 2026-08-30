@@ -217,7 +217,9 @@ export function openAiReasoningEffort(
   const levels = context.levels ?? [];
   if (levels.length > 0) return clampIntoLevels(effort, levels);
   const family = context.modelId === undefined ? "other" : resolveModelFamily(context.modelId);
+  if (effort === "ultra") return family === "gpt-5.6" ? "max" : "high";
   if (effort === "max") return family === "gpt-5.6" ? "max" : "high";
+  if (effort === "xhigh") return family === "gpt-5.6" ? "xhigh" : "high";
   if (effort === "low" || effort === "medium" || effort === "high") return effort;
   return "medium";
 }
@@ -227,12 +229,18 @@ function clampIntoLevels(
   levels: readonly string[],
 ): string {
   const has = (name: string): string | null => levels.find((level) => level === name) ?? null;
+  if (effort === "ultra") {
+    return has("ultra") ?? has("max") ?? has("xhigh") ?? has("high") ?? levels[levels.length - 1]!;
+  }
   if (effort === "max") {
     for (const candidate of MAXIMAL_LEVELS) {
       const found = has(candidate);
       if (found !== null) return found;
     }
     return levels[levels.length - 1]!;
+  }
+  if (effort === "xhigh") {
+    return has("xhigh") ?? has("max") ?? has("high") ?? levels[levels.length - 1]!;
   }
   if (effort === "low" || effort === "medium" || effort === "high") {
     const exact = has(effort);
@@ -965,3 +973,4 @@ export type { ProviderRenderer, ProviderResponseChunk };
 
 export * from "./model_profiles.js";
 export * from "./stream.js";
+export * from "./chatgpt_codex.js";

@@ -224,6 +224,12 @@ describe("OpenAI Responses Connector", () => {
     const high = await renderResponsesRequest(base, { reasoningEffort: "high" });
     expect((high.body as Record<string, unknown>).reasoning).toEqual({ effort: "high", summary: "auto" });
 
+    const xhigh = await renderResponsesRequest(base, {
+      reasoningEffort: "xhigh",
+      reasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+    });
+    expect((xhigh.body as Record<string, unknown>).reasoning).toEqual({ effort: "xhigh", summary: "auto" });
+
     // `max` used to collapse to `high` for every model. A model whose family
     // publishes the top rungs keeps them.
     const solInput: CanonicalRenderInput = {

@@ -6,7 +6,8 @@
 //!    the rest of the file;
 //! 2. a store that is group/world readable, oversized, or malformed produces
 //!    a warning and no credentials — the read fails closed;
-//! 3. a Codex auth store is never opened or imported, even when present;
+//! 3. a Codex ChatGPT login yields identity and expiry metadata and imports
+//!    only after the caller presents the exact approved fingerprint;
 //! 4. absent stores are silent, not an error;
 //! 5. `import_local` writes through the `provider-account` keyring namespace
 //!    and refuses any other destination;
@@ -39,6 +40,7 @@ struct Fixture {
     _stores: TempDir,
     kernel: KernelHandle,
     opencode_store: std::path::PathBuf,
+    codex_store: std::path::PathBuf,
 }
 
 /// A kernel whose credential stores are temp directories and whose `PATH`
@@ -48,8 +50,9 @@ fn fixture() -> Fixture {
     let data_dir = tempdir().unwrap();
     let stores = tempdir().unwrap();
     let opencode_dir = stores.path().join("opencode-data");
+    let codex_dir = stores.path().join("codex-home");
     let empty_path = stores.path().join("empty-bin");
-    for dir in [&opencode_dir, &empty_path] {
+    for dir in [&opencode_dir, &codex_dir, &empty_path] {
         std::fs::create_dir_all(dir).unwrap();
     }
     let kernel = KernelHandle::new(data_dir.path().to_path_buf())
@@ -57,6 +60,7 @@ fn fixture() -> Fixture {
         .with_local_credential_roots(
             LocalCredentialRoots::empty()
                 .with_opencode_dir(&opencode_dir)
+                .with_codex_dir(&codex_dir)
                 .with_path_override(empty_path.as_os_str()),
         );
     Fixture {
@@ -64,6 +68,7 @@ fn fixture() -> Fixture {
         _stores: stores,
         kernel,
         opencode_store: opencode_dir.join("auth.json"),
+        codex_store: codex_dir.join("auth.json"),
     }
 }
 
@@ -130,6 +135,34 @@ fn set_owner_only(path: &Path) {
 
 fn fingerprint_of(secret: &str) -> String {
     hex::encode(sha2::Sha256::digest(secret.as_bytes()))
+}
+
+fn base64url(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    let mut index = 0;
+    while index < input.len() {
+        let first = u32::from(input[index]);
+        let second = input.get(index + 1).copied().map(u32::from);
+        let third = input.get(index + 2).copied().map(u32::from);
+        let packed = (first << 16) | (second.unwrap_or(0) << 8) | third.unwrap_or(0);
+        out.push(char::from(ALPHABET[((packed >> 18) & 63) as usize]));
+        out.push(char::from(ALPHABET[((packed >> 12) & 63) as usize]));
+        if second.is_some() {
+            out.push(char::from(ALPHABET[((packed >> 6) & 63) as usize]));
+        }
+        if third.is_some() {
+            out.push(char::from(ALPHABET[(packed & 63) as usize]));
+        }
+        index += 3;
+    }
+    out
+}
+
+fn unsigned_jwt(payload: &serde_json::Value) -> String {
+    let header = base64url(br#"{"alg":"none","typ":"JWT"}"#);
+    let body = base64url(payload.to_string().as_bytes());
+    format!("{header}.{body}.fixture-signature")
 }
 
 // ---------- OpenCode auth store ----------
@@ -419,13 +452,28 @@ fn a_valid_json_array_is_rejected_as_a_structurally_invalid_store() {
 // ---------- Codex auth store ----------
 
 #[test]
-fn a_codex_auth_store_is_never_opened_or_imported() {
+fn a_codex_chatgpt_login_is_discovered_and_imported_by_fingerprint() {
     let fixture = fixture();
-    let codex_store = fixture._stores.path().join("codex-home/auth.json");
-    std::fs::create_dir_all(codex_store.parent().unwrap()).unwrap();
+    let access_token = unsigned_jwt(&serde_json::json!({
+        "exp": 2_000_000_000_u64,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": "fixture-claim-account",
+            "chatgpt_plan_type": "fixture-plan"
+        }
+    }));
+    let id_token = unsigned_jwt(&serde_json::json!({ "email": "fixture@example.invalid" }));
     write_store(
-        &codex_store,
-        r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fixture-token"}}"#,
+        &fixture.codex_store,
+        &serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": access_token,
+                "id_token": id_token,
+                "refresh_token": "fixture-not-a-real-refresh-token",
+                "account_id": "fixture-tokens-account"
+            }
+        })
+        .to_string(),
     );
 
     let discovery = fixture
@@ -434,22 +482,48 @@ fn a_codex_auth_store_is_never_opened_or_imported() {
         .discover_local(&ctx(&discover_token(&fixture.kernel)))
         .expect("discovery succeeds");
 
-    assert!(discovery.credentials.is_empty());
+    assert_eq!(discovery.credentials.len(), 1);
     assert!(discovery.warnings.is_empty());
-}
+    let credential = &discovery.credentials[0];
+    assert_eq!(credential.source, "codex-chatgpt");
+    assert_eq!(credential.auth_kind, LocalAuthKind::Chatgpt);
+    assert_eq!(credential.store, LocalCredentialStore::CodexAuthStore);
+    assert_eq!(credential.expires_at_unix, 2_000_000_000);
+    assert_eq!(
+        credential.metadata.account_id.as_deref(),
+        Some("fixture-tokens-account")
+    );
+    assert_eq!(
+        credential.metadata.plan_type.as_deref(),
+        Some("fixture-plan")
+    );
+    assert_eq!(
+        credential.metadata.email.as_deref(),
+        Some("fixture@example.invalid")
+    );
+    assert_eq!(credential.fingerprint, fingerprint_of(&access_token));
+    assert!(!credential.metadata.to_json().contains(&access_token));
 
-#[test]
-fn importing_the_codex_source_is_rejected_before_any_store_read_or_write() {
-    let fixture = fixture();
     let broker = stub_provider_account_keyring(&fixture.kernel);
     let token = token_for(&fixture.kernel, vec![OperationClass::Secret], ACCOUNT_URI);
-    let denied = fixture
+    let imported = fixture
         .kernel
         .provider_accounts
-        .import_local(&ctx(&token), "codex-chatgpt", ACCOUNT_URI, &"0".repeat(64))
-        .expect_err("Codex subscription credentials are not a Terminus provider source");
-    assert_eq!(denied.code_name(), "INVALID_REQUEST");
-    assert!(broker.request(ACCOUNT_URI, "codex-import-test").is_err());
+        .import_local(
+            &ctx(&token),
+            "codex-chatgpt",
+            ACCOUNT_URI,
+            &fingerprint_of(&access_token),
+        )
+        .expect("approved Codex credential imports");
+    assert!(imported.stored);
+    assert_eq!(
+        broker
+            .request(ACCOUNT_URI, "codex-import-test")
+            .expect("credential is bound")
+            .digest(),
+        fingerprint_of(&access_token),
+    );
 }
 
 // ---------- absent stores ----------

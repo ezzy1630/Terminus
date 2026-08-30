@@ -28,6 +28,7 @@ import { clockTimestamp } from "../lib/time";
 import type { ActivityBlock as ActivityBlockData, ActivityBlockStatus } from "../types";
 import { Button } from "../ui/Button";
 import type { TaskLifecycle } from "../lib/task-lifecycle";
+import { boundedActivityDetail, ProgressDrawer } from "./ProgressDrawer";
 
 interface ActivityBlockProps {
   block: ActivityBlockData;
@@ -54,13 +55,6 @@ interface ActivityBlockProps {
    */
   joinsAbove?: boolean;
   joinsBelow?: boolean;
-}
-
-const MAX_RENDERED_ACTIVITY_DETAIL_CHARS = 16_000;
-
-function renderedDetail(detail: string): string {
-  if (detail.length <= MAX_RENDERED_ACTIVITY_DETAIL_CHARS) return detail;
-  return `[Activity detail rejected: ${detail.length} characters exceeds the ${MAX_RENDERED_ACTIVITY_DETAIL_CHARS}-character presentation limit. Inspect the immutable artifact or continuation reference.]`;
 }
 
 /**
@@ -110,6 +104,7 @@ function ActivityBlockImpl({
   joinsBelow = false,
 }: ActivityBlockProps): JSX.Element {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const [progressOpen, setProgressOpen] = useState(false);
   const kind = statusKind(block.status);
 
   const failed = block.status === "failed";
@@ -135,40 +130,60 @@ function ActivityBlockImpl({
       )}
     >
       {/* Collapsed header — communicates what + result in one quiet phrase. */}
-      <Button
-        type="button"
-        onClick={() => setExpanded((e) => !e)}
-        aria-expanded={expanded}
-        aria-label={`${block.title}, status ${block.status}${block.metric ? `, ${block.metric}` : ""}`}
-        className="activity-header flex min-h-7 w-full items-center justify-start gap-2 rounded-md px-1.5 text-left hover:bg-hover"
-      >
-        <ChevronRight
-          size={12}
-          className={cn("flex-shrink-0 text-tertiary transition-transform", expanded && "rotate-90")}
-          aria-hidden
-        />
-        <span className="activity-status flex w-4 flex-shrink-0 items-center justify-center">
-          <StatusIndicator status={kind} size={10} />
-        </span>
-        {/* Title and metric read as one phrase separated by a middot, the way
-            Codex writes them. The metric used to be pinned to the far edge of
-            the column in a monospace font, hundreds of pixels from the thing it
-            measured and set as if it were a machine value. */}
-        <span className="flex min-w-0 flex-1 items-center gap-1.5">
-          <ToolIcon tool={block.entries[0]?.tool} />
-          <span className="ui-body min-w-0 truncate text-secondary">
-            {block.title}
+      <div className="activity-header group/activity flex min-h-7 items-center rounded-md hover:bg-hover">
+        <Button
+          type="button"
+          variant="bare"
+          onClick={() => setExpanded((e) => !e)}
+          aria-expanded={expanded}
+          aria-label={`${expanded ? "Collapse" : "Expand"} details for ${block.title}`}
+          className={cn(
+            "ml-0.5 flex h-6 w-5 shrink-0 items-center justify-center rounded-md text-tertiary hover:bg-selected hover:text-primary",
+            expanded
+              ? "opacity-100"
+              : "opacity-0 group-hover/activity:opacity-100 group-focus-within/activity:opacity-100",
+          )}
+        >
+          <ChevronRight
+            size={12}
+            className={cn("flex-shrink-0 text-tertiary transition-transform", expanded && "rotate-90")}
+            aria-hidden
+          />
+        </Button>
+        <Button
+          type="button"
+          variant="bare"
+          onClick={() => block.entries.length > 0
+            ? setProgressOpen(true)
+            : setExpanded((value) => !value)}
+          aria-label={block.entries.length > 0
+            ? `Open progress for ${block.title}`
+            : `${block.title}, status ${block.status}${block.metric ? `, ${block.metric}` : ""}`}
+          className="flex min-h-7 min-w-0 flex-1 items-center justify-start gap-2 rounded-md px-1.5 text-left"
+        >
+          <span className="activity-status flex w-4 flex-shrink-0 items-center justify-center">
+            <StatusIndicator status={kind} size={10} />
           </span>
-          {block.metric ? (
-            <>
-              <span className="flex-shrink-0 text-tertiary" aria-hidden>·</span>
-              <span className="ui-body flex-shrink-0 text-tertiary">
-                {block.metric}
-              </span>
-            </>
-          ) : null}
-        </span>
-      </Button>
+          {/* Title and metric read as one phrase separated by a middot, the way
+              Codex writes them. The metric used to be pinned to the far edge of
+              the column in a monospace font, hundreds of pixels from the thing it
+              measured and set as if it were a machine value. */}
+          <span className="flex min-w-0 flex-1 items-center gap-1.5">
+            <ToolIcon tool={block.entries[0]?.tool} />
+            <span className="ui-body min-w-0 truncate text-secondary">
+              {block.title}
+            </span>
+            {block.metric ? (
+              <>
+                <span className="flex-shrink-0 text-tertiary" aria-hidden>·</span>
+                <span className="ui-body flex-shrink-0 text-tertiary">
+                  {block.metric}
+                </span>
+              </>
+            ) : null}
+          </span>
+        </Button>
+      </div>
 
       {/* Expanded details.
 
@@ -197,13 +212,13 @@ function ActivityBlockImpl({
                   {entry.detail ? (
                     isOutcome ? (
                       <p className="ui-body whitespace-pre-line text-tertiary">
-                        {renderedDetail(entry.detail)}
+                        {boundedActivityDetail(entry.detail)}
                       </p>
                     ) : (
                       // The one place monospace is correct: the bytes a tool
                       // actually emitted.
                       <pre className="selectable mt-1 max-h-[220px] overflow-auto rounded-md border border-subtle bg-terminal px-2 py-1.5 text-xs leading-[1.5] text-secondary">
-                        {renderedDetail(entry.detail)}
+                        {boundedActivityDetail(entry.detail)}
                       </pre>
                     )
                   ) : null}
@@ -236,6 +251,7 @@ function ActivityBlockImpl({
           </span>
         </div>
       ) : null}
+      <ProgressDrawer block={block} open={progressOpen} onOpenChange={setProgressOpen} />
     </div>
   );
 }

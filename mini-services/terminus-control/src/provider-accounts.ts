@@ -59,6 +59,10 @@ export const ZEN_VENDOR_ID = "opencode";
 /** Prefix for a local auth-store entry: `opencode:<providerID>`. */
 export const OPENCODE_SOURCE_PREFIX = `${ZEN_VENDOR_ID}:`;
 
+export const CODEX_HOST = "chatgpt.com";
+export const CODEX_BASE_URL = `https://${CODEX_HOST}/backend-api/codex`;
+export const CODEX_PATH_PREFIX = "/backend-api/codex/";
+
 /**
  * The persisted account, in the shape Prisma returns. Declared structurally so
  * the pure decisions below can be exercised without a database.
@@ -98,6 +102,8 @@ export type ProviderAccountSecretState = "none" | "import_pending" | "bound" | "
 /** Non-secret identity the kernel reported alongside a credential. */
 export interface ProviderAccountMetadata {
   readonly account_id?: string;
+  readonly plan_type?: string;
+  readonly email?: string;
   /** Non-secret provenance for an account Terminus synthesized locally. */
   readonly connection_origin?: "installed_opencode";
 }
@@ -121,7 +127,7 @@ export interface ProviderAccountWire {
   readonly connection_destination: string;
   /** Immutable provider-catalog snapshot used to derive that destination. */
   readonly catalog_digest: string;
-  readonly metadata: { account_id?: string };
+  readonly metadata: { account_id?: string; plan_type?: string; email?: string };
   readonly discovered_at: string;
   readonly last_verified_at: string | null;
   readonly expires_at: string | null;
@@ -159,8 +165,16 @@ export function parseProviderAccountMetadata(json: string): ProviderAccountMetad
   }
   if (!isRecord(parsed)) return {};
   return {
-    ...(typeof parsed.account_id === "string" && /^[0-9a-f]{32}$/i.test(parsed.account_id)
-      ? { account_id: parsed.account_id.toLowerCase() }
+    ...(typeof parsed.account_id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(parsed.account_id)
+      ? { account_id: parsed.account_id }
+      : {}),
+    ...(typeof parsed.plan_type === "string" && /^[A-Za-z0-9 _-]{1,64}$/.test(parsed.plan_type)
+      ? { plan_type: parsed.plan_type }
+      : {}),
+    ...(typeof parsed.email === "string"
+      && parsed.email.length <= 320
+      && !/[\u0000-\u001f\u007f]/.test(parsed.email)
+      ? { email: parsed.email }
       : {}),
     ...(parsed.connection_origin === "installed_opencode"
       ? { connection_origin: parsed.connection_origin }
@@ -198,6 +212,8 @@ export function providerAccountWire(
     catalog_digest: account.catalogDigest || catalogDigest,
     metadata: {
       ...(metadata.account_id === undefined ? {} : { account_id: metadata.account_id }),
+      ...(metadata.plan_type === undefined ? {} : { plan_type: metadata.plan_type }),
+      ...(metadata.email === undefined ? {} : { email: metadata.email }),
     },
     discovered_at: account.discoveredAt.toISOString(),
     last_verified_at: account.lastVerifiedAt?.toISOString() ?? null,
@@ -529,15 +545,24 @@ export function mapLocalCredential(input: MapLocalCredentialInput): ProviderAcco
   const authKind = admittedAuthKind(credential.authKind);
 
   if (credential.source === CODEX_SOURCE) {
-    return unsupported({
+    const metadata = parseProviderAccountMetadata(credential.metadataJson);
+    const expired = expiresAt !== null && expiresAt.getTime() <= nowMs;
+    return {
       source: CODEX_SOURCE,
-      displayName: "ChatGPT Codex",
+      displayName: "ChatGPT",
       vendorId: "openai",
       authKind: "chatgpt",
-      detail: "ChatGPT subscriptions are available through the separate Codex App Server lane; the raw CLI token is not importable",
-      metadataJson: "{}",
+      baseUrl: CODEX_BASE_URL,
+      host: CODEX_HOST,
+      protocol: "responses",
+      connectorId: "chatgpt-codex",
+      renderProfile: "chatgpt_codex",
+      billing: "subscription",
+      status: expired ? "expired" : "connected",
+      statusDetail: expired ? "The ChatGPT login expired. Sign in again, then refresh accounts." : "",
+      metadataJson: canonicalMetadata(metadata),
       expiresAt,
-    });
+    };
   }
 
   if (!credential.source.startsWith(OPENCODE_SOURCE_PREFIX)) {
@@ -553,8 +578,12 @@ export function mapLocalCredential(input: MapLocalCredentialInput): ProviderAcco
   }
 
   const vendorId = credential.source.slice(OPENCODE_SOURCE_PREFIX.length);
-  const metadata = vendorId === "cloudflare-workers-ai"
+  const parsedMetadata = vendorId === "cloudflare-workers-ai"
     ? parseProviderAccountMetadata(credential.metadataJson)
+    : {};
+  const metadata: ProviderAccountMetadata = parsedMetadata.account_id !== undefined
+    && /^[0-9a-f]{32}$/i.test(parsedMetadata.account_id)
+    ? { account_id: parsedMetadata.account_id.toLowerCase() }
     : {};
   const provider = decodeModelsDevProvider(input.catalog, vendorId);
   const displayName = provider?.name ?? vendorId;
@@ -980,9 +1009,6 @@ export async function connectLocalProviderAccount(
   ) {
     throw new Error("provider credential changed; run discovery and approve the current credential");
   }
-  if (dependencies.account.source === CODEX_SOURCE || dependencies.account.renderProfile === "chatgpt_codex") {
-    throw new Error("ChatGPT subscriptions require the separate Codex App Server lane");
-  }
   if (dependencies.account.credentialUri !== "") {
     throw new Error("provider account already has a credential binding; reconcile or disconnect it before connecting");
   }
@@ -1190,7 +1216,7 @@ export async function discoverAndConnectLocalAccounts(
     secretOperationId: "",
     status: mapping.status === "connected" ? "disconnected" : mapping.status,
     statusDetail: detail ?? (mapping.status === "connected"
-      ? "Credential detected in the local OpenCode store; connect to approve copying it into the Terminus keyring."
+      ? "Credential detected in a supported local provider store; connect to approve copying it into the Terminus keyring."
       : mapping.statusDetail),
     discoveredAt: current?.discoveredAt ?? now(),
   });
@@ -1331,7 +1357,7 @@ export async function discoverAndConnectLocalAccounts(
   for (const current of [...existing.values()]) {
     if (
       current.source === ZEN_SOURCE
-      || !current.source.startsWith(OPENCODE_SOURCE_PREFIX)
+      || (!current.source.startsWith(OPENCODE_SOURCE_PREFIX) && current.source !== CODEX_SOURCE)
       || observedSources.has(current.source)
     ) continue;
     const replacement = existingAccountUpsert(current, {
@@ -1345,7 +1371,9 @@ export async function discoverAndConnectLocalAccounts(
       secretOperationId: "",
       metadataJson: "{}",
       status: "disconnected",
-      statusDetail: "Credential is no longer present in the OpenCode store; connect again after signing in.",
+      statusDetail: current.source === CODEX_SOURCE
+        ? "ChatGPT login is no longer present in the Codex store; sign in again, then connect."
+        : "Credential is no longer present in the OpenCode store; connect again after signing in.",
     });
     const updated = current.credentialUri === ""
       ? await reconcile(current, replacement)
@@ -1568,15 +1596,13 @@ export function resolveTurnProvider(input: ResolveTurnProviderInput): TurnProvid
     if (
       account.status !== "connected"
       || !providerAccountHasApprovedBinding(account)
-      || account.renderProfile === "chatgpt_codex"
-      || account.source === CODEX_SOURCE
     ) {
       return {
         kind: "error",
         code: "PROVIDER_ACCOUNT_UNAVAILABLE",
         accountId: requested,
         status: account.status,
-        statusDetail: account.statusDetail || "This Codex subscription requires the separate Codex App Server lane.",
+        statusDetail: account.statusDetail || "This provider account is unavailable.",
       };
     }
     return { kind: "account", account, explicit: true };
@@ -1588,8 +1614,6 @@ export function resolveTurnProvider(input: ResolveTurnProviderInput): TurnProvid
     installationDefault !== null
     && installationDefault.status === "connected"
     && providerAccountHasApprovedBinding(installationDefault)
-    && installationDefault.renderProfile !== "chatgpt_codex"
-    && installationDefault.source !== CODEX_SOURCE
     && input.hasModel === true
   ) {
     return { kind: "account", account: installationDefault, explicit: false };
@@ -1602,12 +1626,17 @@ export function resolveTurnProvider(input: ResolveTurnProviderInput): TurnProvid
 function canonicalMetadata(metadata: ProviderAccountMetadata): string {
   const ordered: Record<string, unknown> = {};
   if (metadata.account_id !== undefined) ordered.account_id = metadata.account_id;
+  if (metadata.plan_type !== undefined) ordered.plan_type = metadata.plan_type;
+  if (metadata.email !== undefined) ordered.email = metadata.email;
   return JSON.stringify(ordered);
 }
 
 /** Drop every legacy/provider extension field that Terminus does not own. */
 export function canonicalMetadataForAccount(source: string, metadataJson: string): string {
   const metadata = parseProviderAccountMetadata(metadataJson);
+  if (source === CODEX_SOURCE) {
+    return canonicalMetadata(metadata);
+  }
   if (source === "opencode:cloudflare-workers-ai" && metadata.account_id !== undefined) {
     return canonicalMetadata({ account_id: metadata.account_id });
   }

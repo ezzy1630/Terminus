@@ -6,7 +6,7 @@
  * `Settings.tsx` pulled the whole settings bundle into the shell's first paint,
  * which is exactly what its `React.lazy` boundary exists to prevent.
  */
-export const SETTING_CATEGORY_IDS = ["appearance", "agents", "shortcuts"] as const;
+export const SETTING_CATEGORY_IDS = ["appearance", "accounts", "models", "shortcuts", "advanced"] as const;
 export type SettingCategoryId = (typeof SETTING_CATEGORY_IDS)[number];
 
 export function isSettingCategoryId(value: string): value is SettingCategoryId {

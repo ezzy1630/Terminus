@@ -34,7 +34,13 @@ import type { MaterialQuestionSnapshot } from "../types/v2";
 /** Number keys reach the first nine options; past that the mouse is the route. */
 const MAX_KEYED_OPTIONS = 9;
 
-export function MaterialQuestionCard({ taskId }: { taskId: string }): JSX.Element | null {
+export function MaterialQuestionCard({
+  taskId,
+  surface = "embedded",
+}: {
+  taskId: string;
+  surface?: "embedded" | "intervention";
+}): JSX.Element | null {
   const [resolvingOption, setResolvingOption] = useState<string | null>(null);
   const [resolvedIds, setResolvedIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
@@ -89,7 +95,12 @@ export function MaterialQuestionCard({ taskId }: { taskId: string }): JSX.Elemen
   return (
     <section
       aria-labelledby={`material-question-${question.id}`}
-      className="border-b border-subtle px-3.5 py-3"
+      className={cn(
+        "px-3.5 py-2.5",
+        surface === "intervention"
+          ? "rounded-lg border border-subtle bg-elevated"
+          : "border-b border-subtle",
+      )}
       onKeyDown={(event) => {
         if (resolvingOption !== null || event.metaKey || event.ctrlKey || event.altKey) return;
         const index = Number(event.key) - 1;
@@ -103,7 +114,7 @@ export function MaterialQuestionCard({ taskId }: { taskId: string }): JSX.Elemen
 
       <div className="flex items-center gap-1.5">
         <CircleDot size={12} className="shrink-0 text-warning" aria-hidden />
-        <h3 className="ui-meta font-medium text-warning">{question.trigger}</h3>
+        <h3 className="ui-meta font-medium text-warning">Decision needed</h3>
         {pending.length > 1 ? (
           <span className="ui-meta ml-auto tabular-nums">1 of {pending.length}</span>
         ) : null}
@@ -122,7 +133,7 @@ export function MaterialQuestionCard({ taskId }: { taskId: string }): JSX.Elemen
         {question.questionText}
       </p>
 
-      <div className="mt-2.5 flex flex-col gap-1.5">
+      <div className="mt-2 flex flex-col gap-1">
         {question.options.map((option, index) => (
           <Button
             key={option}
@@ -134,7 +145,7 @@ export function MaterialQuestionCard({ taskId }: { taskId: string }): JSX.Elemen
             aria-label={`Choose ${option} for ${question.questionText}`}
             aria-busy={resolvingOption === option || undefined}
             className={cn(
-              "h-auto w-full items-start justify-start gap-2 p-2 text-left",
+              "h-auto min-h-9 w-full items-start justify-start gap-2 px-2 py-1.5 text-left",
               resolvingOption === option && "opacity-70",
             )}
           >

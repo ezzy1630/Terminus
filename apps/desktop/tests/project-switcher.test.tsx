@@ -186,30 +186,14 @@ function openOnActivity(): void {
   window.localStorage.setItem("terminus-desktop.sidebar-view.v1", "recent");
 }
 
-describe("the sidebar project view", () => {
-  test("keeps the add control visible with no projects and has no redundant app menu", () => {
-    openOnProjectsTree();
+describe("the sidebar thread view", () => {
+  test("does not repeat project context in the thread view", () => {
+    openOnActivity();
     install([], null);
     render(<Sidebar onOpenProject={() => undefined} />);
 
-    expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Switch project" })).not.toBeInTheDocument();
-  });
-
-  test("selecting a project row lands on that project's new-task screen", async () => {
-    openOnProjectsTree();
-    install([session("a", "Terminus"), session("b", "Site")], "a");
-    const onNavigate = vi.fn();
-    const user = userEvent.setup();
-    render(<Sidebar onNavigate={onNavigate} onOpenProject={() => undefined} />);
-
-    await user.click(screen.getByRole("button", { name: "Site" }));
-
-    await waitFor(() => expect(useTerminusStore.getState().selectedSessionId).toBe("b"));
-    // Landing on the previous project's task while the header says "Site"
-    // would be the switcher lying about where you are.
-    expect(onNavigate).toHaveBeenCalledWith("new_task");
-    expect(useTerminusStore.getState().selectedTaskId).toBeNull();
+    expect(screen.getByRole("button", { name: "Open project" })).toBeInTheDocument();
   });
 });
 
@@ -299,33 +283,59 @@ describe("inbox grouping", () => {
 });
 
 describe("the sidebar inbox", () => {
-  test("switches through visible Projects and Activity controls without changing the workspace destination", async () => {
-    const user = userEvent.setup();
+  test("shows one project-filtered thread list with both sidebar views in the Terminus menu", async () => {
     install([session("a", "Terminus")], "a");
     useTerminusStore.setState({
       tasksBySession: { a: [task("t-today", "Clean git and rebuild", localAt(28, 9))] },
     });
     render(<Sidebar onOpenProject={() => undefined} />);
 
-    // Projects is the stable default. Both choices stay named and visible.
     expect(screen.getByText("Clean git and rebuild")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Projects" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Activity" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByText("Project: Terminus")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "New thread" })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Search" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Threads" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Projects" })).toHaveAttribute("aria-selected", "false");
+  });
 
-    await user.click(screen.getByRole("button", { name: "Activity" }));
+  test("switches between thread priority and the project tree", async () => {
+    openOnActivity();
+    install([session("a", "Terminus"), session("b", "Site")], "a");
+    const user = userEvent.setup();
+    render(<Sidebar onOpenProject={() => undefined} />);
 
-    // Same task, now filed by activity. This is a sidebar projection, so the
-    // primary destinations remain available and no new task is created.
-    expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
-    expect(screen.getByText("Clean git and rebuild")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Activity" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "New task" })).toBeInTheDocument();
-    expect(window.localStorage.getItem("terminus-desktop.sidebar-view.v1")).toBe("recent");
+    expect(screen.queryByRole("button", { name: "Switch project" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Projects" }));
 
-    await user.click(screen.getByRole("button", { name: "Projects" }));
-    expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
-    expect(window.localStorage.getItem("terminus-desktop.sidebar-view.v1")).toBe("project");
+    expect(screen.getByRole("region", { name: "Projects" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Switch project" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Threads" }));
+    expect(screen.queryByRole("button", { name: "Switch project" })).not.toBeInTheDocument();
+  });
+
+  test("keeps long project trees compact until the operator expands them", async () => {
+    openOnProjectsTree();
+    install([session("a", "Terminus")], "a");
+    useTerminusStore.setState({
+      tasksBySession: {
+        a: Array.from({ length: 8 }, (_, index) => task(
+          `t-${index + 1}`,
+          `Thread ${index + 1}`,
+          localAt(28, index + 1),
+        )),
+      },
+    });
+    const user = userEvent.setup();
+    render(<Sidebar onOpenProject={() => undefined} />);
+
+    expect(screen.getByText("Thread 6")).toBeInTheDocument();
+    expect(screen.queryByText("Thread 7")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show 2 more threads in Terminus" }));
+
+    expect(screen.getByText("Thread 7")).toBeInTheDocument();
+    expect(screen.getByText("Thread 8")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show fewer threads in Terminus" })).toBeInTheDocument();
   });
 
   test("selecting an inbox row opens that task", async () => {
@@ -391,10 +401,10 @@ describe("the sidebar inbox", () => {
     useTaskReadStore.setState({ seenAtByTask: {} });
     render(<Sidebar onOpenProject={() => undefined} />);
 
-    expect(screen.getByText("Priority")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Collapse Needs you/ })).toBeInTheDocument();
     act(() => { useTaskReadStore.getState().markRead("t-failed", failed.updated_at); });
 
-    expect(screen.queryByText("Priority")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Collapse Needs you/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Old failed request/ })).toBeInTheDocument();
   });
 });

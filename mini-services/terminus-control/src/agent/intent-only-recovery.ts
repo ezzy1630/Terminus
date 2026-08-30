@@ -1,8 +1,8 @@
 /**
  * Bounded recovery for a provider that stops after intent-only work.
  *
- * A read-only turn is a valid answer when the task has no workspace mutation
- * contract. A coding task with required, still-pending criteria is different:
+ * A read-only turn is a valid answer even when its task has permission to
+ * write. A coding turn that actually attempted a mutation is different:
  * a final response with no successful mutation and no evidence is not a
  * completion candidate. Give the provider one durable continuation, then
  * leave the turn explicitly blocked if it repeats the same outcome.
@@ -29,8 +29,6 @@ export interface IntentOnlyRecoveryInput {
   readonly workspaceMutationObserved: boolean;
   /** Includes denied/failed mutating calls, which are still intent signals. */
   readonly workspaceMutationAttempted: boolean;
-  /** Contract-declared write scope. */
-  readonly writePaths: readonly string[];
   /** Whether this turn has already consumed its one recovery continuation. */
   readonly continuationAdmitted: boolean;
 }
@@ -88,11 +86,10 @@ export function decideIntentOnlyRecovery(
     return { kind: "ignore", reason: "evidence_present" };
   }
 
-  // A task with no write scope is intentionally read-only. A mutating call
-  // remains an explicit intent signal even if the contract was malformed or
-  // the kernel denied it before any bytes changed.
-  const mutationExpected = input.writePaths.length > 0 || input.workspaceMutationAttempted;
-  if (!mutationExpected) {
+  // Write scope is permission, not an obligation. Desktop conversations use
+  // a reusable workspace contract, so reply-only turns may legitimately have
+  // write paths. Only an actual mutating call is an intent signal.
+  if (!input.workspaceMutationAttempted) {
     return { kind: "ignore", reason: "read_only_turn" };
   }
 

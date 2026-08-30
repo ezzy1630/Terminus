@@ -34,6 +34,8 @@ export interface ContentSecurityPolicyOptions {
    * documents are never built with this relaxation.
    */
   readonly allowInlineScripts?: boolean;
+  /** Vite's reconnect fallback uses a blob worker after a dev-server restart. */
+  readonly allowBlobWorkers?: boolean;
 }
 
 /** Connect sources for a packaged build talking to one local control origin. */
@@ -64,9 +66,11 @@ export function buildContentSecurityPolicy(options: ContentSecurityPolicyOptions
     }
   }
   const scriptSource = options.allowInlineScripts === true ? "'self' 'unsafe-inline'" : "'self'";
+  const workerSource = options.allowBlobWorkers === true ? "'self' blob:" : "'self'";
   return [
     "default-src 'self'",
     `script-src ${scriptSource}`,
+    `worker-src ${workerSource}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     `connect-src ${connectSources.join(" ")}`,

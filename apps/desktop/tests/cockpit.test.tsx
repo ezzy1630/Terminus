@@ -387,23 +387,19 @@ describe("truthful operator cockpit", () => {
 
   test("preserves the durable task while navigating product destinations", async () => {
     useTerminusStore.setState({ selectedTaskId: "task-durable" });
-    const onNavigate = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <Sidebar
-        activeDestination="chat"
-        onNavigate={onNavigate}
-      />,
-    );
+    const openAllTasks = vi.fn();
+    render(<Sidebar activeDestination="chat" />);
 
-    expect(screen.getByRole("button", { name: /Sessions|Board|Kanban/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Sessions|Board|Kanban/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Mission Ledger" })).not.toBeInTheDocument();
     // Agents has no complete, actionable control-plane surface, so it is not
     // exposed as a permanent destination.
     expect(screen.queryByRole("button", { name: "Agents" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Sessions|Board|Kanban/ }));
-
-    expect(onNavigate).toHaveBeenNthCalledWith(1, "board");
+    const allTasks = buildDefaultCommands({ openMissionBoard: openAllTasks })
+      .find((command) => command.id === "nav.mission-board");
+    expect(allTasks?.label).toBe("Open all tasks");
+    allTasks?.action();
+    expect(openAllTasks).toHaveBeenCalledTimes(1);
     expect(useTerminusStore.getState().selectedTaskId).toBe("task-durable");
   });
 
@@ -588,11 +584,8 @@ describe("truthful operator cockpit", () => {
     render(<App />);
     await waitFor(() => expect(refreshAll).toHaveBeenCalled());
 
-    // Exactly one, deliberately: the sidebar used to offer "Open project"
-    // three times at once — the Spaces header, the empty state, and a docked
-    // nav row.
-    await user.click(screen.getByRole("button", { name: "Projects" }));
-    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await user.click(await screen.findByText("Open project"));
 
     expect(await screen.findByRole("dialog", { name: "Open project" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Project path" })).toHaveValue("");
@@ -606,18 +599,62 @@ describe("truthful operator cockpit", () => {
     await waitFor(() => expect(refreshAll).toHaveBeenCalled());
 
     // Global search and navigation share one visible command surface.
-    const searchTrigger = screen.getByRole("button", { name: "Search and commands" });
+    const searchTrigger = screen.getByRole("button", { name: "Search" });
     await userEvent.click(searchTrigger);
 
     const commandDialog = await screen.findByRole("dialog", { name: "Command palette" });
     await waitFor(() => expect(commandDialog).toContainElement(document.activeElement as HTMLElement));
-    expect(screen.getByText("Open board")).toBeInTheDocument();
+    expect(screen.getByText("Open all tasks")).toBeInTheDocument();
     expect(screen.queryByText("Task overview")).not.toBeInTheDocument();
     expect(screen.queryByText("Task changes")).not.toBeInTheDocument();
     expect(screen.queryByText("Toggle inspector")).not.toBeInTheDocument();
 
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(searchTrigger).toHaveFocus());
+  });
+
+  test("opens Settings as a normal destination and returns through the sidebar dock", async () => {
+    const refreshAll = vi.fn(async () => {});
+    useTerminusStore.setState({ refreshAll });
+    vi.spyOn(api, "listProviderModels").mockResolvedValue({ providers: [], models: [], error: null });
+    window.localStorage.setItem("terminus-desktop.onboarding.completed.v1", "true");
+    const user = userEvent.setup();
+    render(<App />);
+    await waitFor(() => expect(refreshAll).toHaveBeenCalled());
+
+    expect(screen.getAllByRole("button", { name: "Search" })).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+
+    expect(await screen.findByRole("region", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Settings" })).not.toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Settings categories" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back to app" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Settings" })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  test("keeps sidebar modes on their own row and floats only the reopen control", async () => {
+    const refreshAll = vi.fn(async () => {});
+    useTerminusStore.setState({ refreshAll });
+    window.localStorage.setItem("terminus-desktop.onboarding.completed.v1", "true");
+    render(<App />);
+    await waitFor(() => expect(refreshAll).toHaveBeenCalled());
+
+    const hide = screen.getByRole("button", { name: "Hide sidebar" });
+    const aside = hide.closest("aside");
+    expect(aside).not.toBeNull();
+    expect(aside).toContainElement(screen.getByRole("tab", { name: "Threads" }));
+    expect(document.querySelector(".window-control")).toBeNull();
+
+    await userEvent.click(hide);
+    const show = screen.getByRole("button", { name: "Show sidebar" });
+    expect(show.closest(".window-control")).not.toBeNull();
+    expect(document.querySelector("aside")).toBeNull();
+
+    await userEvent.click(show);
+    expect(screen.getByRole("button", { name: "Hide sidebar" }).closest("aside")).not.toBeNull();
   });
 
   test("opens Board-only canonical task context in the shared inspector", async () => {
@@ -638,8 +675,10 @@ describe("truthful operator cockpit", () => {
     render(<App />);
     await waitFor(() => expect(refreshAll).toHaveBeenCalled());
 
-    await user.click(screen.getByRole("button", { name: /Sessions|Board|Kanban/ }));
-    await screen.findByRole("heading", { name: /Sessions|Board|Kanban/ });
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await user.click(await screen.findByText("Open all tasks"));
+    await screen.findByRole("heading", { name: /Sessions|All Tasks|Kanban/ });
+    await user.click(screen.getByRole("button", { name: "Kanban view" }));
     await user.click(await screen.findByRole("button", { name: "Actions for Polish the desktop UI" }));
     await user.click(screen.getByRole("menuitem", { name: "Show context" }));
 

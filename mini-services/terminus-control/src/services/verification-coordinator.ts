@@ -225,9 +225,9 @@ export class VerificationCoordinator<TTransaction> {
   /**
    * No required predicate could run in this repository (no detected test
    * runner). The turn's work is finished and its evidence records *why*
-   * nothing ran, so the turn settles as VERIFIED; the task returns to ACTIVE
-   * because a skipped check is not proof of completion. Task and turn move in
-   * one transaction.
+   * nothing ran, so the turn settles as VERIFIED; the task remains steerable
+   * in REVIEW because a skipped check is not proof of completion. Task and
+   * turn move in one transaction.
    */
   async settleWithoutRunnableChecks(
     taskId: string,
@@ -241,11 +241,11 @@ export class VerificationCoordinator<TTransaction> {
     const input: VerificationTransitionInput = {
       taskId,
       status: "ACTIVE",
-      phase: "EXECUTE",
+      phase: "REVIEW",
       completedAt: null,
       terminalReasonJson: null,
       eventType: "task.verification_not_runnable",
-      payload: { phase: "EXECUTE", status: "ACTIVE", ...reason },
+      payload: { phase: "REVIEW", status: "ACTIVE", ...reason },
     };
     await this.dependencies.mutate(async () => {
       await this.dependencies.appendEvent(

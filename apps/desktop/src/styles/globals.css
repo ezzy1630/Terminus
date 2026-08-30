@@ -185,10 +185,11 @@ textarea::placeholder,
 }
 }
 
-/* ────────────────────────── Draggable title bar ───────────────────────── */
+/* ────────────────────────── Native window chrome ──────────────────────── */
 
 @layer components {
-.titlebar-drag {
+.titlebar-drag,
+.window-drag-zone {
   -webkit-app-region: drag;
 }
 
@@ -196,44 +197,24 @@ textarea::placeholder,
   -webkit-app-region: no-drag;
 }
 
-/* No `isolation: isolate` and no negative z-index here. Both create a stacking
-   context around the drag region, which is a known way to break
-   `-webkit-app-region: no-drag` hit testing in Electron: the child control
-   stays visible but the drag layer keeps swallowing its mouse events. The
-   sidebar tint is painted as a normal z-index:0 layer instead, with the
-   interactive regions stacked above it. */
-.titlebar-shell {
-  position: relative;
-  background: var(--bg-canvas);
-  /* A real hairline, like NSToolbar's bottom separator. At 45% opacity the
-     bar dissolved into the canvas and the chrome had no bottom edge. */
-  box-shadow: inset 0 -1px 0 var(--border-subtle);
-}
-
-.titlebar-shell::before {
-  content: "";
+.window-drag-zone {
   position: absolute;
-  inset: 0 auto 0 0;
-  z-index: 0;
-  width: var(--titlebar-sidebar-width, 0px);
-  border-right: 1px solid var(--sidebar-separator);
-  background: var(--sidebar-material);
-  pointer-events: none;
+  inset: 0 auto auto 0;
+  z-index: 35;
+  width: var(--window-drag-width, 124px);
+  height: 34px;
 }
 
-/* Interactive title-bar controls sit above the drag layer. */
-.titlebar-actions {
-  position: relative;
-  z-index: 1;
+.window-control {
+  position: absolute;
+  top: 4px;
+  left: 84px;
+  z-index: 40;
   -webkit-app-region: no-drag;
 }
 
-.titlebar-center {
-  position: absolute;
-  z-index: 1;
-  inset-inline: calc(var(--titlebar-sidebar-width, 0px) + 16px) 156px;
-  height: 100%;
-  pointer-events: none;
+.app-content-sidebar-hidden {
+  padding-top: 34px;
 }
 
 /* ────────────────────────── Animations ───────────────────────────────── */
@@ -455,28 +436,24 @@ textarea::placeholder,
   margin-inline: auto;
 }
 
-/* The feed is top-anchored inside a flex-1 box with the composer docked
-   below it, so every conversation shorter than the viewport collected its
-   slack as one dead band through the middle of the primary surface. Pushing
-   the column to the bottom puts the newest turn against the composer. Once
-   content exceeds the viewport this resolves identically to block layout,
-   so the virtualizer's scroll math is untouched. */
+/* A document starts beneath its header. New and short conversations remain
+   top-anchored; once the feed overflows, the scroll-stick logic keeps its live
+   tail beside the composer without moving the whole document down. */
 .feed-column {
   display: flex;
   min-height: 100%;
   flex-direction: column;
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 
 .feed-column > * {
   flex-shrink: 0;
 }
 
-/* With nothing to read, bottom-anchoring pins the empty state just above the
-   composer and leaves the rest of the surface as one tall void. An empty
-   surface has no newest turn to keep in view, so it centres instead. */
+/* Empty task copy belongs where the first turn will appear, not in a floating
+   dashboard-style centre card. */
 .feed-column.is-empty {
-  justify-content: center;
+  justify-content: flex-start;
 }
 
 /* The outer surface owns focus treatment. The textarea itself should stay
@@ -524,6 +501,10 @@ textarea::placeholder,
   position: relative;
   padding-inline: 32px;
   background: var(--bg-canvas);
+}
+
+.intervention-tray:not(:empty) {
+  margin-bottom: 8px;
 }
 
 .composer-dock::before {
@@ -803,21 +784,23 @@ textarea::placeholder,
 
 .sidebar-section-label {
   color: var(--text-tertiary);
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
 }
 
 /* ────────────────────────── Inspector ────────────────────────────────── */
 
 .inspector-dock {
-  padding: 12px 12px 12px 0;
+  padding: 0;
 }
 
 .inspector-card {
   background: var(--bg-inspector);
-  border-radius: 18px;
-  box-shadow: var(--elevation-sm);
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .inspector-section { transition: background var(--duration-fast) var(--easing-default); }
@@ -976,13 +959,6 @@ html[data-vibrancy="on"] .app-shell {
 
 html[data-vibrancy="on"] .app-content {
   background: var(--bg-canvas);
-}
-
-/* The title bar is chrome, so it goes vibrant too — and its sidebar strip
-   must composite over the same material as the sidebar below it, or the two
-   meet at a visible seam. */
-html[data-vibrancy="on"] .titlebar-shell {
-  background: transparent;
 }
 
 html[data-vibrancy="on"] {

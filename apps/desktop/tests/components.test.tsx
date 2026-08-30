@@ -20,7 +20,7 @@
  *      the shared accessible tooltip layer.
  */
 import { describe, expect, test, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, cleanup, act, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, act, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 
@@ -39,7 +39,7 @@ import { ActivityBlock } from "../src/components/ActivityBlock";
 import { ConnectionBanner } from "../src/components/ConnectionBanner";
 import { sidebarVisibleTaskCount } from "../src/components/Sidebar";
 import { readSidebarVisible, writeSidebarVisible } from "../src/lib/sidebar-prefs";
-import { deriveRuntimeModelProfiles, useSettingsStore } from "../src/components/Settings";
+import { useSettingsStore } from "../src/components/Settings";
 
 import { useTerminusStore } from "../src/hooks/use-terminus";
 import { useThemeStore } from "../src/hooks/use-theme";
@@ -164,14 +164,48 @@ describe("ActivityBlock", () => {
       />,
     );
 
-    const toggle = screen.getByRole("button", { name: "Ran verification, status done, 18 tests passed" });
+    const toggle = screen.getByRole("button", { name: "Expand details for Ran verification" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("18 tests passed")).toBeInTheDocument();
     expect(screen.queryByText("18 passed, 0 failed")).not.toBeInTheDocument();
 
     await userEvent.setup().click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "Collapse details for Ran verification" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("18 passed, 0 failed")).toBeInTheDocument();
+  });
+
+  test("opens read-only progress from the activity data already in the transcript", async () => {
+    render(
+      <ActivityBlock
+        block={{
+          id: "command-1",
+          title: "Ran focused tests",
+          metric: "6 passed",
+          status: "done",
+          entries: [{
+            tool: "exec",
+            summary: "bun run test -- auth-refresh",
+            detail: "6 passed, 0 failed",
+            at: "2026-07-13T10:42:00.000Z",
+            phase: "settled",
+            outcome: "succeeded",
+            operationId: "operation-1",
+          }],
+        }}
+      />,
+    );
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Open progress for Ran focused tests" }));
+    const drawer = screen.getByRole("dialog", { name: "Progress for Ran focused tests" });
+    expect(within(drawer).getByText("bun run test -- auth-refresh")).toBeInTheDocument();
+    expect(within(drawer).getByText(/Succeeded/)).toBeInTheDocument();
+    expect(within(drawer).getByText("6 passed, 0 failed")).not.toBeVisible();
+
+    fireEvent.click(within(drawer).getByText("Exact details"));
+    expect(within(drawer).getByText("operation-1")).toBeInTheDocument();
+    expect(within(drawer).getByText("6 passed, 0 failed")).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("button", { name: "Close progress" }));
+    expect(screen.queryByRole("dialog", { name: "Progress for Ran focused tests" })).not.toBeInTheDocument();
   });
 
   // A failure that hides its cause behind a disclosure triangle is a failure
@@ -199,7 +233,7 @@ describe("ActivityBlock", () => {
 
     const alert = screen.getByRole("alert");
     expect(alert).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Turn failed/ })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "Collapse details for Turn failed" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Reason: agent_loop_error")).toBeInTheDocument();
   });
 
@@ -1429,7 +1463,7 @@ describe("NewTaskScreen — first turn lifecycle", () => {
   test("keeps the start surface focused on project context and one composer", () => {
     render(<NewTaskScreen />);
 
-    expect(screen.getByRole("heading", { name: "What should Terminus do?" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What should we build in Terminus?" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change project" })).toHaveTextContent("Terminus");
     expect(screen.getAllByRole("textbox", { name: "Message composer" })).toHaveLength(1);
     expect(screen.queryByText("Map the codebase")).not.toBeInTheDocument();
@@ -1465,17 +1499,22 @@ function openOnProjectsTree(): void {
   window.localStorage.setItem("terminus-desktop.sidebar-view.v1", "projects");
 }
 
+function openOnThreads(): void {
+  window.localStorage.setItem("terminus-desktop.sidebar-view.v1", "recent");
+}
+
 describe("Sidebar — navigation destinations", () => {
   beforeEach(() => {
-    openOnProjectsTree();
+    openOnThreads();
   });
 
   test("keeps primary destinations available without showing empty attention chrome", async () => {
-    const onNavigate = vi.fn();
-    render(<Sidebar onNavigate={onNavigate} />);
+    const onSearch = vi.fn();
+    render(<Sidebar onSearch={onSearch} />);
 
-    expect(screen.getByRole("button", { name: /^New (session|task)/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^(Board|Kanban|Sessions)/ })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "New thread" })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Search" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^(Board|Kanban|Sessions)/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Needs you/ })).not.toBeInTheDocument();
     // "Agents" joins this list: it rendered a directory of departments,
     // operators and rooms that no route supplies.
@@ -1484,8 +1523,8 @@ describe("Sidebar — navigation destinations", () => {
     }
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: /^(Board|Kanban|Sessions)/ }));
-    expect(onNavigate).toHaveBeenCalledWith("board");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    expect(onSearch).toHaveBeenCalledTimes(1);
   });
 
   test("routes Settings without adding a second Help destination", async () => {
@@ -1502,6 +1541,32 @@ describe("Sidebar — navigation destinations", () => {
     expect(details).toEqual([{ category: "appearance" }]);
     expect(screen.queryByRole("button", { name: "Help" })).not.toBeInTheDocument();
     window.removeEventListener("terminus:open-settings", listener);
+  });
+
+  test("turns the Settings dock item into Back while Settings is open", async () => {
+    const onBackFromSettings = vi.fn();
+    render(<Sidebar activeDestination="settings" onBackFromSettings={onBackFromSettings} />);
+
+    expect(screen.queryByRole("button", { name: "Settings" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Back to app" }));
+
+    expect(onBackFromSettings).toHaveBeenCalledTimes(1);
+  });
+
+  test("keeps the visible sidebar toggle in native chrome and modes on their own row", async () => {
+    const onToggleSidebar = vi.fn();
+    render(<Sidebar onToggleSidebar={onToggleSidebar} />);
+
+    const toggle = screen.getByRole("button", { name: "Hide sidebar" });
+    const threads = screen.getByRole("tab", { name: "Threads" });
+    const projects = screen.getByRole("tab", { name: "Projects" });
+    expect(toggle.parentElement).toHaveAttribute("class", expect.stringContaining("items-center"));
+    expect(toggle.parentElement).not.toContainElement(threads);
+    expect(threads.parentElement).toBe(projects.parentElement);
+    expect(threads.parentElement).toHaveClass("grid-cols-2");
+
+    await userEvent.click(toggle);
+    expect(onToggleSidebar).toHaveBeenCalledTimes(1);
   });
 
   test("does not duplicate global search inside the rail", () => {
@@ -1599,7 +1664,9 @@ describe("Sidebar — navigation destinations", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Load more projects" }));
 
-    await waitFor(() => expect(screen.getByText("Second project")).toBeInTheDocument());
+    await waitFor(() => expect(useTerminusStore.getState().sessions.some((session) => session.id === "session-page-2")).toBe(true));
+    await userEvent.click(screen.getByRole("tab", { name: "Projects" }));
+    expect(screen.getByText("Second project")).toBeInTheDocument();
     expect(api.listSessions).toHaveBeenCalledWith({ cursor: "cursor-projects" });
     expect(useTerminusStore.getState().sessionsPage.nextCursor).toBeNull();
   });
@@ -2056,10 +2123,6 @@ describe("Sidebar — navigation destinations", () => {
     vi.mocked(api.getTask).mockRejectedValueOnce(new TerminusApiError(503, "control plane unavailable", null));
     await useTerminusStore.getState().refreshTask("pin-retry");
     expect(useTerminusStore.getState().pinnedTaskIds.has("pin-retry")).toBe(true);
-    render(<Sidebar />);
-    expect(screen.getByText("Pinned task pin-retry — unavailable")).toBeInTheDocument();
-    expect(screen.getByText(/This task is unavailable/)).toBeInTheDocument();
-    expect(screen.queryByText(/control plane unavailable/)).not.toBeInTheDocument();
     if (originalGetTask) vi.mocked(api.getTask).mockImplementation(originalGetTask);
   });
 
@@ -2180,70 +2243,42 @@ describe("Sidebar — navigation destinations", () => {
     expect(useTerminusStore.getState().taskById[other.id]?.status).toBe("ACTIVE");
   });
 
-  test("reaches virtualized tasks with End, Home, and arrow-key roving focus", async () => {
-    const widthSpy = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(280);
-    const heightSpy = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(432);
+  test("filters the thread list to the selected project", () => {
     const now = new Date().toISOString();
-    const tasks = Array.from({ length: 60 }, (_, index): Task => ({
-      id: `virtual-task-${String(index + 1).padStart(2, "0")}`,
-      session_id: "session-virtual",
-      thread_id: `thread-virtual-${index + 1}`,
-      status: "ACTIVE",
-      phase: "EXECUTING",
+    const makeTask = (id: string, sessionId: string, objective: string): Task => ({
+      id,
+      session_id: sessionId,
+      thread_id: `thread-${id}`,
+      status: "COMPLETED",
+      phase: "REVIEW",
       active_contract_version: 1,
       risk_class: "normal",
       created_at: now,
       updated_at: now,
-      completed_at: null,
+      completed_at: now,
       terminal_reason: null,
       contract: {
         version: 1,
-        objective: `Virtual task ${index + 1}`,
+        objective,
         non_goals: [],
         allowed_scope: { read_paths: [], write_paths: [], external_systems: [] },
       },
-    }));
-    useTerminusStore.setState({
-      sessions: [{
-        id: "session-virtual",
-        workspace_id: "workspace-virtual",
-        title: "Virtual project",
-        status: "active",
-        active_thread_id: tasks[0]?.thread_id ?? null,
-        created_at: now,
-        updated_at: now,
-      }],
-      tasksBySession: { "session-virtual": tasks },
-      taskById: Object.fromEntries(tasks.map((task) => [task.id, task])),
-      selectedSessionId: "session-virtual",
-      selectedTaskId: tasks[0]?.id ?? null,
-      taskPagesBySession: {
-        "session-virtual": { nextCursor: null, total: tasks.length, loadingMore: false, error: null },
-      },
-      taskListFreshnessBySession: {
-        "session-virtual": { status: "ready", error: null },
-      },
     });
-    try {
-      const user = userEvent.setup();
-      render(<Sidebar />);
-      await user.click(screen.getByRole("button", { name: /Show \d+ more tasks in Virtual project/ }));
-
-      const first = screen.getByRole("button", { name: /Virtual task 1, status Ready/ });
-      expect(first.closest("[role='listitem']")).toHaveAttribute("aria-posinset", "1");
-      expect(first.closest("[role='listitem']")).toHaveAttribute("aria-setsize", "60");
-      act(() => first.focus());
-      fireEvent.keyDown(first, { key: "End" });
-      await waitFor(() => expect(screen.getByRole("button", { name: /Virtual task 60, status Ready/ })).toHaveFocus());
-
-      fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Home" });
-      await waitFor(() => expect(screen.getByRole("button", { name: /Virtual task 1, status Ready/ })).toHaveFocus());
-      fireEvent.keyDown(document.activeElement as HTMLElement, { key: "ArrowDown" });
-      await waitFor(() => expect(screen.getByRole("button", { name: /Virtual task 2, status Ready/ })).toHaveFocus());
-    } finally {
-      heightSpy.mockRestore();
-      widthSpy.mockRestore();
-    }
+    const shown = makeTask("shown", "session-a", "Shown thread");
+    const hidden = makeTask("hidden", "session-b", "Hidden thread");
+    useTerminusStore.setState({
+      sessions: [
+        { id: "session-a", workspace_id: "workspace-a", title: "A", status: "active", active_thread_id: null, created_at: now, updated_at: now },
+        { id: "session-b", workspace_id: "workspace-b", title: "B", status: "active", active_thread_id: null, created_at: now, updated_at: now },
+      ],
+      tasksBySession: { "session-a": [shown], "session-b": [hidden] },
+      taskById: { shown, hidden },
+      selectedSessionId: "session-a",
+      selectedTaskId: null,
+    });
+    render(<Sidebar />);
+    expect(screen.getByText("Shown thread")).toBeInTheDocument();
+    expect(screen.queryByText("Hidden thread")).not.toBeInTheDocument();
   });
 });
 
@@ -2321,7 +2356,7 @@ describe("TaskRow — truncation + tooltip", () => {
     const row = screen.getByRole("button");
     expect(row).toHaveAccessibleName(expect.stringContaining("Approve or deny"));
     expect(row).toHaveAccessibleName(expect.stringContaining("in Terminus"));
-    expect(row).toHaveAttribute("data-tooltip", "Fix the auth race — Terminus — Approve or deny");
+    expect(row).toHaveAttribute("data-tooltip", "Fix the auth race - Terminus - Approve or deny");
   });
 
   test("marks unread in its own colour, in its own gutter, not as a status", () => {
@@ -2337,6 +2372,24 @@ describe("TaskRow — truncation + tooltip", () => {
     rerender(<TaskRow title="Settled task" status="done" selected={false} unread />);
     expect(container.querySelector(".bg-accent")).not.toBeNull();
     expect(screen.getByRole("button")).toHaveAccessibleName(expect.stringContaining("unread"));
+  });
+
+  test("uses red for attention and does not print lifecycle prose", () => {
+    const { container } = render(
+      <TaskRow title="Repair failed tests" status="failed" needsYou selected />,
+    );
+
+    expect(container.querySelector(".bg-error")).not.toBeNull();
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+  });
+
+  test("does not use the blue unread mark while work is still running", () => {
+    const { container } = render(
+      <TaskRow title="Repair failed tests" status="working" unread selected={false} />,
+    );
+
+    expect(container.querySelector(".bg-accent")).toBeNull();
+    expect(container.querySelector(".spinner-sm")).not.toBeNull();
   });
 
   test("shows the pin/unpin button only on hover (and when pinned)", () => {
@@ -2465,42 +2518,8 @@ describe("Sidebar — remembered shape", () => {
     expect(readSidebarVisible()).toBe(false);
   });
 
-  test("restores collapsed projects across a remount", () => {
-    openOnProjectsTree();
-    window.localStorage.setItem(
-      "terminus-desktop.sidebar-collapsed-projects.v1",
-      JSON.stringify(["session-1"]),
-    );
-    render(<Sidebar />);
-
-    expect(screen.getByRole("button", { name: "Expand Terminus" })).toBeInTheDocument();
-    expect(screen.queryByText("Rebuild the index")).not.toBeInTheDocument();
-  });
-
-  test("records a collapse so the next launch honours it", async () => {
+  test("labels pinned rows when the sidebar is showing all projects", async () => {
     const user = userEvent.setup();
-    openOnProjectsTree();
-    render(<Sidebar />);
-
-    await user.click(screen.getByRole("button", { name: "Collapse Terminus" }));
-
-    expect(JSON.parse(
-      window.localStorage.getItem("terminus-desktop.sidebar-collapsed-projects.v1") ?? "[]",
-    )).toEqual(["session-1"]);
-  });
-
-  test("restores the explicitly selected project hierarchy", () => {
-    openOnProjectsTree();
-    render(<Sidebar />);
-    expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Projects" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Activity" })).toHaveAttribute("aria-pressed", "false");
-  });
-
-  // The question is what the *list* holds, not what the workspace holds. Six
-  // open projects buy the label nothing when every pin is from one of them,
-  // and in a compact rail it costs the titles about 40% of their width.
-  test("labels pinned rows only once the pinned list spans two projects", () => {
     openOnProjectsTree();
     const race = seedTask("task-race", "session-2", "Fix the auth race");
     const index = seedTask("task-index", "session-1", "Rebuild the index");
@@ -2509,21 +2528,22 @@ describe("Sidebar — remembered shape", () => {
       tasksBySession: { "session-1": [index], "session-2": [race] },
       taskById: { [race.id]: race, [index.id]: index },
       pinnedTaskIds: new Set(ids),
+      selectedSessionId: null,
     });
 
     setPins([race.id]);
     render(<Sidebar />);
-    // One pin, so nothing to disambiguate: no project rides along, even though
-    // a second project is open right there in the tree below.
-    expect(screen.queryByRole("button", { name: /Fix the auth race, in Website/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Expand Pinned/ }));
+    expect(screen.getAllByRole("button", { name: /Fix the auth race, in Website/ }).length).toBeGreaterThan(0);
 
     cleanup();
     setPins([race.id, index.id]);
     render(<Sidebar />);
+    await user.click(screen.getByRole("button", { name: /Expand Pinned/ }));
 
     // The row is one line; the project rides along as a recessive suffix, and
     // the spoken label says which repository the race is in.
-    expect(screen.getByRole("button", { name: /Fix the auth race, in Website/ })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /Fix the auth race, in Website/ }).length).toBeGreaterThan(0);
   });
 
   test("leaves the project off a pinned row when there is only one project", () => {
@@ -2540,34 +2560,7 @@ describe("Sidebar — remembered shape", () => {
   });
 });
 
-describe("Settings — runtime model profiles", () => {
-  test("lists only profiles reported by sessions and groups duplicate use", () => {
-    const session = (id: string, profile?: string) => ({
-      id,
-      workspace_id: `workspace-${id}`,
-      title: id,
-      status: "active" as const,
-      active_thread_id: null,
-      created_at: "2026-07-12T00:00:00.000Z",
-      updated_at: "2026-07-12T00:00:00.000Z",
-      ...(profile === undefined ? {} : { default_model_profile: profile }),
-    });
-
-    expect(deriveRuntimeModelProfiles([
-      session("one", "provider/model-a"),
-      session("two", "provider/model-a"),
-      session("three", "provider/model-b"),
-      session("four"),
-    ])).toEqual([
-      { id: "provider/model-a", projectCount: 2 },
-      { id: "provider/model-b", projectCount: 1 },
-    ]);
-  });
-
-  test("does not create fallback models when the registry is empty", () => {
-    expect(deriveRuntimeModelProfiles([])).toEqual([]);
-  });
-
+describe("Settings", () => {
   test("applies reduced motion to the live document", () => {
     const settings = useSettingsStore.getState();
     settings.set("appearance.reduce-motion", true);
@@ -2583,8 +2576,8 @@ describe("Settings — runtime model profiles", () => {
     settings.set("appearance.density", "dense");
 
     expect(settings.get("appearance.theme")).toBe("system");
-    expect(settings.get("appearance.density")).toBe("compact");
+    expect(settings.get("appearance.density")).toBe("spacious");
     expect(useThemeStore.getState().theme).toBe("system");
-    expect(useThemeStore.getState().density).toBe("compact");
+    expect(useThemeStore.getState().density).toBe("spacious");
   });
 });

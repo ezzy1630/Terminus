@@ -40,7 +40,7 @@ describe("mission board preferences", () => {
     window.sessionStorage.setItem("terminus-desktop.mission-board-state.v1", "{");
 
     expect(readMissionBoardPreferences("session-1")).toEqual({
-      viewMode: "board",
+      viewMode: "list",
       query: "",
       spaceFilter: "session-1",
       statusFilter: "all",

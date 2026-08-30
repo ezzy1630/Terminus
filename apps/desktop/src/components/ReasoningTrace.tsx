@@ -8,9 +8,10 @@
  * was indistinguishable from a hang.
  *
  * While the turn runs this is one quiet live line: a spinner, the current
- * phase, and elapsed time. Once it settles it collapses to "Thought for 4.2s",
- * which expands into the phases and how long each took. It never invents
- * reasoning text — it reports only phases the control plane actually emitted.
+ * phase, and elapsed time. Once it settles it collapses to "Run details ·
+ * 4.2s", which expands into the observed phases and how long each took.
+ * Provider reasoning prose is deliberately absent. The useful portable record
+ * is what the runtime did and observed, not private model narration.
  */
 import { memo, useEffect, useState } from "react";
 import { ChevronRight } from "lucide-react";
@@ -19,13 +20,23 @@ import { Button } from "../ui/Button";
 import type { ReasoningBlock, ReasoningPhaseKind } from "../types";
 
 const PHASE_LABEL: Record<ReasoningPhaseKind, string> = {
+  context_compiling: "Read context",
+  provider_running: "Model response",
+  tool_settlement: "Ran tools",
+  response_validating: "Validated response",
+  verifying: "Verified result",
+  repairing: "Repaired result",
+  finalizing: "Finalized run",
+};
+
+const LIVE_PHASE_LABEL: Record<ReasoningPhaseKind, string> = {
   context_compiling: "Reading context",
-  provider_running: "Thinking",
+  provider_running: "Generating response",
   tool_settlement: "Running tools",
-  response_validating: "Checking the response",
-  verifying: "Verifying",
-  repairing: "Repairing",
-  finalizing: "Finishing up",
+  response_validating: "Validating response",
+  verifying: "Verifying result",
+  repairing: "Repairing result",
+  finalizing: "Finalizing run",
 };
 
 /** Ticks once a second, but only while a turn is actually running. */
@@ -55,15 +66,14 @@ function ReasoningTraceImpl({ block }: { block: ReasoningBlock }): JSX.Element |
   const running = block.endedAt === null;
   const elapsed = useElapsed(block.startedAt, block.endedAt);
 
-  // A turn that settled without reporting a single phase or any reasoning has
-  // nothing to say.
-  if (!running && block.phases.length === 0 && !block.text) return null;
+  // A settled turn without observed phases has no run detail to present. The
+  // provider's reasoning prose is not a substitute for runtime observation.
+  if (!running && block.phases.length === 0) return null;
 
   const current = block.phases[block.phases.length - 1];
   const label = running
-    ? PHASE_LABEL[current?.kind ?? "provider_running"]
-    : `Thought for ${formatDuration(elapsed)}`;
-  const thinking = block.text?.trim() ?? "";
+    ? LIVE_PHASE_LABEL[current?.kind ?? "provider_running"]
+    : `Run details · ${formatDuration(elapsed)}`;
 
   if (running) {
     return (
@@ -77,9 +87,8 @@ function ReasoningTraceImpl({ block }: { block: ReasoningBlock }): JSX.Element |
 
   return (
     <div className="my-1.5">
-      {/* Collapsed by default and set in the quietest text colour the theme
-          has. How long the model thought is context for the answer, not a
-          headline above it. */}
+      {/* Collapsed by default. Runtime timing is useful context for the answer,
+          not a headline above it. */}
       <Button
         variant="bare"
         onClick={() => setExpanded((open) => !open)}
@@ -96,18 +105,6 @@ function ReasoningTraceImpl({ block }: { block: ReasoningBlock }): JSX.Element |
       </Button>
       {expanded ? (
         <div className="mt-1 ml-2 border-l border-subtle pl-3">
-        {/* The model's own words, when the provider returned any. Quiet and
-            slightly inset so it reads as an aside to the answer, not as part
-            of it. */}
-        {thinking ? (
-          <p className="selectable ui-prose mb-2 whitespace-pre-wrap text-tertiary">
-            {thinking}
-          </p>
-        ) : (
-          <p className="ui-meta mb-2 text-tertiary">
-            This model did not expose a reasoning trace.
-          </p>
-        )}
         <ul className="flex flex-col gap-0.5">
           {block.phases.map((phase, index) => {
             const next = block.phases[index + 1];

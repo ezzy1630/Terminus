@@ -22,7 +22,6 @@ function input(overrides: Partial<IntentOnlyRecoveryInput> = {}): IntentOnlyReco
     claims: emptyClaims,
     workspaceMutationObserved: false,
     workspaceMutationAttempted: true,
-    writePaths: ["src"],
     continuationAdmitted: false,
     ...overrides,
   };
@@ -62,10 +61,9 @@ describe("intent-only provider stop recovery", () => {
     }))).toEqual({ kind: "ignore", reason: "evidence_present" });
   });
 
-  test("preserves read-only and question turns with no write scope", () => {
+  test("preserves read-only and question turns even when the task may write", () => {
     expect(decideIntentOnlyRecovery(input({
       workspaceMutationAttempted: false,
-      writePaths: [],
     }))).toEqual({ kind: "ignore", reason: "read_only_turn" });
   });
 
@@ -75,8 +73,8 @@ describe("intent-only provider stop recovery", () => {
     }))).toEqual({ kind: "ignore", reason: "no_pending_required_criteria" });
   });
 
-  test("still catches a denied mutation when the contract omitted write scope", () => {
-    expect(decideIntentOnlyRecovery(input({ writePaths: [] }))).toEqual({
+  test("still catches a denied mutation", () => {
+    expect(decideIntentOnlyRecovery(input())).toEqual({
       kind: "continue",
       reason: "pending_required_criteria_without_workspace_mutation",
       pendingCriterionIds: ["change-made"],

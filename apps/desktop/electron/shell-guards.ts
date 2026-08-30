@@ -9,6 +9,32 @@ export interface WindowBounds {
 
 const PACKAGED_RENDERER_SCHEME = "terminus:";
 const PACKAGED_RENDERER_HOST = "app";
+const LOCAL_CONTROL_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "localhost"]);
+
+/** Admit an explicit loopback HTTP origin for a source-development runtime. */
+export function requireLocalTerminusOrigin(value: string, variable: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${variable} must be a valid URL`);
+  }
+  const port = Number(url.port);
+  if (
+    url.protocol !== "http:"
+    || !LOCAL_CONTROL_HOSTS.has(url.hostname)
+    || url.username.length > 0
+    || url.password.length > 0
+    || url.port.length === 0
+    || !Number.isInteger(port)
+    || port < 1
+    || port > 65_535
+    || url.origin !== value.replace(/\/$/, "")
+  ) {
+    throw new Error(`${variable} must name an explicit loopback Terminus origin`);
+  }
+  return url.origin;
+}
 
 /** Resolve only normalized, relative assets inside the packaged renderer. */
 export function packagedRendererAssetPath(value: unknown): string | null {

@@ -47,10 +47,15 @@ import {
   Workflow,
 } from "lucide-react";
 import { cn } from "../lib/cn";
+import {
+  isKnownPermissionProfile,
+  permissionProfileLabel,
+  resolvePermissionProfile,
+} from "../lib/permission-profiles";
+import { lifecycleLabel } from "../lib/task-lifecycle";
 import { displayLifecycle } from "../lib/turn-activity";
 import {
   useSelectedTask,
-  useSelectedTaskApprovals,
   useSelectedTaskEventHistory,
   useSelectedTaskEvents,
   useTerminusStore,
@@ -58,8 +63,6 @@ import {
 import { deriveProjectTitle, projectUriToPath } from "../lib/projects";
 import { budgetMetrics } from "../lib/task-budget";
 import { deriveSubagentActivity, deriveVerificationActivity, extractUnifiedDiffs } from "../lib/task-surface";
-import { StatusIndicator } from "./StatusIndicator";
-import { MaterialQuestionCard } from "./MaterialQuestionCard";
 import TaskV2Panel from "./TaskV2Panel";
 import { arpV2 } from "../lib/api-v2";
 import { api } from "../lib/api";
@@ -431,9 +434,7 @@ const SandboxSection = memo(function SandboxSection({ profileId }: { profileId: 
       <InspectorDisclosure icon={<ShieldCheck size={ICON_SIZE} />} label="Sandbox" value="Unavailable" tone="warning" urgent>
         <p className="ui-meta text-secondary" role="alert">Sandbox enforcement data is temporarily unavailable.</p>
         <p className="ui-meta mt-1 break-words font-mono">{resource.error}</p>
-        <p className="ui-meta mt-1">
-          No enforcement claim is shown for <span className="font-mono">{profileId}</span>.
-        </p>
+        <p className="ui-meta mt-1">No enforcement claim is shown for the selected access profile.</p>
         <Button
           variant="bare"
           onClick={refreshSandboxReport}
@@ -486,7 +487,7 @@ const SandboxSection = memo(function SandboxSection({ profileId }: { profileId: 
           </div>
           <div className="flex items-center justify-between gap-2">
             <span>Profile</span>
-            <span className="truncate font-mono text-secondary" title={profileId}>{profileId}</span>
+            <span className="truncate text-secondary" title={profileId}>{accessLabel(profileId)}</span>
           </div>
           {report.degraded.length > 0 ? <ReportList label="Degraded controls" entries={report.degraded} /> : null}
           {report.unsupported.length > 0 ? <ReportList label="Unsupported controls" entries={report.unsupported} /> : null}
@@ -520,7 +521,7 @@ interface InspectorProps {
   onShowChanges?: () => void;
 }
 
-type InspectorTab = "run" | "context" | "proof";
+type InspectorTab = "overview" | "environment" | "evidence";
 
 /**
  * Plain-language names for the event stream's lifecycle frames. Anything not
@@ -648,6 +649,14 @@ function NoSelection(): JSX.Element {
   );
 }
 
+function accessLabel(profileId: string): string {
+  if (isKnownPermissionProfile(profileId)) {
+    return permissionProfileLabel(resolvePermissionProfile(profileId));
+  }
+  const words = profileId.trim().replaceAll(/[-_]+/g, " ");
+  return words.length === 0 ? "Configured" : `${words[0]?.toUpperCase() ?? ""}${words.slice(1)}`;
+}
+
 function InspectorImpl({
   className,
   canonicalTaskId = null,
@@ -656,7 +665,6 @@ function InspectorImpl({
   const task = useSelectedTask();
   const events = useSelectedTaskEvents();
   const eventHistory = useSelectedTaskEventHistory();
-  const approvalResource = useSelectedTaskApprovals();
   const sessionId = task?.session_id ?? null;
   // Narrower than subscribing to `sessions`: the panel re-renders only when
   // this session's object identity changes, not on every list refresh.
@@ -665,9 +673,7 @@ function InspectorImpl({
   );
   const eventDerivedStateComplete = eventHistory === null;
   const [copied, setCopied] = useState<"path" | "id" | null>(null);
-  const [activeTab, setActiveTab] = useState<InspectorTab>("context");
-
-  const approvals = approvalResource.approvals;
+  const [activeTab, setActiveTab] = useState<InspectorTab>("overview");
 
   /*
    * One pass over the event tail, not four.
@@ -689,7 +695,6 @@ function InspectorImpl({
       recentEvents: tail.slice(-5).reverse(),
       proposedDiffs: eventDerivedStateComplete ? extractUnifiedDiffs(tail) : [],
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
   }, [eventFingerprint]);
   const { subagents, verification, recentEvents } = derived;
 
@@ -731,8 +736,6 @@ function InspectorImpl({
 
   const blockedByProvider = task.status === "BLOCKED"
     && task.terminal_reason?.reason === "provider_transport_unavailable";
-  const hasEnvironmentRows = changes !== null || workspacePath !== null;
-
   return (
     <div className={cn("flex h-full flex-col overflow-y-auto pb-3", className)}>
       {eventHistory ? (
@@ -749,16 +752,16 @@ function InspectorImpl({
 
       <nav className="flex h-9 shrink-0 items-center gap-1 border-b border-subtle px-2" role="tablist" aria-label="Task inspector views">
         {([
-          ["run", "Run", "Lifecycle, delegation, and effects"],
-          ["context", "Context", "Routing, access, budgets, and cache"],
-          ["proof", "Proof", "Criteria, evidence, and artifacts"],
+          ["overview", "Overview", "Status, changes, verification, and attention"],
+          ["environment", "Environment", "Workspace, model, access, and budget"],
+          ["evidence", "Evidence", "Verification, artifacts, and advanced task details"],
         ] as const).map(([value, label, description]) => (
           <Button
             key={value}
             variant="bare"
             role="tab"
             aria-selected={activeTab === value}
-            title={description}
+            data-tooltip={description}
             onClick={() => setActiveTab(value)}
             className={cn(
               "ui-meta h-7 rounded-md px-2 text-secondary hover:bg-hover hover:text-primary",
@@ -770,33 +773,14 @@ function InspectorImpl({
         ))}
       </nav>
 
-      {/* An unanswered question outranks everything else this panel can say
-          about the task: it is the one thing here that is waiting on the
-          reader. Renders nothing when there is none. */}
-      {activeTab === "run" ? <MaterialQuestionCard taskId={task.id} /> : null}
-
-      {activeTab === "run" ? (
-        <InspectorGroup title="Run">
-          <InspectorRow icon={<Workflow size={ICON_SIZE} />} label="Lifecycle" value={statusKind} />
-          <InspectorRow icon={<Terminal size={ICON_SIZE} />} label="Events" value={`${events.length} recorded`} />
-          {subagents.length > 0 ? (
-            <InspectorRow icon={<UsersRound size={ICON_SIZE} />} label="Delegation" value={`${subagents.length} tracked`} />
-          ) : null}
-        </InspectorGroup>
-      ) : null}
-
-      {/*
-        Environment — the Codex card, minus the rows Terminus has no data or
-        endpoint for. `Changes` is the only one that can act, and it opens the
-        same review surface ⌘D does.
-      */}
-      {activeTab === "context" && hasEnvironmentRows ? (
-        <InspectorGroup title="Environment">
+      {activeTab === "overview" ? (
+        <InspectorGroup title="Overview">
+          <InspectorRow icon={<Workflow size={ICON_SIZE} />} label="Status" value={lifecycleLabel(statusKind)} />
           {changes !== null ? (
             <InspectorRow
               icon={<FileDiff size={ICON_SIZE} />}
               label="Changes"
-              ariaLabel="Open patch review"
+              ariaLabel="Open changes review"
               onClick={onShowChanges}
               title={
                 changes.source === "working_tree"
@@ -805,6 +789,8 @@ function InspectorImpl({
               }
               value={
                 <span className="tabular-nums">
+                  {changes.stats.files} file{changes.stats.files === 1 ? "" : "s"}
+                  <span aria-hidden> · </span>
                   <span className="text-addition">+{changes.stats.additions.toLocaleString()}</span>
                   {" "}
                   <span className="text-deletion">−{changes.stats.deletions.toLocaleString()}</span>
@@ -812,10 +798,31 @@ function InspectorImpl({
               }
             />
           ) : null}
+          {verification.length > 0 ? (
+            <InspectorRow
+              icon={<Workflow size={ICON_SIZE} />}
+              label="Verification"
+              value={`${verification.filter((check) => check.state === "passed").length}/${verification.length} passed`}
+            />
+          ) : null}
+          {subagents.length > 0 ? (
+            <InspectorRow
+              icon={<UsersRound size={ICON_SIZE} />}
+              label="Subagents"
+              value={`${subagents.filter((item) => item.state === "working").length} active`}
+            />
+          ) : null}
+        </InspectorGroup>
+      ) : null}
+
+      {/* Environment contains only the effective workspace and run settings.
+          Protocol records and raw ids live behind Advanced details in Evidence. */}
+      {activeTab === "environment" && workspacePath ? (
+        <InspectorGroup title="Environment">
           {workspacePath ? (
             <InspectorRow
               icon={<Laptop size={ICON_SIZE} />}
-              label="Local"
+              label="Workspace"
               value={copied === "path" ? "Copied" : deriveProjectTitle(workspacePath)}
               ariaLabel="Copy workspace path"
               onClick={() => void copy("path", workspacePath)}
@@ -825,16 +832,7 @@ function InspectorImpl({
         </InspectorGroup>
       ) : null}
 
-      {/*
-        Context — what this task is running as. Model and effort come from the
-        session's defaults, which is what the control plane routes turns with
-        when a turn does not override them; both are optional on the wire, so
-        both rows disappear when unset rather than inventing a default.
-
-        Risk class and contract version are required fields the decoder
-        rejects when absent, so these are measurements, not stand-ins.
-      */}
-      {activeTab === "context" ? <InspectorGroup title="Context">
+      {activeTab === "environment" ? <InspectorGroup title="Run settings">
         {session?.default_model ? (
           <InspectorRow
             icon={<Cpu size={ICON_SIZE} />}
@@ -850,12 +848,10 @@ function InspectorImpl({
           <InspectorRow
             icon={<ShieldAlert size={ICON_SIZE} />}
             label="Access"
-            value={permissionProfileId}
+            value={accessLabel(permissionProfileId)}
             title={permissionProfileId}
           />
         ) : null}
-        <InspectorRow icon={<Workflow size={ICON_SIZE} />} label="Risk" value={task.risk_class} />
-        <InspectorRow icon={<BadgeCheck size={ICON_SIZE} />} label="Contract" value={`v${task.active_contract_version}`} />
         {task.budget_ledger ? budgetMetrics(task.budget_ledger).map((metric) => (
           <InspectorRow
             key={metric.id}
@@ -864,87 +860,11 @@ function InspectorImpl({
             value={metric.detail ? `${metric.value} · ${metric.detail}` : metric.value}
           />
         )) : null}
-        {task.budget_ledger && /^\d+$/.test(task.budget_ledger.cached_input_tokens) ? (
-          <InspectorRow
-            icon={<Boxes size={ICON_SIZE} />}
-            label="Cached input"
-            value={`${task.budget_ledger.cached_input_tokens} tokens`}
-            title="Raw cached input token count reported by the control plane"
-          />
-        ) : null}
-        {/* The id is what a bug report needs and what nothing else on screen
-            shows in full, so the row hands over the whole thing. */}
-        <InspectorRow
-          icon={<Hash size={ICON_SIZE} />}
-          label="Task"
-          value={copied === "id" ? "Copied" : task.id.slice(-8)}
-          ariaLabel="Copy task ID"
-          onClick={() => void copy("id", task.id)}
-          title={task.id}
-        />
         <SandboxSection profileId={permissionProfileId} />
-        <TaskV2Section taskId={task.id} />
       </InspectorGroup> : null}
 
-      {/* Activity — the recent run, plus the two derived lists worth keeping. */}
-      {activeTab === "run" && (recentEvents.length > 0 || subagents.length > 0 || verification.length > 0) ? (
-        <InspectorGroup title="Activity">
-          {subagents.length > 0 ? (
-            <InspectorDisclosure
-              icon={<UsersRound size={ICON_SIZE} />}
-              label="Subagents"
-              value={`${subagents.filter((item) => item.state === "working").length} working, ${subagents.filter((item) => item.state === "done").length} done`}
-            >
-              <ul className="flex flex-col gap-1.5">
-                {subagents.map((subagent) => (
-                  <li key={subagent.id} className="flex items-center gap-2">
-                    <StatusIndicator
-                      status={subagent.state === "working" ? "working" : subagent.state === "failed" ? "failed" : "done"}
-                      size={8}
-                    />
-                    <span className="ui-meta min-w-0 flex-1 truncate text-secondary">{subagent.role}</span>
-                  </li>
-                ))}
-              </ul>
-            </InspectorDisclosure>
-          ) : null}
-          {verification.length > 0 ? (
-            <InspectorDisclosure
-              icon={<Workflow size={ICON_SIZE} />}
-              label="Verification"
-              value={`${verification.filter((check) => check.state === "passed").length}/${verification.length}`}
-              tone={verification.some((check) => check.state === "failed") ? "warning" : "default"}
-              urgent={verification.some((check) => check.state === "failed")}
-            >
-              <ul className="flex flex-col gap-1.5">
-                {verification.slice(-5).reverse().map((check) => (
-                  <li key={check.id} className="flex items-start gap-2">
-                    <StatusIndicator
-                      status={check.state === "passed" ? "done" : check.state === "failed" ? "failed" : "working"}
-                      size={8}
-                    />
-                    <span className="ui-meta min-w-0 flex-1 text-secondary">{check.detail}</span>
-                  </li>
-                ))}
-              </ul>
-            </InspectorDisclosure>
-          ) : null}
-          <ul aria-label="Recent activity">
-            {recentEvents.map((ev: TerminusSseEvent, i) => (
-              <li key={ev.id ?? i}>
-                <InspectorRow
-                  icon={<Terminal size={ICON_SIZE} />}
-                  label={activityLabel(ev.event)}
-                  value={activityDetail(ev)}
-                />
-              </li>
-            ))}
-          </ul>
-        </InspectorGroup>
-      ) : null}
-
-      {activeTab === "proof" ? (
-        <div id="inspector-panel-proof" role="tabpanel" aria-label="Task proof">
+      {activeTab === "evidence" ? (
+        <div id="inspector-panel-evidence" role="tabpanel" aria-label="Task evidence">
           {changes !== null ? (
             <InspectorGroup title="Review">
               <InspectorRow
@@ -958,7 +878,7 @@ function InspectorImpl({
           ) : null}
           <ArtifactsSection taskId={task.id} />
           {verification.length > 0 ? (
-            <InspectorGroup title="Evidence">
+            <InspectorGroup title="Verification">
               <ul>
                 {verification.map((check) => (
                   <li key={check.id}>
@@ -972,26 +892,60 @@ function InspectorImpl({
               </ul>
             </InspectorGroup>
           ) : null}
+          <InspectorGroup title="Advanced">
+            <InspectorDisclosure
+              icon={<Hash size={ICON_SIZE} />}
+              label="Advanced details"
+              value="Protocol and receipts"
+            >
+              <div className="flex flex-col">
+                <InspectorRow icon={<Workflow size={ICON_SIZE} />} label="Risk class" value={task.risk_class} />
+                <InspectorRow icon={<BadgeCheck size={ICON_SIZE} />} label="Contract" value={`v${task.active_contract_version}`} />
+                {permissionProfileId ? (
+                  <InspectorRow icon={<ShieldAlert size={ICON_SIZE} />} label="Access profile" value={permissionProfileId} />
+                ) : null}
+                {task.budget_ledger && /^\d+$/.test(task.budget_ledger.cached_input_tokens) ? (
+                  <InspectorRow
+                    icon={<Boxes size={ICON_SIZE} />}
+                    label="Cached input"
+                    value={`${task.budget_ledger.cached_input_tokens} tokens`}
+                    title="Raw cached input token count reported by the control plane"
+                  />
+                ) : null}
+                <InspectorRow
+                  icon={<Hash size={ICON_SIZE} />}
+                  label="Task ID"
+                  value={copied === "id" ? "Copied" : task.id.slice(-8)}
+                  ariaLabel="Copy task ID"
+                  onClick={() => void copy("id", task.id)}
+                  title={task.id}
+                />
+                <TaskV2Section taskId={task.id} />
+                {recentEvents.length > 0 ? (
+                  <InspectorDisclosure
+                    icon={<Terminal size={ICON_SIZE} />}
+                    label="Recent protocol activity"
+                    value={`${recentEvents.length} shown`}
+                  >
+                    <ul aria-label="Recent protocol activity">
+                      {recentEvents.map((ev: TerminusSseEvent, i) => (
+                        <li key={ev.id ?? i}>
+                          <InspectorRow
+                            icon={<Terminal size={ICON_SIZE} />}
+                            label={activityLabel(ev.event)}
+                            value={activityDetail(ev)}
+                          />
+                        </li>
+                      ))}
+                    </ul>
+                  </InspectorDisclosure>
+                ) : null}
+              </div>
+            </InspectorDisclosure>
+          </InspectorGroup>
         </div>
       ) : null}
 
-      {/* Approvals — the one group that is always open, because it blocks. */}
-      {activeTab === "run" && approvals.length > 0 ? (
-        <InspectorGroup title="Approvals">
-          <ul>
-            {approvals.map((approval) => (
-              <li key={approval.id}>
-                <InspectorRow
-                  icon={<ShieldAlert size={ICON_SIZE} className="text-warning" />}
-                  label={approval.action}
-                  value={approval.risk}
-                  title={approval.reversibility ? `${approval.risk} risk, ${approval.reversibility}` : `${approval.risk} risk`}
-                />
-              </li>
-            ))}
-          </ul>
-        </InspectorGroup>
-      ) : null}
     </div>
   );
 }

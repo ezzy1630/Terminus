@@ -74,7 +74,7 @@ export function buildDefaultCommands(actions: DefaultCommandActions): Command[] 
   // that answer "what needs me" is exactly one place too many.
   push("task.attention", "Go to Needs you", "Task", shortcutDisplay(FIXED_SHORTCUTS.focusQueue), actions.focusQueue, ["needs attention", "queue", "approval", "blocked", "waiting", "unread"]);
   push("project.open", "Open project", "Navigation", shortcutDisplay(FIXED_SHORTCUTS.openProject), actions.openProject, ["workspace", "folder", "onboarding"]);
-  push("nav.mission-board", "Open board", "Navigation", undefined, actions.openMissionBoard, ["kanban", "mission board", "tasks", "work", "status"]);
+  push("nav.mission-board", "Open all tasks", "Navigation", undefined, actions.openMissionBoard, ["kanban", "board", "mission board", "tasks", "work", "status"]);
   push("task.new", "New task", "Task", shortcutDisplay(FIXED_SHORTCUTS.newTask), actions.newTask, ["create task"]);
   push("task.stop", "Stop this run", "Task", shortcutDisplay(FIXED_SHORTCUTS.stopRun), actions.stopRun, ["cancel", "abort", "interrupt", "halt"]);
   push("changes.show", "Show changes", "Changes", shortcutDisplay(FIXED_SHORTCUTS.showChanges), actions.showChanges, ["diff review"]);

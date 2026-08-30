@@ -357,7 +357,7 @@ function responseNonNegativeInteger(value: unknown, what: string): number {
   return value;
 }
 
-const REASONING_EFFORTS = ["low", "medium", "high", "max"] as const;
+const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
 
 /**
  * Fields the control plane may or may not serve yet.

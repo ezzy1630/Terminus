@@ -8,10 +8,9 @@
  * soft rounded input box overlapping it, and one control row inside the box —
  * what may be added on the left, what it will run as on the right.
  *
- * Always-visible controls:
- *   - Effective access level
- *   - Model and reasoning effort
- *   - Send / steer, and Stop while a run is in flight
+ * Always-visible controls are the exact model, Send / steer,
+ * and Stop while a run is in flight. Access is shown on the task-creation
+ * surface; an active thread's Environment details own it thereafter.
  *
  * Per SPEC §10: "Expand vertically within sensible limits" — max
  * 280px spacious / 224px compact (from theme.css).
@@ -41,7 +40,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
-  Clock3,
   FolderOpen,
   Plus,
   RefreshCw,
@@ -80,6 +78,11 @@ import { ModelPicker } from "./ModelPicker";
 import { ProjectMenu } from "./ProjectMenu";
 import { useModelSelection, type ModelSelectionWriter } from "../lib/models";
 import { useModelInventory } from "../hooks/use-model-inventory";
+import {
+  ComposerRunModePicker,
+  type ActiveRunSendMode,
+} from "./ComposerRunModePicker";
+import { QueuedFollowups, type QueuedFollowupState } from "./QueuedFollowups";
 
 /**
  * How long a queued message may wait before this client stops believing its own
@@ -246,12 +249,11 @@ const PermissionProfilePicker = memo(function PermissionProfilePicker({
             ? `Access level · ${raw}`
             : `Access level · not set, running as ${profile}`}
           className={cn(
-            "composer-control flex h-7 min-w-0 items-center gap-1.5 rounded-md px-1.5 text-xs hover:bg-hover",
+            "composer-control flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-xs hover:bg-hover",
             caution ? "text-warning" : "text-secondary hover:text-primary",
           )}
         >
           <ShieldAlert size={13} strokeWidth={1.8} aria-hidden className="shrink-0" />
-          <span className="truncate">{label}</span>
         </Button>
       )}
     />
@@ -366,6 +368,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   const flushingQueueRef = useRef(false);
   /** The queue has been holding this message longer than anyone should wait. */
   const [queueStalled, setQueueStalled] = useState(false);
+  const [activeRunSendMode, setActiveRunSendMode] = useState<ActiveRunSendMode>("after_current");
   const budgetMetric = useMemo(() => primaryBudgetMetric(task?.budget_ledger), [task?.budget_ledger]);
   const budgetDetail = useMemo(
     () => budgetMetrics(task?.budget_ledger)
@@ -420,8 +423,13 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   useEffect(() => {
     setDraftInputError(null);
     setCopyStatus(null);
+    setActiveRunSendMode("after_current");
     textareaRef.current?.focus();
   }, [taskId]);
+
+  useEffect(() => {
+    if (!runIsActive) setActiveRunSendMode("after_current");
+  }, [runIsActive]);
 
   useEffect(() => {
     const focusComposer = (): void => textareaRef.current?.focus();
@@ -697,13 +705,19 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
     } catch (err: unknown) {
       const settled = err instanceof TerminusApiError && err.status === 409;
       if (settled) {
+        if (queuedSteer !== null) {
+          return {
+            ok: false,
+            message: "The turn settled before this correction arrived, and another follow-up is already queued.",
+          };
+        }
         queueSteer(target.id, text);
         void refreshTask(target.id);
         return { ok: true };
       }
       return { ok: false, message: describeTurnFailure(err) };
     }
-  }, [queueSteer, refreshTask]);
+  }, [queueSteer, queuedSteer, refreshTask]);
 
   const onSubmit = async (mode: Extract<ComposerSendMode, "send" | "steer" | "queue">): Promise<void> => {
     setError(null);
@@ -738,6 +752,10 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
       // must not silently turn a queued follow-up into an interruption.
       const activeTurn = task.active_turn ?? null;
       if (runIsActive && mode === "queue") {
+        if (queuedSteer !== null) {
+          setError("One follow-up is already queued. Edit or remove it before adding another.");
+          return;
+        }
         queueSteer(task.id, text);
         clearCurrentDraft();
         return;
@@ -820,7 +838,6 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
     setQueueStalled(false);
     const timer = window.setTimeout(declareStalled, STALLED_STEER_MS - waited);
     return () => window.clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queuedSteer, queuedSteerAt, refreshTask, task?.id, taskTerminal]);
 
   /** Send a stalled queued message as its own turn, on the user's say-so. */
@@ -837,6 +854,41 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
       })
       .finally(() => setSending(false));
   }, [clearQueuedSteer, queuedSteer, submitTurn, task]);
+
+  const editQueuedMessage = useCallback((): void => {
+    if (!task || queuedSteer === null || draftRef.current.trim().length > 0) return;
+    discardPendingDraft();
+    setLocalDraft({ taskId, text: queuedSteer });
+    setDraft(taskId, queuedSteer, "composer");
+    clearQueuedSteer(task.id);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [clearQueuedSteer, discardPendingDraft, queuedSteer, setDraft, task, taskId]);
+
+  /** Deliver the one queued follow-up into the active turn on explicit request. */
+  const steerQueuedNow = useCallback((): void => {
+    const activeTurn = task?.active_turn ?? null;
+    if (!task || !activeTurn || queuedSteer === null || sending) return;
+    const target = task;
+    const text = queuedSteer;
+    setError(null);
+    setSending(true);
+    void api.steerTurn(activeTurn.id, { message: text }, {
+      idempotencyKey: createIdempotencyKey(`steer:${activeTurn.id}:${text.length}`),
+    })
+      .then(() => {
+        clearQueuedSteer(target.id);
+        void refreshTask(target.id);
+      })
+      .catch((cause: unknown) => {
+        // The queued message remains authoritative if the run settled first.
+        if (cause instanceof TerminusApiError && cause.status === 409) {
+          void refreshTask(target.id);
+          return;
+        }
+        setError(describeTurnFailure(cause));
+      })
+      .finally(() => setSending(false));
+  }, [clearQueuedSteer, queuedSteer, refreshTask, sending, task]);
 
   /*
    * Resend a failed turn's prompt, from the Retry button in the transcript.
@@ -886,7 +938,9 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
     if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
     if (matchesShortcut(e, FIXED_SHORTCUTS.sendPlain)) {
       e.preventDefault();
-      void onSubmit(runIsActive ? "queue" : "send");
+      void onSubmit(runIsActive
+        ? activeRunSendMode === "steer_now" ? "steer" : "queue"
+        : "send");
       return;
     }
     if (matchesShortcut(e, FIXED_SHORTCUTS.send)) {
@@ -903,7 +957,9 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
       return { icon: <ArrowUp size={15} strokeWidth={2} />, label: "Create task", mode: "send" };
     }
     if (runIsActive) {
-      return { icon: <Clock3 size={14} strokeWidth={2} />, label: "Queue for the current run", mode: "queue" };
+      return activeRunSendMode === "steer_now"
+        ? { icon: <ArrowUp size={15} strokeWidth={2} />, label: "Steer current turn now", mode: "steer" }
+        : { icon: <ArrowUp size={15} strokeWidth={2} />, label: "Queue for the current run", mode: "queue" };
     }
     switch (sendMode) {
       case "steer":
@@ -933,6 +989,10 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   // to write one to, so the chip stays away rather than claiming a level on
   // behalf of a session that does not exist.
   const showPermission = activeSession !== undefined;
+  const queuedFollowupState: QueuedFollowupState = taskTerminal
+    ? "terminal"
+    : queueStalled ? "stalled" : "queued";
+  const canSteerQueuedNow = runIsActive && task?.active_turn !== null && task?.active_turn !== undefined;
 
   // The start surface always offers the switcher, even with nothing selected —
   // with no project there is no task to create, so "Choose project" is the
@@ -955,7 +1015,9 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   const sendTitle = taskTerminal
     ? "Task is terminal; create a new task to continue"
     : runIsActive
-      ? "Queue after this run · ↵ · Steer now with ⌘↵"
+      ? activeRunSendMode === "steer_now"
+        ? "Steer the current turn now · ↵"
+        : "Queue after this run · ↵ · Steer now with ⌘↵"
       : `${sendButtonContent.label} · ↵`;
 
   return (
@@ -989,6 +1051,24 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
           </div>
         ) : null}
 
+        {queuedSteer !== null && task ? (
+          <QueuedFollowups
+            message={queuedSteer}
+            state={queuedFollowupState}
+            onEdit={editQueuedMessage}
+            editDisabled={draft.trim().length > 0}
+            onRemove={() => clearQueuedSteer(task.id)}
+            {...(taskTerminal
+              ? {}
+              : queueStalled
+                ? { onSendNow: sendQueuedNow }
+                : canSteerQueuedNow
+                  ? { onSendNow: steerQueuedNow }
+                  : {})}
+            sending={sending}
+          />
+        ) : null}
+
         <div
           /* The border lives in .composer-surface, not in a utility: Tailwind's
              utilities layer outranks the components layer, so a `border-default`
@@ -1016,7 +1096,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
             data-gramm="false"
             data-gramm_editor="false"
             className={cn(
-              "selectable ui-prose min-h-11 w-full resize-none bg-transparent px-3.5 pt-3 text-primary placeholder:text-tertiary",
+              "selectable ui-prose min-h-14 w-full resize-none bg-transparent px-3.5 pt-3 text-primary placeholder:text-tertiary",
               "font-sans focus:outline-none",
             )}
             style={{ maxHeight: "var(--composer-max-height)", caretColor: "var(--text-primary)" }}
@@ -1041,7 +1121,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
                 variant="bare"
                 className="h-6 shrink-0 rounded-md px-1.5 text-secondary hover:bg-hover hover:text-primary"
                 onClick={() => window.dispatchEvent(
-                  new CustomEvent("terminus:open-settings", { detail: { category: "agents" } }),
+                  new CustomEvent("terminus:open-settings", { detail: { category: "models" } }),
                 )}
               >
                 Set up models
@@ -1060,10 +1140,10 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
 
           {/* Control row — always visible. Reserved height so metadata
               appearing/disappearing never causes layout shift (SPEC §10). */}
-          <div className="composer-controls flex min-h-9 items-center gap-1 px-2 pb-2">
+          <div className="composer-controls flex min-h-8 items-center gap-1 px-2 pb-1.5">
             {addMenuItems.length > 0 ? <ComposerAddMenu items={addMenuItems} /> : null}
 
-            {showPermission ? (
+            {showPermission && isStartSurface ? (
               <PermissionProfilePicker
                 profile={permissionProfileId}
                 raw={storedPermission}
@@ -1075,6 +1155,13 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
                 Spend moved into the model popover's footer: it is a figure to
                 consult, and the control row is for things that get clicked. */}
             <div className="ml-auto flex items-center gap-1.5">
+              {runIsActive ? (
+                <ComposerRunModePicker
+                  value={activeRunSendMode}
+                  onChange={setActiveRunSendMode}
+                  disabled={sending}
+                />
+              ) : null}
               <ModelPicker
                 selection={modelSelection}
                 {...(budgetMetric ? { meta: `${budgetMetric.label} ${budgetMetric.value}` } : {})}
@@ -1136,64 +1223,6 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
               onClick={() => setError(null)}
               aria-label="Dismiss the error"
               className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
-            >
-              <X size={12} aria-hidden />
-            </Button>
-          </div>
-        ) : null}
-
-        {queuedSteer !== null && task ? (
-          <div
-            role="status"
-            className={cn(
-              "mt-2 flex flex-wrap items-start gap-2 rounded-md border px-2.5 py-1.5 text-xs",
-              taskTerminal ? "border-warning/45 text-warning" : "border-subtle text-secondary",
-            )}
-          >
-            <Clock3 size={12} strokeWidth={1.8} className="mt-0.5 shrink-0" aria-hidden />
-            <span className="min-w-0 flex-1">
-              <span className="font-medium text-primary">
-                {taskTerminal
-                  ? "Not sent — the task finished first."
-                  : queueStalled ? "Still waiting." : "Queued."}
-              </span>{" "}
-              {taskTerminal
-                ? "Put it back in the composer to send it somewhere else."
-                : queueStalled
-                  ? "The run has not released it. Send it as its own turn, or put it back."
-                  : "The run had already ended, so this goes as a new turn."}
-              <span className="mt-0.5 block truncate text-tertiary">{queuedSteer}</span>
-            </span>
-            {!taskTerminal && queueStalled ? (
-              <Button
-                type="button"
-                onClick={sendQueuedNow}
-                disabled={sending}
-                className="font-medium text-primary hover:underline disabled:opacity-50"
-              >
-                Send now
-              </Button>
-            ) : null}
-            {taskTerminal || queueStalled ? (
-              <Button
-                type="button"
-                onClick={() => {
-                  discardPendingDraft();
-                  setLocalDraft({ taskId, text: queuedSteer });
-                  setDraft(taskId, queuedSteer, "composer");
-                  clearQueuedSteer(task.id);
-                  requestAnimationFrame(() => textareaRef.current?.focus());
-                }}
-                className="font-medium text-primary hover:underline"
-              >
-                Put back
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              onClick={() => clearQueuedSteer(task.id)}
-              aria-label="Discard the queued message"
-              className="flex h-5 w-5 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
             >
               <X size={12} aria-hidden />
             </Button>

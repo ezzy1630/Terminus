@@ -108,32 +108,43 @@ describe("the board's status filter", () => {
 });
 
 describe("the inspector's environment section", () => {
-  test("reports the session's own permission profile and nothing invented", async () => {
+  test("keeps the session's raw permission profile in Advanced details", async () => {
     install({ sessions: [session({ default_permission_profile: "secure-local-default" })] });
+    const user = userEvent.setup();
     render(<Inspector />);
 
-    expect(await screen.findByText("secure-local-default")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Environment" }));
+    expect(await screen.findByText("Secure local default")).toBeInTheDocument();
+    expect(screen.queryByText("secure-local-default")).not.toBeInTheDocument();
     expect(screen.queryByText("Local UDS")).not.toBeInTheDocument();
     expect(screen.queryByText("Full access")).not.toBeInTheDocument();
-    // The contract version is the task's, not a default of 1.
+    // Raw protocol values stay available, but only in Advanced details.
+    await user.click(screen.getByRole("tab", { name: "Evidence" }));
+    await user.click(screen.getByRole("button", { name: /Advanced details/ }));
+    expect(screen.getByText("secure-local-default")).toBeInTheDocument();
     expect(screen.getByText("v3")).toBeInTheDocument();
   });
 
-  test("shows the task's own risk class rather than a default of Standard", () => {
+  test("shows the task's own risk class rather than a default of Standard", async () => {
     install({
       taskById: { "task-1": task({ risk_class: "critical" }) },
       tasksBySession: { "session-1": [task({ risk_class: "critical" })] },
     });
+    const user = userEvent.setup();
     render(<Inspector />);
 
+    await user.click(screen.getByRole("tab", { name: "Evidence" }));
+    await user.click(screen.getByRole("button", { name: /Advanced details/ }));
     expect(screen.getByText("critical")).toBeInTheDocument();
     expect(screen.queryByText("Standard")).not.toBeInTheDocument();
   });
 
-  test("omits the permission profile entirely when the session reports none", () => {
+  test("omits the permission profile entirely when the session reports none", async () => {
     install({ sessions: [session()] });
+    const user = userEvent.setup();
     render(<Inspector />);
 
+    await user.click(screen.getByRole("tab", { name: "Environment" }));
     expect(screen.queryByText("Permission profile")).not.toBeInTheDocument();
     expect(screen.queryByText("Full access")).not.toBeInTheDocument();
   });
@@ -152,10 +163,10 @@ describe("the composer with no models", () => {
 });
 
 describe("settings routing", () => {
-  test("a request for providers or models opens the category that holds them", () => {
-    expect(settingsCategoryFor("providers")).toBe("agents");
-    expect(settingsCategoryFor("models")).toBe("agents");
-    expect(settingsCategoryFor("agents")).toBe("agents");
+  test("provider and model requests open their separate categories", () => {
+    expect(settingsCategoryFor("providers")).toBe("accounts");
+    expect(settingsCategoryFor("models")).toBe("models");
+    expect(settingsCategoryFor("agents")).toBe("accounts");
     expect(settingsCategoryFor("shortcuts")).toBe("shortcuts");
     // An unknown id must not silently land on the theme picker without reason.
     expect(settingsCategoryFor(undefined)).toBe("appearance");
@@ -170,7 +181,7 @@ describe("settings routing", () => {
     // The category holds no `settings` rows — its controls are bespoke — and
     // the old filter dropped any category whose rows list came back empty.
     expect(screen.queryByRole("heading", { name: "No matching settings" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Agents/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Accounts" })).toBeInTheDocument();
   });
 
   test("searching for an api key finds it too", async () => {

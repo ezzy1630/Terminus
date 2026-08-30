@@ -571,7 +571,7 @@ export interface SubagentActivity {
 
 export interface VerificationActivity {
   id: string;
-  state: "passed" | "failed" | "running";
+  state: "passed" | "failed" | "running" | "skipped";
   detail: string;
 }
 
@@ -736,11 +736,21 @@ export function deriveVerificationActivity(events: SseEvent[]): VerificationActi
     } else if (event.event === "verification.node_failed") {
       const node = stringField(payload, "node_id", "nodeId") ?? "Verification check";
       const reason = stringField(payload, "reason");
-      activity.push({ id: event.id, state: "failed", detail: reason ? `${node}: ${reason}` : node });
+      const state = stringField(payload, "status")?.toLowerCase() === "skipped" ? "skipped" : "failed";
+      activity.push({ id: event.id, state, detail: reason ? `${node}: ${reason}` : node });
     } else if (event.event === "verification.plan_completed") {
       const status = stringField(payload, "status")?.toLowerCase();
       const passed = payload.passed === true || status === "all_passed" || status === "passed";
-      activity.push({ id: event.id, state: passed ? "passed" : "failed", detail: passed ? "Verification plan passed" : "Verification plan failed" });
+      const skipped = status === "no_runnable_checks";
+      activity.push({
+        id: event.id,
+        state: passed ? "passed" : skipped ? "skipped" : "failed",
+        detail: passed
+          ? "Verification plan passed"
+          : skipped
+            ? "Verification unavailable"
+            : "Verification plan failed",
+      });
     }
   }
   return activity;

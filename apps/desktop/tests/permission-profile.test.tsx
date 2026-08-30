@@ -82,12 +82,12 @@ function task(): Task {
   };
 }
 
-/** Mounts the composer on a task surface against a session with `profile`. */
+/** Mounts the new-thread composer against a session with `profile`. */
 function install(profile?: string): void {
   useTerminusStore.setState({
     sessions: [session(profile === undefined ? {} : { default_permission_profile: profile })],
     selectedSessionId: "session-1",
-    selectedTaskId: "task-1",
+    selectedTaskId: null,
     taskById: { "task-1": task() },
     tasksBySession: { "session-1": [task()] },
     eventsByTask: {},
@@ -99,6 +99,10 @@ function install(profile?: string): void {
     healthReady: true,
     healthStatus: "ready",
   });
+}
+
+function renderAccessComposer(): ReturnType<typeof render> {
+  return render(<Composer onCreateTask={vi.fn(async () => undefined)} />);
 }
 
 function chip(name: RegExp = /^Access level: /): HTMLElement {
@@ -145,14 +149,14 @@ describe("resolving what the session stored", () => {
 describe("the access chip", () => {
   test("defaults to Full workspace access when the project stored nothing", async () => {
     install();
-    render(<Composer />);
+    renderAccessComposer();
     expect(await screen.findByRole("button", { name: "Access level: Full workspace access. Change the access level" }))
       .toBeInTheDocument();
   });
 
   test("shows Full workspace access for the legacy profile, and keeps the raw id in the tooltip", async () => {
     install("secure-local-default");
-    render(<Composer />);
+    renderAccessComposer();
 
     const trigger = await screen.findByRole("button", { name: /^Access level: Full workspace access/ });
     // The label is an interpretation; the tooltip is the receipt for it.
@@ -161,14 +165,14 @@ describe("the access chip", () => {
 
   test("states the level the project actually holds", async () => {
     install("ask");
-    render(<Composer />);
+    renderAccessComposer();
     expect(await screen.findByRole("button", { name: /^Access level: Ask for approval/ })).toBeInTheDocument();
   });
 
   test("offers exactly the three levels, each with what it permits", async () => {
     install("full-access");
     const user = userEvent.setup();
-    render(<Composer />);
+    renderAccessComposer();
 
     await user.click(chip());
     const menu = await screen.findByRole("menu");
@@ -184,7 +188,7 @@ describe("the access chip", () => {
   test("choosing Ask for approval persists it as the project default", async () => {
     install("full-access");
     const user = userEvent.setup();
-    render(<Composer />);
+    renderAccessComposer();
 
     await user.click(chip());
     await user.click(await screen.findByRole("menuitem", { name: /^Ask for approval/ }));
@@ -202,7 +206,7 @@ describe("the access chip", () => {
     install("full-access");
     vi.mocked(api.updateSession).mockRejectedValueOnce(new Error("session is read-only"));
     const user = userEvent.setup();
-    render(<Composer />);
+    renderAccessComposer();
 
     await user.click(chip());
     await user.click(await screen.findByRole("menuitem", { name: /^Auto/ }));

@@ -35,7 +35,7 @@ vi.mock("../src/lib/api", async () => {
       listProviderModels: vi.fn(async () => ({
         providers: [{ id: "anthropic", label: "Anthropic", available: true }],
         models: [
-          { id: "sonnet", provider: "anthropic", label: "Sonnet", slug: "claude-sonnet-4-6", reasoning: true, context_tokens: 200000 },
+          { id: "sonnet", provider: "anthropic", label: "Sonnet", slug: "claude-sonnet-4-6", reasoning: true, context_tokens: 200000, reasoning_efforts: ["low", "medium", "high", "max"], default_reasoning_effort: "medium" },
         ],
       })),
       getProviderConfig: vi.fn(async () => ({ configured: false, configuration: null })),
@@ -105,6 +105,24 @@ function steerNow(): void {
 }
 
 describe("steering a live turn", () => {
+  test("offers an explicit steer-now mode instead of relying on a shortcut", async () => {
+    install(task({ active_turn: { ...RUNNING_TURN } }), [event("turn.started")]);
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    await user.click(screen.getByRole("button", { name: "Send mode: After current turn" }));
+    await user.click(screen.getByRole("menuitem", { name: /Steer current turn now/ }));
+    await user.type(screen.getByRole("textbox", { name: "Message composer" }), "change direction now");
+    await user.click(screen.getByRole("button", { name: "Steer current turn now" }));
+
+    await waitFor(() => expect(api.steerTurn).toHaveBeenCalledWith(
+      "turn-1",
+      { message: "change direction now" },
+      expect.anything(),
+    ));
+    expect(api.startTurn).not.toHaveBeenCalled();
+  });
+
   test("delivers the correction into the run instead of queueing it", async () => {
     install(task({ active_turn: { ...RUNNING_TURN } }), [event("turn.started")]);
     const user = userEvent.setup();
@@ -190,6 +208,35 @@ describe("steering while a run is in flight", () => {
     await waitFor(() => expect(textarea).toHaveValue(""));
   });
 
+  test("draws the one real queued message above the composer and edits it in place", async () => {
+    install(task(), [event("turn.started")]);
+    const user = userEvent.setup();
+    render(<Composer />);
+    useTerminusStore.setState({ queuedSteerByTask: { "task-1": "add the regression test" } });
+
+    const tray = await screen.findByRole("status", { name: "Queued follow-up" });
+    const textarea = screen.getByRole("textbox", { name: "Message composer" });
+    expect(tray.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    expect(textarea).toHaveValue("add the regression test");
+    expect(useTerminusStore.getState().queuedSteerByTask["task-1"]).toBeUndefined();
+  });
+
+  test("does not overwrite the existing queued message", async () => {
+    install(task(), [event("turn.started")]);
+    const user = userEvent.setup();
+    render(<Composer />);
+    useTerminusStore.setState({ queuedSteerByTask: { "task-1": "first follow-up" } });
+
+    await user.type(screen.getByRole("textbox", { name: "Message composer" }), "second follow-up");
+    await user.click(screen.getByRole("button", { name: /Queue for the current run/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("One follow-up is already queued");
+    expect(useTerminusStore.getState().queuedSteerByTask["task-1"]).toBe("first follow-up");
+    expect(screen.getByRole("textbox", { name: "Message composer" })).toHaveValue("second follow-up");
+  });
+
   test("sends the moment the run settles", async () => {
     const running = task();
     install(running, [event("turn.started")]);
@@ -244,7 +291,8 @@ describe("steering while a run is in flight", () => {
     render(<Composer />);
     useTerminusStore.setState({ queuedSteerByTask: { "task-1": "one more thing" } });
 
-    await waitFor(() => expect(screen.getByText("Not sent — the task finished first.")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Not sent.")).toBeInTheDocument());
+    expect(screen.getByText("The task finished before this message could run.")).toBeInTheDocument();
     expect(api.startTurn).not.toHaveBeenCalled();
     // The text is still on screen, recoverable, rather than silently dropped.
     expect(screen.getByText("one more thing")).toBeInTheDocument();
@@ -309,6 +357,37 @@ describe("Stop availability", () => {
     install(task(), [event("turn.started", "1"), event("turn.completed", "2")]);
     render(<Composer />);
     expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+  });
+});
+
+describe("model presentation", () => {
+  test("shows the exact model instead of an opaque control-plane profile", async () => {
+    install(task());
+    useTerminusStore.setState({
+      selectedSessionId: "session-1",
+      sessions: [{
+        id: "session-1",
+        workspace_id: "workspace-1",
+        title: "Terminus",
+        status: "active",
+        active_thread_id: "thread-1",
+        created_at: now,
+        updated_at: now,
+        default_model_profile: "implementer",
+      }],
+    });
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    const trigger = await screen.findByRole("button", { name: /^Change model and effort/ });
+    expect(trigger).toHaveTextContent("Sonnet");
+    expect(trigger).not.toHaveTextContent("Implementer");
+
+    await user.click(trigger);
+    const settings = screen.getByRole("dialog", { name: "Turn settings" });
+    expect(within(settings).queryByText("Run profile")).not.toBeInTheDocument();
+    expect(within(settings).queryByText("Implementer")).not.toBeInTheDocument();
+    expect(within(settings).getByRole("button", { name: /Model: Sonnet/ })).toBeInTheDocument();
   });
 });
 

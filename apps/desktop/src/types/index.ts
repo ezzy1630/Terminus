@@ -332,7 +332,7 @@ export interface CollectionTruncation {
 }
 
 /** Reasoning depth, as the control plane spells it. */
-export type ReasoningEffort = "low" | "medium" | "high" | "max";
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 /**
  * How much a session's tasks may do without stopping to ask.

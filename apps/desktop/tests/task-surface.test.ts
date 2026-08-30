@@ -90,6 +90,17 @@ describe("task surface event projections", () => {
     ]);
   });
 
+  test("projects unavailable verification without claiming failure", () => {
+    const events = [
+      event("1", "verification.node_failed", { node_id: "legacy-skipped", status: "skipped" }),
+      event("2", "verification.plan_completed", { status: "no_runnable_checks" }),
+    ];
+    expect(deriveVerificationActivity(events)).toEqual([
+      { id: "1", state: "skipped", detail: "legacy-skipped" },
+      { id: "2", state: "skipped", detail: "Verification unavailable" },
+    ]);
+  });
+
   test("supports the control plane's snake-case event payloads", () => {
     const events = [
       event("1", "approval.requested", { approval_id: "approval-a", operation_summary: "Apply migration", risk: "critical" }),
