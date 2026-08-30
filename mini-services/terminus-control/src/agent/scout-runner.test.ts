@@ -6,6 +6,7 @@ import {
   resolveScoutEnabled,
   runScoutLoop,
 } from "./scout-runner.js";
+import { InMemoryDelegationStepAccountant } from "./delegation-runner.js";
 
 describe("R10 scout result parsing", () => {
   test("parses the fenced json final block with caps", () => {
@@ -67,11 +68,12 @@ describe("R10 scout loop", () => {
     expect(calls[1]?.length).toBe(4); // + assistant transcript + tool results
   });
 
-  test("write/exec tools are rejected by name inside the loop", async () => {
+  test("write/exec tools fail closed inside the loop", async () => {
     const seen: string[] = [];
     let step = 0;
     const finalJson = "```json\n" + JSON.stringify({ claims: ["done"], files: [], open_questions: [] }) + "\n```";
-    await runScoutLoop({
+    const result = await runScoutLoop({
+      objective: "reject unsafe tool",
       callProvider: async () => {
         step += 1;
         if (step === 1) {
@@ -92,8 +94,47 @@ describe("R10 scout loop", () => {
         return { ok: true, resultText: "ok" };
       },
     });
-    // patch/exec never reach the executor; only the read does.
-    expect(seen).toEqual(["read"]);
+    // No unsafe tool reaches the executor, and a child cannot report success.
+    expect(seen).toEqual([]);
+    expect(result.status).toBe("failed");
+  });
+
+  test("settles every provider step with caller-supplied deterministic ids", async () => {
+    const accountant = new InMemoryDelegationStepAccountant();
+    const result = await runScoutLoop({
+      objective: "Find the login guard",
+      identity: {
+        parentTaskId: "task-1",
+        delegationId: "delegation-1",
+        attemptIdForStep: (step) => `delegation-1-attempt-${step}`,
+      },
+      accountant,
+      callProvider: async () => ({
+        renderedBody: {},
+        projectedText: "```json\n{\"claims\":[\"guard at src/auth.ts:1\"],\"files\":[\"src/auth.ts\"],\"open_questions\":[],\"evidence_refs\":[\"workspace://src/auth.ts\"]}\n```",
+        toolCalls: [],
+        usage: { inputTokens: 10n, outputTokens: 4n, costMicros: 2n },
+      }),
+      executeTool: async () => ({ ok: true, resultText: "unused" }),
+    });
+    expect(result.status).toBe("completed");
+    expect(accountant.starts.map((entry) => entry.attemptId)).toEqual(["delegation-1-attempt-0"]);
+    expect(accountant.settlements.map((entry) => entry.attemptId)).toEqual(["delegation-1-attempt-0"]);
+    expect(result.usage.inputTokens).toBe(10n);
+    expect(result.usage.outputTokens).toBe(4n);
+    expect(result.usage.costMicros).toBe(2n);
+  });
+
+  test("rejects malformed final output instead of returning empty success", async () => {
+    const result = await runScoutLoop({
+      objective: "obj",
+      callProvider: async () => ({ renderedBody: {}, projectedText: "```json\n{\"claims\":[4],\"files\":[],\"open_questions\":[]}\n```", toolCalls: [] }),
+      executeTool: async () => ({ ok: true, resultText: "unused" }),
+      maxSteps: 1,
+    });
+    expect(result.status).toBe("budget_exhausted");
+    expect(result.claims).toEqual([]);
+    expect(result.failureReason).not.toBeNull();
   });
 
   test("budget exhaustion returns the honest status", async () => {

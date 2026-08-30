@@ -19,6 +19,17 @@
  * instead of burning tokens forever.
  */
 
+import {
+  runBoundedDelegation,
+  SCOUT_TOOL_NAMES,
+  ZERO_DELEGATION_USAGE,
+  type DelegationAuthority,
+  type DelegationBudgetLimits,
+  type DelegationIdentity,
+  type DelegationStepAccountant,
+  type DelegationUsage,
+} from "./delegation-runner.js";
+
 export const SCOUT_SYSTEM_PROMPT = [
   "You are a Terminus read-only scout. Fresh context; you see only the objective below.",
   "Mission: locate the exact code relevant to the objective so a separate implementer does not have to search.",
@@ -41,19 +52,31 @@ export interface ScoutStepInput {
   readonly renderedBody: unknown;
   readonly projectedText: string;
   readonly toolCalls: readonly ScoutToolCall[];
+  /** Provider usage for this exact attempt; omitted only for legacy test doubles. */
+  readonly usage?: Partial<DelegationUsage>;
 }
 
 /** One read-only tool dispatch; returns the model-visible result text. */
 export type ScoutToolExecutor = (input: {
   readonly toolName: "read" | "grep" | "glob";
   readonly argumentsJson: string;
+  readonly signal?: AbortSignal | null;
 }) => Promise<{ readonly ok: boolean; readonly resultText: string }>;
 
 export interface ScoutParsedResult {
-  readonly status: "completed" | "budget_exhausted" | "failed";
+  readonly status: "completed" | "budget_exhausted" | "cancelled" | "failed";
   readonly claims: readonly string[];
   readonly files: readonly { readonly path: string; readonly role: string }[];
   readonly openQuestions: readonly string[];
+  readonly evidenceRefs: readonly string[];
+  readonly filesInspected: readonly string[];
+  readonly usage: DelegationUsage;
+  readonly stepReceipts: readonly {
+    readonly step: number;
+    readonly attemptId: string;
+    readonly status: "settled" | "failed" | "cancelled";
+  }[];
+  readonly failureReason: string | null;
 }
 
 const RESULT_JSON_PATTERN = /```json\s*([\s\S]*?)```/;
@@ -65,31 +88,47 @@ export function parseScoutResult(text: string): ScoutParsedResult | null {
     const parsed: unknown = JSON.parse(match[1]!.trim());
     if (typeof parsed !== "object" || parsed === null) return null;
     const record = parsed as Record<string, unknown>;
-    const claims = Array.isArray(record.claims)
-      ? record.claims.filter((c): c is string => typeof c === "string").slice(0, 16)
-      : [];
+    const knownFields = new Set(["claims", "files", "open_questions", "evidence_refs"]);
+    if (Object.keys(record).some((key) => !knownFields.has(key))) return null;
+    if (!Array.isArray(record.claims) || !record.claims.every((claim) => typeof claim === "string")) return null;
+    const claims = record.claims.slice(0, 16) as string[];
+    if (claims.some((claim) => claim.trim() === "")) return null;
     const rawFiles = Array.isArray(record.files) ? record.files : [];
-    const files = rawFiles
-      .map((entry) => {
-        if (typeof entry === "string") return { path: entry.slice(0, 1_024), role: "" };
-        if (typeof entry === "object" && entry !== null) {
-          const rec = entry as Record<string, unknown>;
-          if (typeof rec.path === "string") {
-            return {
-              path: rec.path.slice(0, 1_024),
-              role: typeof rec.role === "string" ? rec.role.slice(0, 256) : "",
-            };
-          }
-        }
-        return null;
-      })
-      .filter((entry): entry is { path: string; role: string } => entry !== null)
-      .slice(0, 32);
-    const openQuestions = Array.isArray(record.open_questions)
-      ? record.open_questions.filter((q): q is string => typeof q === "string").slice(0, 8)
-      : [];
+    if (!rawFiles.every((entry) => typeof entry === "string"
+      || (typeof entry === "object" && entry !== null
+        && typeof (entry as Record<string, unknown>).path === "string"
+        && ((entry as Record<string, unknown>).role === undefined
+          || typeof (entry as Record<string, unknown>).role === "string")))) return null;
+    const files = rawFiles.map((entry) => {
+      if (typeof entry === "string") return { path: entry.slice(0, 1_024), role: "" };
+      const rec = entry as Record<string, unknown>;
+      return {
+        path: (rec.path as string).slice(0, 1_024),
+        role: typeof rec.role === "string" ? rec.role.slice(0, 256) : "",
+      };
+    }).slice(0, 32);
+    if (files.some((file) => file.path.trim() === "")) return null;
+    if (!Array.isArray(record.open_questions)
+      || !record.open_questions.every((question) => typeof question === "string")) return null;
+    const openQuestions = record.open_questions.slice(0, 8) as string[];
+    if (openQuestions.some((question) => question.trim() === "")) return null;
+    if (record.evidence_refs !== undefined
+      && (!Array.isArray(record.evidence_refs)
+        || !record.evidence_refs.every((ref) => typeof ref === "string"))) return null;
+    const evidenceRefs = (record.evidence_refs === undefined ? [] : record.evidence_refs.slice(0, 32)) as string[];
+    if (evidenceRefs.some((ref) => ref.trim() === "")) return null;
     if (claims.length === 0 && files.length === 0) return null;
-    return { status: "completed", claims, files, openQuestions };
+    return {
+      status: "completed",
+      claims,
+      files,
+      openQuestions,
+      evidenceRefs,
+      filesInspected: files.map((file) => file.path),
+      usage: ZERO_DELEGATION_USAGE,
+      stepReceipts: [],
+      failureReason: null,
+    };
   } catch {
     return null;
   }
@@ -107,6 +146,11 @@ export interface ScoutLoopDeps {
   readonly executeTool: ScoutToolExecutor;
   readonly maxSteps?: number;
   readonly signal?: AbortSignal | null;
+  /** Explicit identity and durable accounting for production callers. */
+  readonly identity?: DelegationIdentity;
+  readonly authority?: DelegationAuthority;
+  readonly budget?: Partial<DelegationBudgetLimits>;
+  readonly accountant?: DelegationStepAccountant;
 }
 
 /**
@@ -115,44 +159,74 @@ export interface ScoutLoopDeps {
  * response carries no parsable tool calls or the final JSON block appears.
  */
 export async function runScoutLoop(deps: ScoutLoopDeps): Promise<ScoutParsedResult> {
-  const maxSteps = deps.maxSteps ?? SCOUT_MAX_STEPS_DEFAULT;
-  const transcript: { readonly role: "user" | "assistant"; readonly text: string }[] = [
-    { role: "user", text: SCOUT_SYSTEM_PROMPT },
-    { role: "user", text: deps.objective },
-  ];
-  for (let step = 0; step < maxSteps; step += 1) {
-    if (deps.signal?.aborted === true) break;
-    const stepInput = await deps.callProvider(transcript);
-    const parsed = parseScoutResult(stepInput.projectedText);
-    if (parsed !== null && stepInput.toolCalls.length === 0) return parsed;
-    if (stepInput.toolCalls.length === 0) {
-      // No tools and no parsable final block: one retry with a formatting
-      // demand keeps the child from silently ending empty-handed.
-      transcript.push({ role: "assistant", text: stepInput.projectedText });
-      transcript.push({ role: "user", text: "Reply now with the final ```json``` block." });
-      continue;
-    }
-    const resultParts: string[] = [];
-    for (const call of stepInput.toolCalls) {
-      const toolName = call.toolName === "read" || call.toolName === "grep" || call.toolName === "glob"
-        ? call.toolName
-        : null;
-      if (toolName === null) {
-        resultParts.push(`tool '${call.toolName}' is not available to scouts`);
-        continue;
-      }
-      try {
-        const outcome = await deps.executeTool({ toolName, argumentsJson: call.argumentsJson });
-        resultParts.push(outcome.resultText);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        resultParts.push(`tool ${toolName} failed: ${message.slice(0, 512)}`);
-      }
-    }
-    transcript.push({ role: "assistant", text: stepInput.projectedText });
-    transcript.push({ role: "user", text: resultParts.join("\n\n").slice(0, 48_000) });
+  const identity = deps.identity ?? {
+    parentTaskId: "legacy-scout-parent",
+    delegationId: `legacy-scout:${stableObjectiveId(deps.objective)}`,
+    attemptIdForStep: (step: number) => `legacy-scout:${stableObjectiveId(deps.objective)}:attempt:${step}`,
+  };
+  const authority = deps.authority ?? {
+    allowedTools: SCOUT_TOOL_NAMES,
+    allowedReadPaths: ["**"],
+    allowedWritePaths: [],
+    deniedEffects: ["write", "execute", "external_effect"],
+  } satisfies DelegationAuthority;
+  const budget = {
+    maxSteps: deps.maxSteps ?? SCOUT_MAX_STEPS_DEFAULT,
+    maxTokens: null,
+    maxCostMicros: null,
+    ...deps.budget,
+  } satisfies DelegationBudgetLimits;
+  const loop = await runBoundedDelegation({
+    identity,
+    authority,
+    budget,
+    initialMessages: [
+      { role: "user", text: SCOUT_SYSTEM_PROMPT },
+      { role: "user", text: deps.objective },
+    ],
+    acceptsFinalResponse: (text) => parseScoutResult(text) !== null,
+    ...(deps.accountant === undefined ? {} : { accountant: deps.accountant }),
+    ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+    callProvider: async ({ messages }) => {
+      const response = await deps.callProvider(messages);
+      return {
+        projectedText: response.projectedText,
+        toolCalls: response.toolCalls,
+        ...(response.usage === undefined ? {} : { usage: response.usage }),
+      };
+    },
+    executeTool: async ({ toolName, argumentsJson, signal }) => deps.executeTool({ toolName, argumentsJson, signal }),
+  });
+  const parsed = loop.finalText === null ? null : parseScoutResult(loop.finalText);
+  const receipts = loop.stepReceipts.map(({ step, attemptId, status }) => ({ step, attemptId, status }));
+  if (loop.status !== "completed" || parsed === null) {
+    return {
+      status: loop.status === "completed" ? "failed" : loop.status,
+      claims: [],
+      files: [],
+      openQuestions: [],
+      evidenceRefs: [],
+      filesInspected: [],
+      usage: loop.usage,
+      stepReceipts: receipts,
+      failureReason: loop.failureReason ?? (parsed === null ? "invalid or empty scout result" : null),
+    };
   }
-  return { status: "budget_exhausted", claims: [], files: [], openQuestions: [] };
+  return {
+    ...parsed,
+    usage: loop.usage,
+    stepReceipts: receipts,
+    failureReason: null,
+  };
+}
+
+function stableObjectiveId(objective: string): string {
+  let hash = 2_166_136_261;
+  for (const character of objective) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 // ────────────────────────── utility ledger ──────────────────────────────────
