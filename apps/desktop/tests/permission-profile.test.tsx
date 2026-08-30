@@ -143,18 +143,18 @@ describe("resolving what the session stored", () => {
 });
 
 describe("the access chip", () => {
-  test("defaults to Full access when the project stored nothing", async () => {
+  test("defaults to Full workspace access when the project stored nothing", async () => {
     install();
     render(<Composer />);
-    expect(await screen.findByRole("button", { name: "Access level: Full access. Change the access level" }))
+    expect(await screen.findByRole("button", { name: "Access level: Full workspace access. Change the access level" }))
       .toBeInTheDocument();
   });
 
-  test("shows Full access for the legacy profile, and keeps the raw id in the tooltip", async () => {
+  test("shows Full workspace access for the legacy profile, and keeps the raw id in the tooltip", async () => {
     install("secure-local-default");
     render(<Composer />);
 
-    const trigger = await screen.findByRole("button", { name: /^Access level: Full access/ });
+    const trigger = await screen.findByRole("button", { name: /^Access level: Full workspace access/ });
     // The label is an interpretation; the tooltip is the receipt for it.
     expect(trigger).toHaveAttribute("data-tooltip", "Access level · secure-local-default");
   });
@@ -175,7 +175,7 @@ describe("the access chip", () => {
     const items = within(menu).getAllByRole("menuitem");
     expect(items).toHaveLength(3);
     expect(items.map((item) => item.textContent)).toEqual([
-      "✓Full accessEdits files and runs commands without asking",
+      "✓Full workspace accessRuns commands and edits this workspace without asking; host access stays sandboxed",
       "AutoWorks in the workspace freely; asks before network access",
       "Ask for approvalAsks before every edit, command, or fetch",
     ]);
@@ -209,7 +209,7 @@ describe("the access chip", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("session is read-only");
     // Never left claiming a level the server did not accept.
-    expect(await screen.findByRole("button", { name: /^Access level: Full access/ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /^Access level: Full workspace access/ })).toBeInTheDocument();
   });
 
   test("shows no chip at all when no project is selected", () => {

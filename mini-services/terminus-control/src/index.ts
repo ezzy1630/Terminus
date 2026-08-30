@@ -55,6 +55,11 @@ import {
   type SqliteValue,
 } from "@terminus/task-runtime";
 import { createKernelUdsClients, type KernelUdsClients } from "./kernel-uds.js";
+import {
+  authorizesWorkspaceDevelopment,
+  WHOLE_WORKSPACE_SCOPE_GLOB,
+  WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID,
+} from "./kernel-policy-profiles.js";
 import { canResumeSession } from "./session-lifecycle.js";
 import { CodexLaneEventBuffer } from "./codex-lane-events.js";
 import { createKernelArtifactClient, PrismaContextStore } from "./context-store.js";
@@ -1430,6 +1435,7 @@ interface KernelTaskCapabilityScope {
   readonly workspacePaths?: readonly string[];
   readonly networkDestinations?: readonly string[];
   readonly secretCapabilities?: readonly string[];
+  readonly policyProfileIds?: readonly string[];
 }
 
 const NO_WORKSPACE_EFFECT_SCOPE = [".terminus/capabilities/no-workspace-effect"] as const;
@@ -1596,6 +1602,7 @@ function taskCapabilityCacheKey(scope: KernelTaskCapabilityScope): string {
     workspacePaths: sorted(scope.workspacePaths),
     networkDestinations: sorted(scope.networkDestinations),
     secretCapabilities: sorted(scope.secretCapabilities),
+    policyProfileIds: sorted(scope.policyProfileIds),
   });
 }
 
@@ -1634,6 +1641,7 @@ async function kernelTaskContext(scope: KernelTaskCapabilityScope): Promise<Requ
         workspacePaths: [...(scope.workspacePaths ?? NO_WORKSPACE_EFFECT_SCOPE)],
         networkDestinations: [...(scope.networkDestinations ?? [])],
         secretCapabilities: [...(scope.secretCapabilities ?? [])],
+        policyProfileIds: [...(scope.policyProfileIds ?? [])],
         ttlSeconds: 300,
       });
       if (minted.capabilityToken.length === 0 || minted.expiresAtUnix <= nowUnix) {
@@ -1685,7 +1693,17 @@ async function kernelContextForTask(
   turnId: string,
   operationClasses: readonly CapabilityOperationProto[],
   workspacePaths?: readonly string[],
+  policyProfileIds?: readonly string[],
 ): Promise<RequestContext> {
+  const requestsWorkspaceDevelopment = policyProfileIds?.includes(
+    WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID,
+  ) ?? false;
+  if (
+    requestsWorkspaceDevelopment
+    && !operationClasses.includes(CapabilityOperationProto.CAPABILITY_OPERATION_EXEC)
+  ) {
+    throw new Error("workspace-development policy requires an Exec capability");
+  }
   const task = await db.task.findUnique({
     where: { id: taskId },
     select: {
@@ -1718,6 +1736,12 @@ async function kernelContextForTask(
       throw new Error(`task ${taskId} has no active contract version ${task.activeContractVersion}`);
     }
     const allowedScope = v1AllowedScopeProjection(safeParse<unknown>(contract.allowedScopeJson, {}));
+    if (requestsWorkspaceDevelopment && !authorizesWorkspaceDevelopment(allowedScope)) {
+      throw new TaskScopeError(
+        `task ${taskId} contract must grant whole-workspace read and write scope (`
+        + `${WHOLE_WORKSPACE_SCOPE_GLOB}) before it can authorize arbitrary local commands`,
+      );
+    }
     const writeOnly = operationClasses.includes(CapabilityOperationProto.CAPABILITY_OPERATION_PATCH)
       || operationClasses.includes(CapabilityOperationProto.CAPABILITY_OPERATION_GIT);
     const contractAllowedPaths = writeOnly
@@ -1735,7 +1759,11 @@ async function kernelContextForTask(
         + "the task was created without an allowed_scope and its contract may not expand",
       );
     }
-    if (workspacePaths === undefined) {
+    if (requestsWorkspaceDevelopment) {
+      // The subprocess can traverse the whole mounted workspace regardless
+      // of its initial cwd, so the signed token must state that full scope.
+      boundedWorkspacePaths = [WHOLE_WORKSPACE_SCOPE_GLOB];
+    } else if (workspacePaths === undefined) {
       boundedWorkspacePaths = allowedPaths;
     } else {
       const denied = workspacePaths.find((path) => !allowedPaths.some((pattern) => globMatch(pattern, path)));
@@ -1752,6 +1780,7 @@ async function kernelContextForTask(
     workspaceId: task.session.workspaceId,
     operationClasses,
     workspacePaths: boundedWorkspacePaths,
+    ...(policyProfileIds === undefined ? {} : { policyProfileIds }),
   });
 }
 
@@ -15876,6 +15905,9 @@ async function settleStandaloneProviderTool(
       input.turnId,
       [operationClass],
       workspacePaths,
+      call.toolId === "exec"
+        ? [WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID]
+        : undefined,
     );
   } catch (error: unknown) {
     const explanation = error instanceof Error ? error.message : String(error);

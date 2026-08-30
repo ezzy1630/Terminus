@@ -22,8 +22,14 @@ pub use engine::PolicyEngine;
 pub use error::PolicyError;
 pub use rule::{MatchKind, Rule, RuleEffect, RuleMatch, RuleMatchSet, RuleSet};
 pub use rules_yaml::{
-    default_rule_set, sample_rule_set_yaml, ConstraintFile, RuleEffectFile, RuleFile, RuleSetFile,
+    default_rule_set, sample_rule_set_yaml, workspace_development_rule_set, ConstraintFile,
+    RuleEffectFile, RuleFile, RuleSetFile,
 };
 
 /// Re-export the protocol error code so callers can build typed errors.
 pub use terminus_kernel_protocol::{ErrorCode, KernelError};
+
+/// The fail-closed command policy available to every Exec capability.
+pub const SECURE_LOCAL_DEFAULT_POLICY_PROFILE_ID: &str = "secure-local-default";
+/// The broader local policy available only when named by a signed capability.
+pub const WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID: &str = "workspace-development";

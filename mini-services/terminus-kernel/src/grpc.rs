@@ -481,6 +481,33 @@ fn validate_task_capability_request(
             "ttl_seconds must be between 1 and {MAX_TASK_CAPABILITY_TTL_SECONDS}"
         )));
     }
+    let mut seen_policy_profiles = std::collections::HashSet::new();
+    for policy_profile_id in &request.policy_profile_ids {
+        if !matches!(
+            policy_profile_id.as_str(),
+            terminus_policy::SECURE_LOCAL_DEFAULT_POLICY_PROFILE_ID
+                | terminus_policy::WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID
+        ) {
+            return Err(Status::invalid_argument(format!(
+                "unknown policy_profile_id `{policy_profile_id}`"
+            )));
+        }
+        if !seen_policy_profiles.insert(policy_profile_id) {
+            return Err(Status::invalid_argument(format!(
+                "duplicate policy_profile_id `{policy_profile_id}`"
+            )));
+        }
+    }
+    if request
+        .policy_profile_ids
+        .iter()
+        .any(|profile_id| profile_id == terminus_policy::WORKSPACE_DEVELOPMENT_POLICY_PROFILE_ID)
+        && request.workspace_paths.as_slice() != ["**"]
+    {
+        return Err(Status::invalid_argument(
+            "policy_profile_id `workspace-development` requires workspace_paths to be exactly [`**`]",
+        ));
+    }
     Ok(())
 }
 
@@ -1469,7 +1496,7 @@ impl PolicyServiceRpc for GrpcKernel {
         let token = self
             .kernel
             .token_issuer
-            .mint(
+            .mint_with_policy_profiles(
                 terminus_authz::TokenBinder {
                     principal: request.principal.clone(),
                     session_id: request.session_id.clone(),
@@ -1478,6 +1505,7 @@ impl PolicyServiceRpc for GrpcKernel {
                     kernel_instance_id: String::new(),
                 },
                 operation_classes.clone(),
+                request.policy_profile_ids.clone(),
                 scope,
                 Some(request.ttl_seconds),
                 format!(
@@ -1495,6 +1523,7 @@ impl PolicyServiceRpc for GrpcKernel {
             .iter()
             .map(|operation| operation.as_str())
             .collect::<Vec<_>>();
+        let policy_profile_ids = request.policy_profile_ids.clone();
         tracing::info!(
             target: "terminus_kernel_audit",
             security_event = "task_capability_minted",
@@ -1503,6 +1532,7 @@ impl PolicyServiceRpc for GrpcKernel {
             task_id = %request.task_id,
             workspace_id = %request.workspace_id,
             operations = ?operation_names,
+            policy_profile_ids = ?policy_profile_ids,
             expires_at_unix,
             "issued task-scoped capability"
         );
@@ -4350,6 +4380,7 @@ mod tests {
             network_destinations: Vec::new(),
             secret_capabilities: Vec::new(),
             ttl_seconds: 120,
+            policy_profile_ids: Vec::new(),
         }
     }
 
@@ -4774,6 +4805,23 @@ mod tests {
             120
         );
 
+        let mut profiled =
+            task_capability_request(bootstrap.broker_capability_token.clone(), "control-broker");
+        profiled.policy_profile_ids = vec!["workspace-development".to_string()];
+        profiled.workspace_paths = vec!["**".to_string()];
+        let issued = PolicyServiceRpc::mint_task_capability(&service, Request::new(profiled))
+            .await
+            .expect("broker mints a capability-bound known policy profile")
+            .into_inner();
+        let task_token = kernel
+            .token_issuer
+            .validate(&issued.capability_token)
+            .expect("profiled task capability validates");
+        assert_eq!(
+            task_token.claims.policy_profile_ids,
+            ["workspace-development"]
+        );
+
         let mut wildcard =
             task_capability_request(bootstrap.broker_capability_token.clone(), "control-broker");
         wildcard.task_id = "*".to_string();
@@ -4868,6 +4916,38 @@ mod tests {
             PolicyServiceRpc::mint_task_capability(&service, Request::new(oversized_scope))
                 .await
                 .expect_err("oversized scope must be rejected");
+        assert_eq!(denied.code(), tonic::Code::InvalidArgument);
+
+        let mut unknown_profile =
+            task_capability_request(bootstrap.broker_capability_token.clone(), "control-broker");
+        unknown_profile.policy_profile_ids = vec!["trust-the-caller".to_string()];
+        let denied =
+            PolicyServiceRpc::mint_task_capability(&service, Request::new(unknown_profile))
+                .await
+                .expect_err("unknown policy profiles must be rejected");
+        assert_eq!(denied.code(), tonic::Code::InvalidArgument);
+
+        let mut duplicate_profile =
+            task_capability_request(bootstrap.broker_capability_token.clone(), "control-broker");
+        duplicate_profile.policy_profile_ids = vec![
+            "workspace-development".to_string(),
+            "workspace-development".to_string(),
+        ];
+        let denied =
+            PolicyServiceRpc::mint_task_capability(&service, Request::new(duplicate_profile))
+                .await
+                .expect_err("duplicate policy profiles must be rejected");
+        assert_eq!(denied.code(), tonic::Code::InvalidArgument);
+
+        let mut narrow_development =
+            task_capability_request(bootstrap.broker_capability_token.clone(), "control-broker");
+        narrow_development.policy_profile_ids = vec!["workspace-development".to_string()];
+        let denied = PolicyServiceRpc::mint_task_capability(
+            &service,
+            Request::new(narrow_development),
+        )
+        .await
+        .expect_err("workspace development must require explicit whole-workspace scope");
         assert_eq!(denied.code(), tonic::Code::InvalidArgument);
 
         let mut excessive_ttl =

@@ -121,6 +121,10 @@ pub struct TokenClaims {
     pub expires_at_unix: u64,
     pub binder: TokenBinder,
     pub operation_classes: Vec<OperationClass>,
+    /// Non-default kernel command policy profiles this token may select.
+    /// Empty means the token retains authority only for the secure default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_profile_ids: Vec<String>,
     pub max_scope: Scope,
     pub nonce: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -248,6 +252,19 @@ impl CapabilityToken {
             }
         }
         Ok(())
+    }
+
+    /// Whether this signed token explicitly authorizes a non-default command
+    /// policy. Admin remains the deliberate superuser capability.
+    pub fn allows_policy_profile(&self, policy_profile_id: &str) -> bool {
+        self.claims
+            .operation_classes
+            .contains(&OperationClass::Admin)
+            || self
+                .claims
+                .policy_profile_ids
+                .iter()
+                .any(|candidate| candidate == policy_profile_id)
     }
 }
 
@@ -399,6 +416,12 @@ pub struct TokenIssuer {
     used_nonces: std::sync::Arc<Mutex<HashMap<String, u64>>>,
 }
 
+#[derive(Debug, Default)]
+struct AdditionalTokenBindings {
+    policy_profile_ids: Vec<String>,
+    action_hash: Option<String>,
+}
+
 impl TokenIssuer {
     pub fn new(
         secret: Vec<u8>,
@@ -452,6 +475,31 @@ impl TokenIssuer {
         )
     }
 
+    /// Mint a token that may select the named non-default command policies.
+    /// The broker validates the ids before calling this method; the signed
+    /// claim prevents a downstream caller from widening them.
+    pub fn mint_with_policy_profiles(
+        &self,
+        binder: TokenBinder,
+        operation_classes: Vec<OperationClass>,
+        policy_profile_ids: Vec<String>,
+        max_scope: Scope,
+        ttl_seconds: Option<u64>,
+        nonce: impl Into<String>,
+    ) -> Result<CapabilityToken, AuthzError> {
+        self.mint_with_bindings(
+            binder,
+            operation_classes,
+            max_scope,
+            ttl_seconds,
+            nonce,
+            AdditionalTokenBindings {
+                policy_profile_ids,
+                action_hash: None,
+            },
+        )
+    }
+
     pub fn mint_with_action_hash(
         &self,
         binder: TokenBinder,
@@ -460,6 +508,28 @@ impl TokenIssuer {
         ttl_seconds: Option<u64>,
         nonce: impl Into<String>,
         action_hash: Option<String>,
+    ) -> Result<CapabilityToken, AuthzError> {
+        self.mint_with_bindings(
+            binder,
+            operation_classes,
+            max_scope,
+            ttl_seconds,
+            nonce,
+            AdditionalTokenBindings {
+                policy_profile_ids: Vec::new(),
+                action_hash,
+            },
+        )
+    }
+
+    fn mint_with_bindings(
+        &self,
+        binder: TokenBinder,
+        operation_classes: Vec<OperationClass>,
+        max_scope: Scope,
+        ttl_seconds: Option<u64>,
+        nonce: impl Into<String>,
+        additional: AdditionalTokenBindings,
     ) -> Result<CapabilityToken, AuthzError> {
         let now = system_now_unix()?;
         let ttl = ttl_seconds.unwrap_or(self.default_ttl_seconds);
@@ -478,9 +548,10 @@ impl TokenIssuer {
             expires_at_unix,
             binder,
             operation_classes,
+            policy_profile_ids: additional.policy_profile_ids,
             max_scope,
             nonce: nonce.clone(),
-            action_hash,
+            action_hash: additional.action_hash,
         };
         let canonical = claims.canonical_json()?;
         let mut mac =
@@ -1229,6 +1300,47 @@ mod tests {
             .validate_capability(&encoded, OperationClass::Network, &bad_req)
             .unwrap_err();
         assert!(matches!(err, AuthzError::ScopeExceeded));
+    }
+
+    #[test]
+    fn command_policy_profiles_are_explicit_signed_authority() {
+        let issuer = issuer();
+        let legacy = issuer
+            .mint(
+                TokenBinder::default(),
+                vec![OperationClass::Exec],
+                Scope::default(),
+                None,
+                "policy-legacy",
+            )
+            .unwrap();
+        assert!(!legacy.allows_policy_profile("workspace-development"));
+        let legacy_encoded = legacy.encode().unwrap();
+        let (legacy_claims, _) = legacy_encoded.split_once('.').unwrap();
+        let legacy_json = base64_url_decode(legacy_claims).unwrap();
+        assert!(
+            !String::from_utf8(legacy_json)
+                .unwrap()
+                .contains("policy_profile_ids"),
+            "empty profile authority must retain the pre-field wire shape",
+        );
+        let legacy_validated = issuer.validate(&legacy_encoded).unwrap();
+        assert!(legacy_validated.claims.policy_profile_ids.is_empty());
+
+        let widened = issuer
+            .mint_with_policy_profiles(
+                TokenBinder::default(),
+                vec![OperationClass::Exec],
+                vec!["workspace-development".to_string()],
+                Scope::default(),
+                None,
+                "policy-workspace-development",
+            )
+            .unwrap();
+        let encoded = widened.encode().unwrap();
+        let validated = issuer.validate(&encoded).unwrap();
+        assert!(validated.allows_policy_profile("workspace-development"));
+        assert!(!validated.allows_policy_profile("unreviewed-profile"));
     }
 
     #[test]

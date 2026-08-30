@@ -292,7 +292,7 @@ if [[ "$SCENARIO" == "runtime-eval-smoke" ]]; then
     cd "$ROOT/python"
     TERMINUS_CONTROL_URL="http://127.0.0.1:$CONTROL_PORT" \
     TERMINUS_CONTROL_TOKEN="$TERMINUS_CONTROL_TOKEN" \
-      uv run terminus-eval run \
+      uv run --extra dev terminus-eval run \
         --suite terminus-internal \
         --task build-failure/build-001 \
         --task-dir "$ROOT/python/forge_evals/evals/tasks/build-failure/build-001" \

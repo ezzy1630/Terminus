@@ -69,6 +69,12 @@ describe("permission profiles", () => {
     }
   });
 
+  test("full access names its real sandbox boundary", () => {
+    const profile = describePermissionProfile("full-access");
+    expect(profile.label).toBe("Full workspace access");
+    expect(profile.summary).toContain("host access stays sandboxed");
+  });
+
   test("auto asks only before leaving the workspace", () => {
     expect(approvalRequiredFor("auto", read)).toBe(false);
     expect(approvalRequiredFor("auto", grep)).toBe(false);

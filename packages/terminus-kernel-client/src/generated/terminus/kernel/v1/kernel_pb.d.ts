@@ -2378,6 +2378,13 @@ export declare type MintTaskCapabilityRequest = Message<"terminus.kernel.v1.Mint
    * @generated from field: uint64 ttl_seconds = 10;
    */
   ttlSeconds: bigint;
+
+  /**
+   * Non-default command policies this token may select
+   *
+   * @generated from field: repeated string policy_profile_ids = 11;
+   */
+  policyProfileIds: string[];
 };
 
 /**
