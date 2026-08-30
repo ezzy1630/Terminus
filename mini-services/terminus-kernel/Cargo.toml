@@ -2,7 +2,7 @@
 name = "terminus-kernel-mini"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "LicenseRef-Proprietary"
 description = "Terminus kernel HTTP mini-service (port 3040) — the non-bypassable effect boundary."
 
 # This crate is intentionally NOT a member of the root workspace; it has its

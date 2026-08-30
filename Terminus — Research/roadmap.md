@@ -390,7 +390,7 @@ Become the trusted default substrate and prove leadership.
 
 ### Work
 
-- open-source local runtime/TCB/protocol/evals;
+- proprietary local runtime/TCB/protocol/evals;
 - self-hosting;
 - signed marketplace;
 - enterprise policy packs;

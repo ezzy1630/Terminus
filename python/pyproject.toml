@@ -5,7 +5,7 @@ description = "Terminus offline evaluation and research laboratory (SPEC ยง18, ย
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Terminus" }]
-license = { text = "MIT" }
+license = "LicenseRef-Proprietary"
 dependencies = [
     "polars>=1.0",
     "pyarrow>=15.0",

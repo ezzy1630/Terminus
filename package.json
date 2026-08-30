@@ -2,6 +2,7 @@
   "name": "@terminus/monorepo",
   "version": "0.1.0",
   "private": true,
+  "license": "UNLICENSED",
   "overrides": {
     "defu": "6.1.5",
     "diff": "5.2.2",

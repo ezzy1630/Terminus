@@ -539,7 +539,8 @@ Runbooks at `docs/runbooks/`: database corruption, artifact store inconsistency,
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Proprietary. All rights reserved. See [LICENSE](LICENSE). Third-party
+components remain subject to their own license notices.
 
 ---
 
