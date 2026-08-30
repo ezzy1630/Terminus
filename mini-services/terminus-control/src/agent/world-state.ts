@@ -71,6 +71,11 @@ interface PatchResultShape {
   }>;
 }
 
+interface ToolResultTranscriptShape {
+  readonly protocol?: unknown;
+  readonly result?: unknown;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -84,7 +89,13 @@ export function extractPatchChanges(resultJson: string): readonly WorkspaceChang
     return [];
   }
   if (!isRecord(parsed)) return [];
-  const data = isRecord(parsed.data) ? parsed.data : parsed;
+  // Settled artifacts store the provider-facing transcript wrapper around the
+  // result (`terminus.tool-result.v1`). Older artifacts contain the bare
+  // result envelope. Accept both shapes at this boundary so a bounded context
+  // window cannot erase durable patch observations.
+  const wrapper = parsed as ToolResultTranscriptShape;
+  const envelope = isRecord(wrapper.result) ? wrapper.result : parsed;
+  const data = isRecord(envelope.data) ? envelope.data : envelope;
   const files = (data as PatchResultShape).changed_files;
   if (!Array.isArray(files)) return [];
   const changes: WorkspaceChange[] = [];

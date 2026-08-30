@@ -24,6 +24,27 @@ describe("extractPatchChanges", () => {
     ]);
   });
 
+  test("reads changed files from the canonical tool-result transcript wrapper", () => {
+    const changes = extractPatchChanges(
+      JSON.stringify({
+        protocol: "terminus.tool-result.v1",
+        provider_call_id: "call-1",
+        tool_name: "patch",
+        result: {
+          status: "success",
+          data: {
+            changed_files: [
+              { path: "src/with spaces.ts", old_sha256: "sha256:old", new_sha256: "sha256:new", operation: "EDIT" },
+            ],
+          },
+        },
+      }),
+    );
+    expect(changes).toEqual([
+      { path: "src/with spaces.ts", oldSha256: "sha256:old", newSha256: "sha256:new", operation: "EDIT" },
+    ]);
+  });
+
   test("malformed JSON yields no changes", () => {
     expect(extractPatchChanges("not json")).toEqual([]);
   });

@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
   defaultCriteriaNodes,
   isNotAGitWorkspace,
+  buildDirtyGitWorkspaceRevision,
+  parseGitStatusPorcelain,
   resolveKernelEnvironmentDigest,
+  resolveWorkspaceRevision,
   resolvePredicateCommand,
   WORKSPACE_TREE_HASH_SCRIPT,
 } from "./verification-runtime.js";
@@ -173,5 +176,76 @@ describe("resolveWorkspaceRevision fallback", () => {
     expect(WORKSPACE_TREE_HASH_SCRIPT).toContain('-not -path "./.git/*"');
     expect(WORKSPACE_TREE_HASH_SCRIPT).toContain("LC_ALL=C sort -z");
     expect(WORKSPACE_TREE_HASH_SCRIPT).toContain("shasum -a 256");
+  });
+
+  test("parses NUL-delimited status paths, including spaces and renames", () => {
+    const entries = parseGitStatusPorcelain(" M src/with spaces.ts\0R  renamed.ts\0old name.ts\0?? new file.ts\0");
+    expect(entries).toEqual([
+      { status: " M", path: "src/with spaces.ts", oldPath: null },
+      { status: "R ", path: "renamed.ts", oldPath: "old name.ts" },
+      { status: "??", path: "new file.ts", oldPath: null },
+    ]);
+  });
+
+  test("dirty revision includes status and current content hashes deterministically", () => {
+    const entries = parseGitStatusPorcelain(" D deleted.ts\0 M changed.ts\0?? untracked.ts\0");
+    const hashes = new Map([
+      ["changed.ts", "a".repeat(40)],
+      ["untracked.ts", "b".repeat(40)],
+    ]);
+    const first = buildDirtyGitWorkspaceRevision("a".repeat(40), entries, hashes);
+    const reordered = buildDirtyGitWorkspaceRevision(
+      "a".repeat(40),
+      [...entries].reverse(),
+      hashes,
+    );
+    expect(first).toBe(reordered);
+    expect(first).toMatch(/^git:a{40}:dirty:[0-9a-f]{64}$/);
+    expect(buildDirtyGitWorkspaceRevision("a".repeat(40), entries, new Map([
+      ["changed.ts", "c".repeat(40)],
+      ["untracked.ts", "b".repeat(40)],
+    ]))).not.toBe(first);
+  });
+
+  test("Git revision lookup hashes dirty paths through structured argv", async () => {
+    const calls: Array<{ readonly program: string; readonly args: readonly string[] }> = [];
+    const outputs = [
+      { stdout: `${"a".repeat(40)}\n`, stderr: "", exitCode: 0 },
+      { stdout: " M src/with spaces.ts\0?? new.ts\0", stderr: "", exitCode: 0 },
+      { stdout: `${"b".repeat(40)}\n${"c".repeat(40)}\n`, stderr: "", exitCode: 0 },
+    ];
+    const clients = {
+      process: {
+        Start(request: { readonly command: { readonly program: string; readonly args: readonly string[] } }) {
+          calls.push(request.command);
+          const output = outputs.shift();
+          if (output === undefined) throw new Error("unexpected process call");
+          return {
+            subscribe(observer: { next: (event: unknown) => void }) {
+              const encode = (value: string): Uint8Array => new TextEncoder().encode(value);
+              if (output.stdout.length > 0) observer.next({ stdout: { bytes: encode(output.stdout) } });
+              observer.next({ exited: { exitCode: output.exitCode } });
+              return { unsubscribe: () => undefined };
+            },
+          };
+        },
+      },
+    };
+    const revision = await resolveWorkspaceRevision(
+      clients as unknown as Parameters<typeof resolveWorkspaceRevision>[0],
+      {} as Parameters<typeof resolveWorkspaceRevision>[1],
+      "workspace",
+    );
+    expect(revision).toMatch(/^git:a{40}:dirty:[0-9a-f]{64}$/);
+    expect(calls.map((call) => [call.program, ...call.args])).toEqual([
+      ["git", "rev-parse", "HEAD"],
+      ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      ["git", "hash-object", "--no-filters", "--", "new.ts", "src/with spaces.ts"],
+    ]);
+  });
+
+  test("rejects unbounded or unterminated Git status output", () => {
+    expect(() => parseGitStatusPorcelain(" M file.ts")).toThrow("NUL terminated");
+    expect(() => parseGitStatusPorcelain(`${"x".repeat(512 * 1024)}\0`)).toThrow("bounded workspace revision limit");
   });
 });

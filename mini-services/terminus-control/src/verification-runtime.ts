@@ -154,7 +154,27 @@ export async function resolveWorkspaceRevision(
   const outcome = await runKernelCommand(clients, baseContext, workspaceId, "git", ["rev-parse", "HEAD"], signal ?? null);
   const revision = outcome.stdout.trim();
   if (outcome.exitCode === 0 && /^[0-9a-f]{40,64}$/i.test(revision)) {
-    return `git:${revision}`;
+    const status = await runKernelCommand(
+      clients,
+      baseContext,
+      workspaceId,
+      "git",
+      ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      signal ?? null,
+    );
+    if (status.exitCode !== 0) {
+      throw new Error(`workspace revision could not establish git status: ${status.stderr.trim()}`);
+    }
+    if (status.stdout.length === 0) return `git:${revision}`;
+    const entries = parseGitStatusPorcelain(status.stdout);
+    const pathHashes = await hashChangedGitPaths(
+      clients,
+      baseContext,
+      workspaceId,
+      entries,
+      signal ?? null,
+    );
+    return buildDirtyGitWorkspaceRevision(revision, entries, pathHashes);
   }
   const stderr = outcome.stderr.trim();
   if (!isNotAGitWorkspace(stderr)) {
@@ -184,6 +204,146 @@ export async function resolveWorkspaceRevision(
 /** `git rev-parse` failure text that means "no repository here", not "git broke". */
 export function isNotAGitWorkspace(stderr: string): boolean {
   return /not a git repository|no such file or directory.*\.git|must be run in a work tree/i.test(stderr);
+}
+
+const MAX_GIT_STATUS_BYTES = 512 * 1024;
+const MAX_GIT_STATUS_PATHS = 4_096;
+const MAX_GIT_PATH_BYTES = 8 * 1_024;
+const MAX_GIT_HASH_BATCH_PATHS = 256;
+const MAX_GIT_HASH_BATCH_ARG_BYTES = 32 * 1_024;
+const MAX_GIT_HASH_OUTPUT_BYTES = 64 * 1_024;
+
+export interface GitStatusEntry {
+  readonly status: string;
+  readonly path: string;
+  readonly oldPath: string | null;
+}
+
+/**
+ * Parse `git status --porcelain=v1 -z` without shell quoting. The NUL
+ * framing is important: repository paths may contain spaces, quotes, and
+ * newlines. Rename/copy records carry the old path in the following record.
+ */
+export function parseGitStatusPorcelain(output: string): readonly GitStatusEntry[] {
+  if (new TextEncoder().encode(output).byteLength > MAX_GIT_STATUS_BYTES) {
+    throw new Error("git status output exceeded the bounded workspace revision limit");
+  }
+  if (output.includes("\uFFFD")) {
+    throw new Error("git status output was not valid UTF-8");
+  }
+  if (output.length === 0) return [];
+  if (!output.endsWith("\0")) {
+    throw new Error("git status output was not NUL terminated");
+  }
+  const records = output.slice(0, -1).split("\0");
+  const entries: GitStatusEntry[] = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]!;
+    if (record.length < 4 || record[2] !== " ") {
+      throw new Error("git status output contained a malformed porcelain record");
+    }
+    const status = record.slice(0, 2);
+    const path = record.slice(3);
+    if (path.length === 0 || new TextEncoder().encode(path).byteLength > MAX_GIT_PATH_BYTES) {
+      throw new Error("git status output contained an invalid or oversized path");
+    }
+    const isRenameOrCopy = status.includes("R") || status.includes("C");
+    let oldPath: string | null = null;
+    if (isRenameOrCopy) {
+      const oldRecord = records[index + 1];
+      if (oldRecord === undefined || oldRecord.length === 0) {
+        throw new Error("git status rename/copy record was missing its old path");
+      }
+      if (new TextEncoder().encode(oldRecord).byteLength > MAX_GIT_PATH_BYTES) {
+        throw new Error("git status output contained an oversized rename path");
+      }
+      oldPath = oldRecord;
+      index += 1;
+    }
+    entries.push({ status, path, oldPath });
+    if (entries.length > MAX_GIT_STATUS_PATHS) {
+      throw new Error("git status output exceeded the bounded path limit");
+    }
+  }
+  return entries;
+}
+
+/** Build a stable source identity from Git status and the current bytes. */
+export function buildDirtyGitWorkspaceRevision(
+  headRevision: string,
+  entries: readonly GitStatusEntry[],
+  pathHashes: ReadonlyMap<string, string | null>,
+): string {
+  const normalized = [...entries]
+    .map((entry) => ({
+      status: entry.status,
+      path: entry.path,
+      oldPath: entry.oldPath,
+      sha256: pathHashes.get(entry.path) ?? null,
+    }))
+    .sort((left, right) => {
+      const leftKey = `${left.path}\0${left.oldPath ?? ""}\0${left.status}`;
+      const rightKey = `${right.path}\0${right.oldPath ?? ""}\0${right.status}`;
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+    });
+  const digest = createHash("sha256")
+    .update(canonicalJson({ headRevision, entries: normalized }), "utf8")
+    .digest("hex");
+  return `git:${headRevision}:dirty:${digest}`;
+}
+
+async function hashChangedGitPaths(
+  clients: KernelUdsClients,
+  baseContext: RequestContext,
+  workspaceId: string,
+  entries: readonly GitStatusEntry[],
+  signal: AbortSignal | null,
+): Promise<ReadonlyMap<string, string | null>> {
+  const pathHashes = new Map<string, string | null>();
+  const pathsToHash = new Set<string>();
+  for (const entry of entries) {
+    // A deleted path has no current bytes. For a rename/copy, only the new
+    // path is current; the old path remains part of the status digest.
+    if (!entry.status.includes("D")) {
+      pathsToHash.add(entry.path);
+    }
+    pathHashes.set(entry.path, null);
+  }
+  const paths = [...pathsToHash].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+  for (let offset = 0; offset < paths.length; offset += MAX_GIT_HASH_BATCH_PATHS) {
+    const batch: string[] = [];
+    let batchBytes = 0;
+    for (const path of paths.slice(offset, offset + MAX_GIT_HASH_BATCH_PATHS)) {
+      const pathBytes = new TextEncoder().encode(path).byteLength + 1;
+      if (batch.length > 0 && batchBytes + pathBytes > MAX_GIT_HASH_BATCH_ARG_BYTES) break;
+      batch.push(path);
+      batchBytes += pathBytes;
+    }
+    if (batch.length === 0) {
+      throw new Error("git changed-path hash batch could not fit the bounded argv limit");
+    }
+    const outcome = await runKernelCommand(
+      clients,
+      baseContext,
+      workspaceId,
+      "git",
+      ["hash-object", "--no-filters", "--", ...batch],
+      signal,
+    );
+    if (outcome.exitCode !== 0) {
+      throw new Error(`workspace revision could not hash changed paths: ${outcome.stderr.trim()}`);
+    }
+    if (new TextEncoder().encode(outcome.stdout).byteLength > MAX_GIT_HASH_OUTPUT_BYTES) {
+      throw new Error("git changed-path hash output exceeded the bounded workspace revision limit");
+    }
+    const hashes = outcome.stdout.trim().split(/\r?\n/).filter((hash) => hash.length > 0);
+    if (hashes.length !== batch.length || hashes.some((hash) => !/^[0-9a-f]{40,64}$/i.test(hash))) {
+      throw new Error("git changed-path hash output was malformed or incomplete");
+    }
+    batch.forEach((path, index) => pathHashes.set(path, hashes[index]!));
+    offset += batch.length - 1;
+  }
+  return pathHashes;
 }
 
 /**
