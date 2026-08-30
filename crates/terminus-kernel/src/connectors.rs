@@ -34,18 +34,26 @@ const GATEWAY_TIMEOUT: Duration = Duration::from_secs(120);
 const MODEL_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const MODEL_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
-/// Rate-limit and routing headers Terminus reads back from model providers.
-/// Nothing here can carry credential material.
+/// Rate-limit, routing, and correlation headers Terminus reads back from
+/// model providers. Nothing here can carry credential material, and the
+/// broker denies `authorization`/`set-cookie` outright regardless of what a
+/// descriptor lists. Entries are exact lowercase names or a trailing-`*`
+/// prefix. These are surfaced twice on a streamed dispatch: once in the
+/// leading metadata frame (before the first body byte, so retry pacing and
+/// routing are known immediately) and once on the terminal receipt.
 const MODEL_RESPONSE_HEADERS: &[&str] = &[
     "retry-after",
     "x-ratelimit-*",
     "anthropic-ratelimit-*",
+    "anthropic-organization-id",
     "openai-processing-ms",
+    "request-id",
     "x-request-id",
 ];
 /// Additionally surfaced for the ChatGPT Codex backend: usage windows,
-/// credits, plan type, sticky turn routing, and the catalog ETag.
-const CODEX_RESPONSE_HEADERS: &[&str] = &["x-codex-*", "x-models-etag"];
+/// credits, plan type, sticky turn routing (`x-codex-turn-state`, echoed on
+/// the next request of the same turn), and the model-catalog ETag.
+const CODEX_RESPONSE_HEADERS: &[&str] = &["x-codex-*", "x-models-*"];
 
 /// Hosts admitted regardless of which connectors are registered. `opencode.ai`
 /// is the historical gateway floor; `models.dev` is the model-catalog source
@@ -59,19 +67,48 @@ const ANTHROPIC_API_HOST: &str = "api.anthropic.com";
 const CHATGPT_HOST: &str = "chatgpt.com";
 const OPENAI_AUTH_HOST: &str = "auth.openai.com";
 
-/// Request headers the caller may set on `chatgpt-codex`. `originator` and
-/// `user-agent` are here (not injected) because presenting as the Codex CLI
-/// versus as Terminus is a per-account product decision. `version` is
-/// deliberately absent: the backend treats it as a minimum-version gate.
+/// Request headers the caller may set on `chatgpt-codex`.
+///
+/// This is the "Recommended Terminus header set" from
+/// `Research/ChatGPT_OAuth_And_Codex_Wire_2026-08-28.md` §1.2 — the
+/// Codex-identical subset minus pure telemetry — with `Authorization`
+/// removed because the broker injects it, and `Content-Type`/`Accept`
+/// removed because they are globally admitted.
+///
+/// `originator` and `user-agent` are admitted (not injected) because
+/// presenting as the Codex CLI versus as Terminus is a per-account product
+/// decision. `session-id` is stable per Terminus session, `thread-id` per
+/// thread, and `x-client-request-id` carries the same value as `thread-id`.
+/// `x-codex-turn-state` is echoed back from an earlier response in the same
+/// turn and omitted on the first request.
+///
+/// Deliberately NOT admitted, per the same research pass:
+/// - `version` — a minimum-version GATE, not an identity claim. A stale
+///   value hard-400s ("requires a newer version of Codex") on every backend
+///   rollout; omitting it is ungated.
+/// - `x-oai-attestation` — device attestation Terminus cannot produce.
+/// - `x-codex-routing-hint`, `x-openai-internal-*` — internal routing and
+///   residency controls with no defined contract for third parties.
 const CHATGPT_CODEX_REQUEST_HEADERS: &[&str] = &[
     "chatgpt-account-id",
     "session-id",
+    "thread-id",
     "x-codex-turn-state",
     "x-client-request-id",
     "accept-encoding",
     "originator",
     "user-agent",
 ];
+
+/// Feature-flag headers the caller may set on any model connector.
+///
+/// Anthropic gates Claude 5 features (interleaved thinking, extended
+/// context, tool-search) behind `anthropic-beta`, and OpenAI gates
+/// Responses-API features behind `OpenAI-Beta`. The kernel rejected both,
+/// which made every 2026 provider feature unreachable from the control
+/// plane. Neither header can carry credential material; both are matched
+/// case-insensitively by the broker.
+const MODEL_BETA_REQUEST_HEADERS: &[&str] = &["anthropic-beta", "openai-beta"];
 
 /// Request headers the caller may set on the OpenCode gateway.
 ///
@@ -109,6 +146,7 @@ fn model_descriptor(auth: AuthStyle, hosts: HostPolicy) -> ConnectorDescriptor {
         ))
         .with_bounds(MODEL_MAX_REQUEST_BYTES, MODEL_MAX_RESPONSE_BYTES)
         .with_response_headers(model_response_headers())
+        .with_allowed_request_headers(MODEL_BETA_REQUEST_HEADERS.iter().copied())
         .with_hosts(hosts)
 }
 
@@ -118,10 +156,16 @@ pub fn default_connector_registry() -> Vec<(&'static str, ConnectorDescriptor)> 
     let gateway_hosts = HostPolicy::Fixed(vec![GATEWAY_HOST.to_string()]);
     vec![
         (
+            // Zen is a model transport like any other: it proxies OpenAI- and
+            // Anthropic-family models and returns their pacing headers. With
+            // no response allowlist, `retry-after` and `x-ratelimit-*` were
+            // dropped at the broker and the control plane had to guess its
+            // backoff on every 429.
             "opencode-gateway",
             ConnectorDescriptor::new(AuthStyle::Bearer)
                 .with_timeouts(ConnectorTimeouts::total(GATEWAY_TIMEOUT))
                 .with_hosts(gateway_hosts.clone())
+                .with_response_headers(model_response_headers())
                 .with_allowed_request_headers(OPENCODE_GATEWAY_REQUEST_HEADERS.iter().copied()),
         ),
         (
@@ -129,6 +173,7 @@ pub fn default_connector_registry() -> Vec<(&'static str, ConnectorDescriptor)> 
             ConnectorDescriptor::new(AuthStyle::None)
                 .with_timeouts(ConnectorTimeouts::total(GATEWAY_TIMEOUT))
                 .with_hosts(gateway_hosts)
+                .with_response_headers(model_response_headers())
                 .with_allowed_request_headers(OPENCODE_GATEWAY_REQUEST_HEADERS.iter().copied()),
         ),
         (
@@ -162,7 +207,12 @@ pub fn default_connector_registry() -> Vec<(&'static str, ConnectorDescriptor)> 
                 AuthStyle::Bearer,
                 HostPolicy::Fixed(vec![CHATGPT_HOST.to_string()]),
             )
-            .with_allowed_request_headers(CHATGPT_CODEX_REQUEST_HEADERS.iter().copied())
+            .with_allowed_request_headers(
+                CHATGPT_CODEX_REQUEST_HEADERS
+                    .iter()
+                    .copied()
+                    .chain(MODEL_BETA_REQUEST_HEADERS.iter().copied()),
+            )
             .with_response_headers(codex_response_headers()),
         ),
         (
@@ -403,11 +453,133 @@ mod tests {
                 "missing caller header {header}"
             );
         }
-        for pattern in ["x-codex-*", "x-models-etag", "retry-after"] {
+        // Exactly what the control plane reads back for the Codex dialect:
+        // sticky turn routing, usage windows, the catalog ETag, retry
+        // pacing, rate limits, and request correlation.
+        for pattern in [
+            "x-codex-*",
+            "x-models-*",
+            "retry-after",
+            "x-ratelimit-*",
+            "anthropic-ratelimit-*",
+            "anthropic-organization-id",
+            "request-id",
+            "x-request-id",
+        ] {
             assert!(
                 codex.response_headers.iter().any(|p| p == pattern),
                 "missing response header pattern {pattern}"
             );
+        }
+        // Credential and session material is never surfaced, and no
+        // descriptor may opt into it.
+        for forbidden in ["authorization", "set-cookie", "*"] {
+            assert!(
+                !codex.response_headers.iter().any(|p| p == forbidden),
+                "response allowlist must not carry {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn chatgpt_codex_admits_the_recommended_wire_header_set_and_nothing_else() {
+        // Source of truth: Research/ChatGPT_OAuth_And_Codex_Wire_2026-08-28
+        // §1.2 "Recommended Terminus header set".
+        let codex = descriptor_for("chatgpt-codex");
+        for header in [
+            "chatgpt-account-id",
+            "originator",
+            "user-agent",
+            "session-id",
+            "thread-id",
+            "x-client-request-id",
+            "x-codex-turn-state",
+        ] {
+            assert!(
+                codex.allowed_request_headers.iter().any(|h| h == header),
+                "the Codex dialect cannot send {header}"
+            );
+        }
+        // `Authorization` is broker-injected, `Content-Type`/`Accept` are
+        // globally admitted: none of them belongs in the descriptor.
+        for header in [
+            // A minimum-version GATE, not an identity claim: a stale value
+            // hard-400s on every backend rollout.
+            "version",
+            // Device attestation Terminus cannot produce.
+            "x-oai-attestation",
+            "x-codex-routing-hint",
+            "x-openai-internal-codex-responses-lite",
+            "x-openai-internal-codex-residency",
+            "authorization",
+        ] {
+            assert!(
+                !codex.allowed_request_headers.iter().any(|h| h == header),
+                "{header} must never be caller-settable on chatgpt-codex"
+            );
+        }
+    }
+
+    #[test]
+    fn every_model_connector_admits_the_provider_beta_headers() {
+        // Without these the Claude 5 / GPT-5.6 feature flags are
+        // unreachable: the broker rejected `anthropic-beta` and
+        // `OpenAI-Beta` outright.
+        for id in [
+            "openai-responses",
+            "openai-chat",
+            "anthropic-messages",
+            "chatgpt-codex",
+            "openai-compatible",
+        ] {
+            let descriptor = descriptor_for(id);
+            for header in MODEL_BETA_REQUEST_HEADERS {
+                assert!(
+                    descriptor
+                        .allowed_request_headers
+                        .iter()
+                        .any(|h| h == header),
+                    "{id} must admit {header}"
+                );
+            }
+        }
+        // The credential-free public paths gain nothing from them.
+        for id in ["openai-oauth", "web-fetch"] {
+            let descriptor = descriptor_for(id);
+            assert!(
+                descriptor.allowed_request_headers.is_empty(),
+                "{id} must not widen its caller-header allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn every_model_transport_surfaces_retry_and_rate_limit_headers() {
+        // The Zen gateway descriptors carried no response allowlist at all,
+        // so `retry-after` and `x-ratelimit-*` were dropped at the broker and
+        // the control plane backed off blind on every 429.
+        for id in [
+            "opencode-gateway",
+            "opencode-gateway-anonymous",
+            "openai-responses",
+            "openai-chat",
+            "anthropic-messages",
+            "chatgpt-codex",
+            "openai-compatible",
+        ] {
+            let descriptor = descriptor_for(id);
+            for pattern in MODEL_RESPONSE_HEADERS {
+                assert!(
+                    descriptor.response_headers.iter().any(|p| p == pattern),
+                    "{id} must surface {pattern}"
+                );
+            }
+            for forbidden in ["authorization", "set-cookie", "cookie", "*"] {
+                assert!(
+                    !descriptor.response_headers.iter().any(|p| p == forbidden),
+                    "{id} must not surface {forbidden}"
+                );
+            }
         }
     }
 

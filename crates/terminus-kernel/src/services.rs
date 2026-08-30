@@ -175,18 +175,60 @@ impl KernelHandle {
         };
         let sandbox_manager = Arc::new(sandbox_manager);
         let secret_broker = Arc::new(SecretBroker::new());
-        secret_broker.register_writable_provider(
-            "opencode",
-            Arc::new(terminus_secrets::KeyringSecretProvider::new()),
-        );
+        // Which credential store backs both namespaces. `keychain` is the
+        // default and the only backend a packaged build may use; `file`
+        // exists so a dev machine whose ad-hoc-signed kernel changes code
+        // identity on every rebuild — and therefore gets an OS approval
+        // prompt on every keychain read — can still run.
+        let secret_backend = terminus_secrets::SecretBackend::from_env()
+            .map_err(|error| KernelAssemblyError::Misconfigured(error.to_string()))?;
         // Connected provider accounts live in their own namespace and their
-        // own OS keychain service: `secret://provider-account/<uuid-v7>`.
-        // The legacy namespace above stays registered for the migration
-        // window; the two can never resolve to the same keychain entry.
-        secret_broker.register_writable_provider(
-            "provider-account",
-            Arc::new(terminus_secrets::KeyringSecretProvider::for_provider_accounts()),
-        );
+        // own store namespace: `secret://provider-account/<uuid-v7>`. The
+        // legacy gateway namespace stays registered for the migration
+        // window; the two can never resolve to the same entry.
+        match secret_backend {
+            terminus_secrets::SecretBackend::Keychain => {
+                secret_broker.register_writable_provider(
+                    "opencode",
+                    Arc::new(terminus_secrets::KeyringSecretProvider::new()),
+                );
+                secret_broker.register_writable_provider(
+                    "provider-account",
+                    Arc::new(terminus_secrets::KeyringSecretProvider::for_provider_accounts()),
+                );
+                tracing::info!(
+                    backend = terminus_secrets::SecretBackend::Keychain.as_str(),
+                    "secret backend selected"
+                );
+            }
+            terminus_secrets::SecretBackend::File => {
+                let secrets_root = data_dir.join("secrets");
+                let open = |namespace| {
+                    terminus_secrets::FileSecretProvider::open(&secrets_root, namespace).map_err(
+                        |error| {
+                            KernelAssemblyError::Misconfigured(format!(
+                                "file secret backend unavailable: {error}"
+                            ))
+                        },
+                    )
+                };
+                secret_broker.register_writable_provider(
+                    "opencode",
+                    Arc::new(open(terminus_secrets::SecretNamespace::Gateway)?),
+                );
+                secret_broker.register_writable_provider(
+                    "provider-account",
+                    Arc::new(open(terminus_secrets::SecretNamespace::ProviderAccount)?),
+                );
+                // The directory is logged (it is a container path an operator
+                // needs); the account file names are not.
+                tracing::info!(
+                    backend = terminus_secrets::SecretBackend::File.as_str(),
+                    root = %secrets_root.display(),
+                    "secret backend selected (development only)"
+                );
+            }
+        }
         // SPEC §36.6: the capability-signing key must never be a known
         // constant — anyone who reads the public source could otherwise forge
         // admin tokens (HMAC-SHA256 with a public key). When the operator does
@@ -603,6 +645,15 @@ pub fn validate_request_pipeline(
 
 // ---------- KernelInfoService ----------
 
+/// Which build produced this kernel: the git commit of the enclosing
+/// checkout, or `<version>+src.<content hash>` when built outside one.
+/// Resolved at compile time by `build.rs`, which never fails a build.
+///
+/// This is the identity an audit record, a bug report, or the control plane's
+/// health endpoint uses to say WHICH kernel performed an effect. It was
+/// previously the literal placeholder `"dev"`, which identified nothing.
+const BUILD_REVISION: &str = env!("TERMINUS_BUILD_REVISION");
+
 #[derive(Debug, Clone, Default)]
 pub struct KernelInfoService {
     instance_id: String,
@@ -619,11 +670,18 @@ impl KernelInfoService {
         &self.instance_id
     }
 
+    /// Build identity, stable for the lifetime of the binary. Distinct from
+    /// [`Self::instance_id`], which is a fresh uuid per process start.
+    pub fn build_revision(&self) -> &'static str {
+        BUILD_REVISION
+    }
+
     pub fn info(&self) -> serde_json::Value {
         serde_json::json!({
             "instance_id": self.instance_id,
             "implementation": "terminus-kernel-rs",
             "version": env!("CARGO_PKG_VERSION"),
+            "build_revision": BUILD_REVISION,
             "services": [
                 "KernelInfoService", "WorkspaceService", "FileService", "PatchService",
                 "ProcessService", "JobService", "SandboxService", "PolicyService",
@@ -639,6 +697,57 @@ impl KernelInfoService {
             "status": "ok",
             "instance_id": self.instance_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod kernel_info_tests {
+    use super::{KernelInfoService, BUILD_REVISION};
+
+    #[test]
+    fn build_revision_identifies_a_real_build_not_the_dev_placeholder() {
+        let info = KernelInfoService::new();
+        let revision = info.build_revision();
+        assert!(!revision.is_empty(), "build revision must not be empty");
+        assert_ne!(
+            revision, "dev",
+            "build revision must identify a build, not the historical placeholder"
+        );
+        assert!(
+            !revision.chars().any(char::is_control),
+            "build revision must be a single clean line: {revision:?}"
+        );
+
+        // Whatever `build.rs` resolved, it is one of the two documented
+        // shapes: a git object id, or `<version>+src.<content hash>`.
+        let is_git_sha = revision.len() >= 7
+            && revision.len() <= 64
+            && revision.chars().all(|c| c.is_ascii_hexdigit());
+        let is_source_fingerprint = revision.contains("+src.");
+        assert!(
+            is_git_sha || is_source_fingerprint,
+            "unexpected build revision shape: {revision:?}"
+        );
+
+        // The JSON surface the transports read is the same value.
+        let value = info.info();
+        assert_eq!(value["build_revision"], serde_json::json!(BUILD_REVISION));
+        assert_eq!(
+            value["version"],
+            serde_json::json!(env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn build_revision_is_stable_while_instance_id_is_per_start() {
+        let first = KernelInfoService::new();
+        let second = KernelInfoService::new();
+        assert_eq!(first.build_revision(), second.build_revision());
+        assert_ne!(
+            first.instance_id(),
+            second.instance_id(),
+            "instance_id stays a per-start uuid"
+        );
     }
 }
 
@@ -1584,11 +1693,12 @@ fn resolve_sandbox_profile(profile_id: &str) -> KernelResult<SandboxProfile> {
         "degraded-local" => {
             let mut profile = SandboxProfile::default_restrictive();
             profile.id = profile_id.to_string();
-            for rule in &mut profile.filesystem {
-                if rule.path == "workspace://.git" {
-                    rule.access = terminus_sandbox::FilesystemAccess::ReadOnly;
-                }
-            }
+            // No enforcing backend stands behind this profile, so the
+            // protective overlays are all it has. Re-assert them rather than
+            // trusting the default: this arm used to hand-match the path
+            // `workspace://.git`, and when the rule set changed shape that
+            // match silently became a no-op.
+            profile.enforce_workspace_overlays();
             Ok(profile)
         }
         "proxy-required" => {
@@ -1606,19 +1716,55 @@ fn resolve_sandbox_profile(profile_id: &str) -> KernelResult<SandboxProfile> {
     }
 }
 
+/// Per-workspace scratch directory handed to the payload as `TMPDIR`.
+///
+/// Neither `/tmp` nor the darwin per-user temp directory is writable under
+/// the generated Seatbelt profile (deliberately — both are shared with the
+/// rest of the machine and a write there is a workspace escape), so the
+/// kernel provisions one directory per workspace instead. The name is
+/// derived from the canonical root so repeated execs in the same workspace
+/// reuse it and two workspaces never collide.
+fn workspace_scratch_dir(canonical_root: &std::path::Path) -> Option<PathBuf> {
+    let mut hasher = Sha256::new();
+    hasher.update(canonical_root.as_os_str().as_encoded_bytes());
+    let digest = hex::encode(hasher.finalize());
+    let dir = std::env::temp_dir().join(format!(
+        "{}{}",
+        terminus_sandbox::SCRATCH_DIR_PREFIX,
+        &digest[..16]
+    ));
+    std::fs::create_dir_all(&dir).ok()?;
+    // Seatbelt and bwrap both match on the RESOLVED path (`/var/folders/…`
+    // is a symlink to `/private/var/folders/…` on macOS), so the rule has to
+    // carry the canonical spelling or the allowance never fires.
+    Some(std::fs::canonicalize(&dir).unwrap_or(dir))
+}
+
 fn materialize_workspace_profile(
     mut profile: SandboxProfile,
     workspace_root: &std::path::Path,
 ) -> SandboxProfile {
+    // Canonicalize FIRST. A symlinked root — `/var/folders/…` on macOS,
+    // `/tmp` inside a container, any developer checkout reached through a
+    // symlink — otherwise produces allowances for a path the sandbox never
+    // sees, and every write inside the workspace fails with EPERM.
+    let canonical_root =
+        std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     for rule in &mut profile.filesystem {
         let Some(relative) = rule.path.strip_prefix("workspace://") else {
             continue;
         };
         rule.path = if relative.is_empty() {
-            workspace_root.display().to_string()
+            canonical_root.display().to_string()
         } else {
-            workspace_root.join(relative).display().to_string()
+            canonical_root.join(relative).display().to_string()
         };
+    }
+    if let Some(scratch) = workspace_scratch_dir(&canonical_root) {
+        profile.filesystem.push(terminus_sandbox::FilesystemRule {
+            path: scratch.display().to_string(),
+            access: terminus_sandbox::FilesystemAccess::ReadWrite,
+        });
     }
     profile
 }
@@ -1645,8 +1791,84 @@ mod sandbox_profile_tests {
     }
 
     #[test]
+    fn the_degraded_profile_still_carries_every_protective_overlay() {
+        // This arm previously looped over `workspace://.git`, a path the rule
+        // set no longer contains, so it protected nothing at all.
+        let profile = resolve_sandbox_profile("degraded-local").expect("degraded profile resolves");
+        assert_eq!(profile.id, "degraded-local");
+        for path in terminus_sandbox::PROTECTED_GIT_OVERLAYS {
+            let rule = profile.filesystem.iter().find(|r| r.path == *path);
+            assert!(rule.is_some(), "degraded-local lost the overlay {path}");
+            assert_eq!(
+                rule.expect("presence asserted above").access,
+                terminus_sandbox::FilesystemAccess::ReadOnly,
+                "{path} must stay readable but never writable"
+            );
+        }
+        for path in terminus_sandbox::DENIED_WORKSPACE_OVERLAYS {
+            let rule = profile.filesystem.iter().find(|r| r.path == *path);
+            assert!(
+                rule.is_some(),
+                "degraded-local lost the deny overlay {path}"
+            );
+            assert_eq!(
+                rule.expect("presence asserted above").access,
+                terminus_sandbox::FilesystemAccess::Deny,
+                "{path} must be fully denied"
+            );
+        }
+        // The workspace root itself stays writable in degraded mode.
+        assert!(profile.filesystem.iter().any(|r| r.path == "workspace://"
+            && r.access == terminus_sandbox::FilesystemAccess::ReadWrite));
+    }
+
+    #[test]
     fn unknown_profile_is_rejected() {
         assert!(resolve_sandbox_profile("unknown-profile").is_err());
+    }
+
+    #[test]
+    fn exec_timeouts_follow_the_request_instead_of_a_flat_sixty_seconds() {
+        let limits = resolve_sandbox_profile("default-restrictive")
+            .expect("profile")
+            .resources;
+        let foreground = |requested| {
+            let requested =
+                std::cmp::min(requested, terminus_sandbox::MAX_FOREGROUND_WALL_CLOCK_MS);
+            terminus_sandbox::resolve_exec_timeout_ms(
+                requested,
+                &limits,
+                terminus_sandbox::MAX_BACKGROUND_WALL_CLOCK_MS,
+            )
+        };
+        // No caller timeout at all ⇒ the 60 s profile default.
+        assert_eq!(foreground(0), 60_000);
+        // A real test suite asks for minutes and gets them.
+        assert_eq!(foreground(120_000), 120_000);
+        assert_eq!(foreground(600_000), 600_000);
+        // Foreground ceiling: 10 minutes.
+        assert_eq!(
+            foreground(3_600_000),
+            terminus_sandbox::MAX_FOREGROUND_WALL_CLOCK_MS
+        );
+        // Background jobs reach the shared implementation directly and get
+        // the 30-minute kernel ceiling.
+        assert_eq!(
+            terminus_sandbox::resolve_exec_timeout_ms(
+                1_500_000,
+                &limits,
+                terminus_sandbox::MAX_BACKGROUND_WALL_CLOCK_MS
+            ),
+            1_500_000
+        );
+        assert_eq!(
+            terminus_sandbox::resolve_exec_timeout_ms(
+                u64::MAX,
+                &limits,
+                terminus_sandbox::MAX_BACKGROUND_WALL_CLOCK_MS
+            ),
+            terminus_sandbox::MAX_BACKGROUND_WALL_CLOCK_MS
+        );
     }
 
     #[test]
@@ -1656,12 +1878,76 @@ mod sandbox_profile_tests {
         let profile = resolve_sandbox_profile("secure-local-default")
             .map(|profile| materialize_workspace_profile(profile, &workspace_root));
         let expected_root = workspace_root.display().to_string();
-        let expected_git = workspace_root.join(".git").display().to_string();
+        let expected_hooks = workspace_root.join(".git/hooks").display().to_string();
         assert!(matches!(profile, Ok(profile) if
             profile.filesystem.iter().any(|rule| rule.path == expected_root)
-                && profile.filesystem.iter().any(|rule| rule.path == expected_git)
+                && profile.filesystem.iter().any(|rule| rule.path == expected_hooks)
                 && profile.filesystem.iter().all(|rule| !rule.path.starts_with("workspace://"))
         ));
+    }
+
+    #[test]
+    fn workspace_root_is_writable_and_carries_a_scratch_directory() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let profile = materialize_workspace_profile(
+            resolve_sandbox_profile("secure-local-default").expect("profile"),
+            workspace.path(),
+        );
+        let canonical = std::fs::canonicalize(workspace.path()).expect("canonical");
+        let root_rule = profile
+            .filesystem
+            .iter()
+            .find(|rule| rule.path == canonical.display().to_string())
+            .expect("workspace root rule");
+        assert_eq!(
+            root_rule.access,
+            terminus_sandbox::FilesystemAccess::ReadWrite,
+            "an agent that cannot write its own checkout cannot do anything"
+        );
+        let scratch = profile.scratch_dir().expect("scratch directory");
+        assert!(
+            std::path::Path::new(scratch).is_dir(),
+            "the scratch directory must exist before the payload starts"
+        );
+        assert!(scratch.contains(terminus_sandbox::SCRATCH_DIR_PREFIX));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_workspace_roots_are_canonicalized() {
+        // A symlinked root (`/var/folders/…` on macOS, or any developer
+        // checkout reached through a symlink) used to void every Seatbelt
+        // allowance: the profile named the link, the kernel enforced on the
+        // target, and every write inside the workspace returned EPERM.
+        let parent = tempfile::tempdir().expect("parent");
+        let real = std::fs::canonicalize(parent.path())
+            .expect("canonical parent")
+            .join("real-workspace");
+        std::fs::create_dir_all(&real).expect("real workspace");
+        let link = parent.path().join("linked-workspace");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let profile = materialize_workspace_profile(
+            resolve_sandbox_profile("secure-local-default").expect("profile"),
+            &link,
+        );
+        let expected = real.display().to_string();
+        assert!(
+            profile.filesystem.iter().any(|rule| rule.path == expected),
+            "expected a rule for the resolved root {expected}, got {:?}",
+            profile
+                .filesystem
+                .iter()
+                .map(|rule| rule.path.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !profile
+                .filesystem
+                .iter()
+                .any(|rule| rule.path == link.display().to_string()),
+            "the symlink spelling must not survive materialization"
+        );
     }
 }
 
@@ -1950,9 +2236,16 @@ impl ProcessService {
         &self,
         ctx: &RequestContext,
         intent: &EffectIntent,
-        command: CommandSpec,
+        mut command: CommandSpec,
         sandbox_profile_id: &str,
     ) -> KernelResult<tokio::sync::mpsc::Receiver<ProcessEvent>> {
+        // Foreground ceiling. A durable background job reaches
+        // `start_in_profile_with_outcome` through `JobService::start` and is
+        // bounded by the 30-minute kernel ceiling instead; an interactive
+        // exec must not be able to hold a turn open that long.
+        if command.timeout_ms > terminus_sandbox::MAX_FOREGROUND_WALL_CLOCK_MS {
+            command.timeout_ms = terminus_sandbox::MAX_FOREGROUND_WALL_CLOCK_MS;
+        }
         self.start_in_profile_with_outcome(ctx, intent, command, sandbox_profile_id)
             .await
             .map(|(_, receiver)| receiver)
@@ -2307,15 +2600,21 @@ impl ProcessService {
             EnforcementStatus::Enforced => {}
         }
 
-        // §31.3 step 9: reserve budgets and resource limits. Cap the
-        // timeout at the tightest of: the requested timeout, the policy
-        // constraint, and the sandbox profile's wall-clock limit. Emit a
-        // budget_reserved audit event.
-        if let Some(wall) = profile.resources.wall_clock_ms {
-            if wall > 0 && (spawn.timeout_ms == 0 || wall < spawn.timeout_ms) {
-                spawn.timeout_ms = wall;
-            }
-        }
+        // §31.3 step 9: reserve budgets and resource limits.
+        //
+        // The profile's `wall_clock_ms` is the DEFAULT for a caller that
+        // sends none — it used to be applied as a cap, which silently clamped
+        // every exec to 60 s and made `cargo test`, `bun run test` and
+        // `pytest` impossible to run to completion. `spawn.timeout_ms` has
+        // already been narrowed by any policy `max_runtime_ms` constraint
+        // above; this applies the profile default and the absolute kernel
+        // ceiling (30 min). Foreground execs were additionally bounded to
+        // 10 min by `start_in_profile`.
+        spawn.timeout_ms = terminus_sandbox::resolve_exec_timeout_ms(
+            spawn.timeout_ms,
+            &profile.resources,
+            terminus_sandbox::MAX_BACKGROUND_WALL_CLOCK_MS,
+        );
         tracing::info!(
             target: "terminus_kernel_audit",
             event = "budget_reserved",
@@ -2379,26 +2678,29 @@ impl ProcessService {
                     ActiveEgressBroker::guest_socket_path(),
                 );
                 process_manager
-                    .spawn_wrapped_with_lease(
+                    .spawn_wrapped_with_lease_for_task(
                         wrapper_bin,
                         wrapper_argv,
                         spawn,
                         broker.into_spawn_lease(),
+                        ctx.task_id.clone(),
                     )
                     .await
             } else {
                 process_manager
-                    .spawn_wrapped(wrapper_bin, wrapper_argv, spawn)
+                    .spawn_wrapped_for_task(wrapper_bin, wrapper_argv, spawn, ctx.task_id.clone())
                     .await
             }
             #[cfg(not(unix))]
             {
                 process_manager
-                    .spawn_wrapped(wrapper_bin, wrapper_argv, spawn)
+                    .spawn_wrapped_for_task(wrapper_bin, wrapper_argv, spawn, ctx.task_id.clone())
                     .await
             }
         } else {
-            process_manager.spawn(spawn).await
+            process_manager
+                .spawn_for_task(spawn, ctx.task_id.clone())
+                .await
         }
         .map_err(|e| {
             KernelError::new(
@@ -2440,6 +2742,19 @@ impl ProcessService {
             OperationClass::Exec,
             &Scope::default(),
         )?;
+        let owner_task_id = self
+            .process
+            .owner_task_id(process_id)
+            .await
+            .ok_or_else(|| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::ProcessNotFound,
+                    terminus_kernel_protocol::ErrorCategory::NotFound,
+                    format!("process {process_id} has no live ownership record"),
+                    false,
+                )
+            })?;
+        authorize_process_task(&ctx.task_id, &owner_task_id)?;
         // §31.3 step 10: persist AUTHORIZED state.
         tracing::info!(
             target: "terminus_kernel_audit",
@@ -2460,6 +2775,32 @@ impl ProcessService {
                 false,
             )
         })
+    }
+}
+
+fn authorize_process_task(request_task_id: &str, owner_task_id: &str) -> KernelResult<()> {
+    if request_task_id == "*" || request_task_id == owner_task_id {
+        return Ok(());
+    }
+    Err(KernelError::new(
+        terminus_kernel_protocol::ErrorCode::PermissionDenied,
+        terminus_kernel_protocol::ErrorCategory::Permission,
+        "process capability is bound to a different task".to_string(),
+        false,
+    ))
+}
+
+#[cfg(test)]
+mod process_authorization_tests {
+    use super::authorize_process_task;
+    use terminus_kernel_protocol::ErrorCode;
+
+    #[test]
+    fn process_control_rejects_cross_task_owner() {
+        assert!(authorize_process_task("task-a", "task-a").is_ok());
+        assert!(authorize_process_task("*", "task-a").is_ok());
+        let error = authorize_process_task("task-b", "task-a").unwrap_err();
+        assert_eq!(error.code(), ErrorCode::PermissionDenied);
     }
 }
 
@@ -2693,18 +3034,65 @@ impl SecretService {
         self.request_metadata(ctx, uri, requested_by).map(|_| ())
     }
 
+    /// [`Self::request`] for async transports.
+    pub async fn request_async(
+        &self,
+        ctx: &RequestContext,
+        _intent: &EffectIntent,
+        uri: &str,
+        requested_by: &str,
+    ) -> KernelResult<()> {
+        self.request_metadata_async(ctx, uri, requested_by)
+            .await
+            .map(|_| ())
+    }
+
     /// Request a secret and return metadata only. The raw value is dropped
     /// before this method returns, so transport adapters can mint an opaque
     /// handle without ever serializing secret material.
+    ///
+    /// **Synchronous**: async transports MUST use
+    /// [`Self::request_metadata_async`].
     pub fn request_metadata(
         &self,
         ctx: &RequestContext,
         uri: &str,
         requested_by: &str,
     ) -> KernelResult<terminus_secrets::SecretMetadata> {
-        // §31.3 step 3: capability-token validation. Secret access requires
-        // the `Secret` operation class. The requested scope is the URI
-        // itself.
+        self.authorize_request(ctx, uri, requested_by)?;
+        self.broker
+            .request(uri, requested_by)
+            .map(|handle| handle.metadata.clone())
+            .map_err(secret_resolution_error)
+    }
+
+    /// [`Self::request_metadata`] for async transports: the credential
+    /// resolve runs on the blocking pool under a deadline, so an OS keychain
+    /// prompt cannot park a tokio worker.
+    pub async fn request_metadata_async(
+        &self,
+        ctx: &RequestContext,
+        uri: &str,
+        requested_by: &str,
+    ) -> KernelResult<terminus_secrets::SecretMetadata> {
+        self.authorize_request(ctx, uri, requested_by)?;
+        self.broker
+            .request_async(uri, requested_by)
+            .await
+            .map(|handle| handle.metadata.clone())
+            .map_err(secret_resolution_error)
+    }
+
+    /// §31.3 step 3 + step 10 for a secret request: capability-token
+    /// validation and the AUTHORIZED audit record, before any store read.
+    fn authorize_request(
+        &self,
+        ctx: &RequestContext,
+        uri: &str,
+        requested_by: &str,
+    ) -> KernelResult<()> {
+        // Secret access requires the `Secret` operation class. The requested
+        // scope is the URI itself.
         let requested_scope = Scope {
             workspace_paths: Vec::new(),
             network_destinations: Vec::new(),
@@ -2716,7 +3104,6 @@ impl SecretService {
             OperationClass::Secret,
             &requested_scope,
         )?;
-        // §31.3 step 10: persist AUTHORIZED state.
         tracing::info!(
             target: "terminus_kernel_audit",
             event = "authorized",
@@ -2728,17 +3115,7 @@ impl SecretService {
             requested_by = %requested_by,
             "secret request authorized",
         );
-        self.broker
-            .request(uri, requested_by)
-            .map(|handle| handle.metadata.clone())
-            .map_err(|e| {
-                KernelError::new(
-                    terminus_kernel_protocol::ErrorCode::PermissionDenied,
-                    terminus_kernel_protocol::ErrorCategory::Permission,
-                    format!("{e}"),
-                    false,
-                )
-            })
+        Ok(())
     }
 
     /// Persist a provider credential in the registered OS credential store.
@@ -2900,6 +3277,11 @@ impl ConnectorService {
     /// Mint a short-lived connector grant bound to the workload identity of
     /// `requested_by`. The grant carries a digest of the current credential
     /// — never the credential itself (SPEC §17.3).
+    ///
+    /// **Synchronous**: the credential resolve happens on the calling thread.
+    /// Async transports (gRPC, HTTP) MUST call [`Self::mint_grant_async`] —
+    /// a keychain read can park for as long as an OS approval prompt is on
+    /// screen, and parking a tokio worker there stalls the whole runtime.
     pub fn mint_grant(
         &self,
         ctx: &RequestContext,
@@ -2908,6 +3290,51 @@ impl ConnectorService {
         ttl_secs: u64,
         use_limit: u32,
     ) -> KernelResult<terminus_secrets::ConnectorGrant> {
+        if self.authorize_mint(ctx, uri, &binding)? == MintKind::Anonymous {
+            return self.mint_anonymous(ctx, binding, ttl_secs, use_limit);
+        }
+        let digest = self
+            .secret_broker
+            .request(uri, &binding.task_id)
+            .map(|handle| handle.digest())
+            .map_err(secret_resolution_error)?;
+        self.issue_grant(ctx, uri, &digest, binding, ttl_secs, use_limit)
+    }
+
+    /// [`Self::mint_grant`] for async transports. The credential resolve runs
+    /// on the blocking pool under [`terminus_secrets::SECRET_RESOLVE_TIMEOUT`],
+    /// so a pending OS keychain prompt surfaces as an actionable error instead
+    /// of a `DEADLINE_EXCEEDED` with no cause.
+    pub async fn mint_grant_async(
+        &self,
+        ctx: &RequestContext,
+        uri: &str,
+        binding: terminus_secrets::GrantBinding,
+        ttl_secs: u64,
+        use_limit: u32,
+    ) -> KernelResult<terminus_secrets::ConnectorGrant> {
+        if self.authorize_mint(ctx, uri, &binding)? == MintKind::Anonymous {
+            return self.mint_anonymous(ctx, binding, ttl_secs, use_limit);
+        }
+        let digest = self
+            .secret_broker
+            .request_async(uri, &binding.task_id)
+            .await
+            .map(|handle| handle.digest())
+            .map_err(secret_resolution_error)?;
+        self.issue_grant(ctx, uri, &digest, binding, ttl_secs, use_limit)
+    }
+
+    /// Steps 1-3 of a mint: descriptor + host authority, anonymity match, and
+    /// the capability-token check — everything that must hold BEFORE the
+    /// credential store is touched, and identical for the sync and async
+    /// mints.
+    fn authorize_mint(
+        &self,
+        ctx: &RequestContext,
+        uri: &str,
+        binding: &terminus_secrets::GrantBinding,
+    ) -> KernelResult<MintKind> {
         // Anonymous connectors (empty secret URI) skip the secret step but
         // still require the Network operation class scoped to the exact
         // destination; the L4 egress proxy authorizes the host at dispatch
@@ -2922,7 +3349,7 @@ impl ConnectorService {
         // hosts they were registered with; `PerGrant` connectors take their
         // host from the stored provider account, so the control plane must
         // pin that account's allowlist here and the destination must be in it.
-        self.authorize_mint_destination(&descriptor, &binding)?;
+        self.authorize_mint_destination(&descriptor, binding)?;
         let connector_is_anonymous = matches!(descriptor.auth, terminus_connector::AuthStyle::None);
         if anonymous != connector_is_anonymous {
             return Err(KernelError::new(
@@ -2962,49 +3389,57 @@ impl ConnectorService {
             },
             &requested_scope,
         )?;
-        if anonymous {
-            const ANONYMOUS_DIGEST: &str =
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-            let workload = WorkloadIdentity {
-                workload_id: ctx.actor_id.clone(),
-                principal: ctx.actor_id.clone(),
-                task_id: ctx.task_id.clone(),
-            };
-            tracing::info!(
-                target: "terminus_kernel_audit",
-                event = "grant.minted",
-                request_id = %ctx.request_id,
-                task_id = %ctx.task_id,
-                actor_id = %ctx.actor_id,
-                secret_uri = "(anonymous)",
-                effect_id = %binding.effect_id,
-                "anonymous connector grant minted"
-            );
-            return self
-                .issuer
-                .mint_for_digest(workload, "", ANONYMOUS_DIGEST, binding, ttl_secs, use_limit)
-                .map_err(|e| {
-                    KernelError::new(
-                        terminus_kernel_protocol::ErrorCode::InvalidRequest,
-                        terminus_kernel_protocol::ErrorCategory::Validation,
-                        format!("{e}"),
-                        false,
-                    )
-                });
-        }
-        let handle = self
-            .secret_broker
-            .request(uri, &binding.task_id)
-            .map_err(|e| {
-                KernelError::new(
-                    terminus_kernel_protocol::ErrorCode::PermissionDenied,
-                    terminus_kernel_protocol::ErrorCategory::Permission,
-                    format!("{e}"),
-                    false,
-                )
-            })?;
-        let digest = handle.digest();
-        drop(handle);
+        Ok(if anonymous {
+            MintKind::Anonymous
+        } else {
+            MintKind::Credentialed
+        })
+    }
+
+    /// Mint the fixed-digest grant an anonymous connector uses. No credential
+    /// is resolved, so this path never touches the credential store.
+    fn mint_anonymous(
+        &self,
+        ctx: &RequestContext,
+        binding: terminus_secrets::GrantBinding,
+        ttl_secs: u64,
+        use_limit: u32,
+    ) -> KernelResult<terminus_secrets::ConnectorGrant> {
+        /// SHA-256 of the empty string: an anonymous connector pins no
+        /// credential, and the digest field is not optional.
+        const ANONYMOUS_DIGEST: &str =
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let workload = WorkloadIdentity {
+            workload_id: ctx.actor_id.clone(),
+            principal: ctx.actor_id.clone(),
+            task_id: ctx.task_id.clone(),
+        };
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "grant.minted",
+            request_id = %ctx.request_id,
+            task_id = %ctx.task_id,
+            actor_id = %ctx.actor_id,
+            secret_uri = "(anonymous)",
+            effect_id = %binding.effect_id,
+            "anonymous connector grant minted"
+        );
+        self.issuer
+            .mint_for_digest(workload, "", ANONYMOUS_DIGEST, binding, ttl_secs, use_limit)
+            .map_err(grant_issue_error)
+    }
+
+    /// Sign the grant around an already-resolved credential digest. The
+    /// credential itself is never held here.
+    fn issue_grant(
+        &self,
+        ctx: &RequestContext,
+        uri: &str,
+        digest: &str,
+        binding: terminus_secrets::GrantBinding,
+        ttl_secs: u64,
+        use_limit: u32,
+    ) -> KernelResult<terminus_secrets::ConnectorGrant> {
         let workload = WorkloadIdentity {
             workload_id: ctx.actor_id.clone(),
             principal: ctx.actor_id.clone(),
@@ -3021,15 +3456,8 @@ impl ConnectorService {
             "connector grant minted"
         );
         self.issuer
-            .mint_for_digest(workload, uri, &digest, binding, ttl_secs, use_limit)
-            .map_err(|e| {
-                KernelError::new(
-                    terminus_kernel_protocol::ErrorCode::InvalidRequest,
-                    terminus_kernel_protocol::ErrorCategory::Validation,
-                    format!("{e}"),
-                    false,
-                )
-            })
+            .mint_for_digest(workload, uri, digest, binding, ttl_secs, use_limit)
+            .map_err(grant_issue_error)
     }
 
     /// Execute one grant-bound operation through the trusted connector
@@ -3079,30 +3507,23 @@ impl ConnectorService {
     /// Streaming variant of [`Self::execute`]: identical authorization,
     /// one-time consumption, and bounded capture; response body chunks are
     /// surfaced through `sink` as they arrive instead of only at completion.
+    ///
+    /// Credential-echo redaction is INCREMENTAL (`terminus_connector`'s
+    /// carry-buffered streaming redactor), so a credentialed grant streams
+    /// exactly like an anonymous one. Before this, a credentialed operation
+    /// degraded to one buffered chunk after whole-body scrubbing, which made
+    /// time-to-first-token equal time-to-last-token for every provider call.
+    ///
+    /// `cancel` tears the in-flight HTTP request down; the call then returns
+    /// a `Cancelled`-coded error rather than an unsettled receipt.
     pub async fn execute_streaming<S: ChunkSink>(
         &self,
         ctx: &RequestContext,
         op: &terminus_connector::CanonicalOperation,
         grant: &terminus_secrets::ConnectorGrant,
         sink: &mut S,
+        cancel: &terminus_connector::CancelToken,
     ) -> KernelResult<terminus_connector::ConnectorResponse> {
-        // Credential-echo redaction runs on the COMPLETE response only. A
-        // credentialed operation therefore must not stream raw body chunks
-        // past this boundary; it degrades to a single buffered chunk after
-        // scrubbing. Anonymous operations (empty secret URI, e.g.
-        // `web-fetch`) have no credential to echo and stream genuinely.
-        if !grant.claims.secret_uri.is_empty() {
-            let response = self.execute(ctx, op, grant).await?;
-            sink.on_chunk(&response.body).await.map_err(|e| {
-                KernelError::new(
-                    terminus_kernel_protocol::ErrorCode::Internal,
-                    terminus_kernel_protocol::ErrorCategory::Internal,
-                    format!("{e}"),
-                    false,
-                )
-            })?;
-            return Ok(response);
-        }
         let dest = format!("{}:{}", op.host, op.port);
         let requested_scope = Scope {
             workspace_paths: Vec::new(),
@@ -3117,16 +3538,9 @@ impl ConnectorService {
         )?;
         let response = self
             .broker
-            .execute_streaming(op, grant, sink)
+            .execute_streaming(op, grant, sink, cancel)
             .await
-            .map_err(|e| {
-                KernelError::new(
-                    terminus_kernel_protocol::ErrorCode::PermissionDenied,
-                    terminus_kernel_protocol::ErrorCategory::Permission,
-                    format!("{e}"),
-                    false,
-                )
-            })?;
+            .map_err(connector_dispatch_error)?;
         tracing::info!(
             target: "terminus_kernel_audit",
             event = "connector.executed",
@@ -3244,6 +3658,58 @@ fn connector_permission_error(message: String) -> KernelError {
         message,
         false,
     )
+}
+
+/// Whether a mint needs a credential at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MintKind {
+    /// `AuthStyle::None` connector: no credential store read.
+    Anonymous,
+    /// A credential must be resolved and its digest pinned into the grant.
+    Credentialed,
+}
+
+/// Map a credential-store failure onto a kernel error.
+///
+/// The message is passed through verbatim so the actionable text in
+/// [`terminus_secrets::SecretError::ResolveTimeout`] — which names the
+/// pending OS keychain prompt and the `TERMINUS_SECRETS_BACKEND=file`
+/// remedy — reaches the control plane's gRPC status instead of being
+/// flattened into a bare permission denial. `SecretError` never carries
+/// credential material.
+fn secret_resolution_error(error: terminus_secrets::SecretError) -> KernelError {
+    KernelError::new(
+        terminus_kernel_protocol::ErrorCode::PermissionDenied,
+        terminus_kernel_protocol::ErrorCategory::Permission,
+        format!("{error}"),
+        false,
+    )
+}
+
+/// Map a grant-signing failure onto a kernel error.
+fn grant_issue_error(error: terminus_secrets::SecretError) -> KernelError {
+    KernelError::new(
+        terminus_kernel_protocol::ErrorCode::InvalidRequest,
+        terminus_kernel_protocol::ErrorCategory::Validation,
+        format!("{error}"),
+        false,
+    )
+}
+
+/// Map a dispatch failure onto a kernel error code. Cancellation is the
+/// caller's own decision and must reach the transport as `Cancelled` (gRPC
+/// `CANCELLED`), not as the permission denial every other broker failure
+/// historically collapsed into.
+fn connector_dispatch_error(error: terminus_connector::ConnectorError) -> KernelError {
+    match error {
+        terminus_connector::ConnectorError::Cancelled => KernelError::new(
+            terminus_kernel_protocol::ErrorCode::Cancelled,
+            terminus_kernel_protocol::ErrorCategory::Cancelled,
+            "connector dispatch cancelled by the caller".to_string(),
+            false,
+        ),
+        other => connector_permission_error(format!("{other}")),
+    }
 }
 
 /// Exact-or-dot-suffix host match; mirrors the L4 egress semantics.

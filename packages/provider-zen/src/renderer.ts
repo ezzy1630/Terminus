@@ -19,11 +19,25 @@ import type {
   RenderedProviderRequest,
   UsageRecord,
 } from "@terminus/provider-core";
+import { ReasoningReplayLedger, resolveModelFamily } from "@terminus/provider-core";
 import type { GatewayModel } from "./catalog.js";
 
 export interface GatewayRendererOptions {
   /** Per-turn reasoning depth (H7); ignored by models that do not reason. */
   readonly reasoningEffort?: ReasoningEffort | null | undefined;
+  /**
+   * Cache-routing affinity for the OpenAI-shaped protocols. When absent the
+   * compiled stable-prefix hash is used, so a gateway turn always carries a
+   * key that is stable for exactly as long as the prefix it names — the
+   * gateway path used to carry none at all.
+   */
+  readonly promptCacheKey?: string | null | undefined;
+  /**
+   * Reasoning chain carried across the tool round trips of a turn, and
+   * restorable across a restart. Supplying a pre-seeded ledger is how a
+   * resumed turn replays calls it made before the process died.
+   */
+  readonly reasoningReplay?: ReasoningReplayLedger | undefined;
 }
 
 export class GatewayRenderer implements ProviderRenderer {
@@ -32,7 +46,10 @@ export class GatewayRenderer implements ProviderRenderer {
 
   private readonly models: ReadonlyMap<string, GatewayModel>;
   private readonly openAi: OpenAiRenderer;
-  private readonly anthropic = new AnthropicRenderer();
+  private readonly anthropic: AnthropicRenderer;
+  private readonly options: GatewayRendererOptions;
+  /** Filled by `projectResponse`, played back by `render`; seedable. */
+  readonly reasoningReplay: ReasoningReplayLedger;
 
   constructor(models: readonly GatewayModel[], options: GatewayRendererOptions = {}) {
     const first = models[0];
@@ -42,7 +59,13 @@ export class GatewayRenderer implements ProviderRenderer {
     }
     this.providerId = first.providerId;
     this.models = new Map(models.map((model) => [model.id, model]));
-    this.openAi = new OpenAiRenderer({ reasoningEffort: options.reasoningEffort ?? null });
+    this.options = options;
+    // One ledger shared by both delegates: a gateway turn stays on one
+    // upstream, and the replay contract is the same shape on either.
+    const reasoningReplay = options.reasoningReplay ?? new ReasoningReplayLedger();
+    this.reasoningReplay = reasoningReplay;
+    this.openAi = new OpenAiRenderer({ reasoningEffort: options.reasoningEffort ?? null, reasoningReplay });
+    this.anthropic = new AnthropicRenderer({ reasoningEffort: options.reasoningEffort ?? null, reasoningReplay });
   }
 
   compatibility(input: RenderCompatibilityInput): CompatibilityResult {
@@ -58,10 +81,13 @@ export class GatewayRenderer implements ProviderRenderer {
     const delegateBody = model.reasoning
       ? rendered.body
       : withoutReasoningControls(rendered.body);
+    const promptCacheKey = typeof this.options.promptCacheKey === "string" && this.options.promptCacheKey !== ""
+      ? this.options.promptCacheKey
+      : String(input.cachePlan.stablePrefixHash);
     const body = model.protocol === "responses"
-      ? toResponsesBody(delegateBody)
+      ? toResponsesBody(delegateBody, promptCacheKey)
       : model.protocol === "chat_completions"
-        ? toChatCompletionsBody(delegateBody)
+        ? toChatCompletionsBody(delegateBody, promptCacheKey)
         : delegateBody;
     return {
       ...rendered,
@@ -115,7 +141,10 @@ export class GatewayRenderer implements ProviderRenderer {
   }
 }
 
-function toResponsesBody(body: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+function toResponsesBody(
+  body: Readonly<Record<string, unknown>>,
+  promptCacheKey: string,
+): Readonly<Record<string, unknown>> {
   // Chat Completions and Responses are different shapes, not the same shape
   // with different names: a tool result is a `function_call_output` item and
   // the prompt-cache marker `cache_control` does not exist here at all. The
@@ -147,19 +176,33 @@ function toResponsesBody(body: Readonly<Record<string, unknown>>): Readonly<Reco
       : {}),
     ...(body.previous_response_id !== undefined ? { previous_response_id: body.previous_response_id } : {}),
     ...(body.store !== undefined ? { store: body.store } : {}),
+    // Every OpenAI-shaped path carries a routing key now, the gateway
+    // included: without one, two attempts of the same turn can land on
+    // different shards and neither sees the other's prefix.
+    prompt_cache_key: promptCacheKey,
   });
 }
 
-function toChatCompletionsBody(body: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+function toChatCompletionsBody(
+  body: Readonly<Record<string, unknown>>,
+  promptCacheKey: string,
+): Readonly<Record<string, unknown>> {
   const {
     previous_response_id: _previousResponseId,
     max_output_tokens: maxOutputTokens,
     store: _store,
     ...chatBody
   } = body;
+  // `prompt_cache_key` is an OpenAI Chat Completions parameter, and the
+  // gateway fronts a hundred models that are not OpenAI's. It has been
+  // observed to answer 400 rather than ignore a field its upstream does not
+  // know, so the key travels only where the upstream is known to read it.
+  const openAiUpstream = typeof body.model === "string"
+    && resolveModelFamily(body.model) === "gpt-5.6";
   return {
     ...chatBody,
     ...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
+    ...(openAiUpstream ? { prompt_cache_key: promptCacheKey } : {}),
   };
 }
 

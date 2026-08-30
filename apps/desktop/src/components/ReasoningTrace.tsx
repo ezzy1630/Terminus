@@ -103,7 +103,11 @@ function ReasoningTraceImpl({ block }: { block: ReasoningBlock }): JSX.Element |
           <p className="selectable ui-prose mb-2 whitespace-pre-wrap text-tertiary">
             {thinking}
           </p>
-        ) : null}
+        ) : (
+          <p className="ui-meta mb-2 text-tertiary">
+            This model did not expose a reasoning trace.
+          </p>
+        )}
         <ul className="flex flex-col gap-0.5">
           {block.phases.map((phase, index) => {
             const next = block.phases[index + 1];

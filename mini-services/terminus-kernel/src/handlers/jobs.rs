@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Extension, Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -193,6 +194,7 @@ pub async fn stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(query): Query<JobStreamQuery>,
+    headers: HeaderMap,
     Extension(claims): Extension<TokenClaims>,
 ) -> Result<axum::response::Response, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
@@ -215,9 +217,10 @@ pub async fn stream(
         ));
     }
 
+    let resume_cursor = job_stream_resume_cursor(&query, &headers);
     let stream = async_stream::stream! {
         let mut ticks = 0u32;
-        let mut cursor = query.cursor;
+        let mut cursor = resume_cursor;
         loop {
             ticks += 1;
             let record = manager.get(&id).await;
@@ -233,7 +236,7 @@ pub async fn stream(
                             "bytes": chunk.bytes,
                             "redacted": chunk.redacted,
                         });
-                        yield Ok::<Event, Infallible>(Event::default().event("job_output").data(payload.to_string()));
+                        yield Ok::<Event, Infallible>(Event::default().id(cursor.to_string()).event("job_output").data(payload.to_string()));
                     }
                 }
                 Err(JobError::OutputTruncated { available_from, .. }) => {
@@ -244,7 +247,7 @@ pub async fn stream(
                         "available_from": available_from,
                         "continuation_required": true,
                     });
-                    yield Ok::<Event, Infallible>(Event::default().event("output_truncated").data(payload.to_string()));
+                    yield Ok::<Event, Infallible>(Event::default().id(available_from.to_string()).event("output_truncated").data(payload.to_string()));
                     break;
                 }
                 Err(error) => {
@@ -253,7 +256,7 @@ pub async fn stream(
                         "stream": stream_name,
                         "error": error.to_string(),
                     });
-                    yield Ok::<Event, Infallible>(Event::default().event("job_error").data(payload.to_string()));
+                    yield Ok::<Event, Infallible>(Event::default().id(cursor.to_string()).event("job_error").data(payload.to_string()));
                     break;
                 }
             }
@@ -270,13 +273,13 @@ pub async fn stream(
                 }),
                 None => serde_json::json!({"job_id": id, "state": "unknown", "tick": ticks}),
             };
-            yield Ok::<Event, Infallible>(Event::default().event("job_state").data(payload.to_string()));
+            yield Ok::<Event, Infallible>(Event::default().id(cursor.to_string()).event("job_state").data(payload.to_string()));
             if matches!(record.map(|r| r.state), Some(JobState::Exited | JobState::Lost)) {
-                yield Ok(Event::default().event("terminal").data("{\"final\":true}"));
+                yield Ok(Event::default().id(cursor.to_string()).event("terminal").data("{\"final\":true}"));
                 break;
             }
             if ticks >= 30 {
-                yield Ok(Event::default().event("timeout").data("{\"final\":true}"));
+                yield Ok(Event::default().id(cursor.to_string()).event("timeout").data("{\"final\":true}"));
                 break;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -291,9 +294,42 @@ pub async fn stream(
 #[derive(Debug, Default, Deserialize)]
 pub struct JobStreamQuery {
     #[serde(default)]
-    pub cursor: u64,
+    pub cursor: Option<u64>,
     #[serde(default)]
     pub stream: String,
+}
+
+fn job_stream_resume_cursor(query: &JobStreamQuery, headers: &HeaderMap) -> u64 {
+    query.cursor.unwrap_or_else(|| {
+        headers
+            .get("last-event-id")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{job_stream_resume_cursor, JobStreamQuery};
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn standard_last_event_id_resumes_the_byte_cursor() {
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", HeaderValue::from_static("42"));
+        let from_header = JobStreamQuery {
+            cursor: None,
+            stream: "stdout".to_string(),
+        };
+        assert_eq!(job_stream_resume_cursor(&from_header, &headers), 42);
+
+        let explicit_query = JobStreamQuery {
+            cursor: Some(7),
+            stream: "stdout".to_string(),
+        };
+        assert_eq!(job_stream_resume_cursor(&explicit_query, &headers), 7);
+    }
 }
 
 #[derive(Debug, Deserialize)]

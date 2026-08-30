@@ -21,6 +21,13 @@ export const REPOSITORY_SIGNAL_PATHS = [
   "Cargo.toml",
   "pyproject.toml",
   "uv.lock",
+  // Plain pytest layouts: a repository can be fully testable with none of the
+  // manifests above (the internal eval fixtures are), and the planner then
+  // reported "no test runner detected" while the task said `pytest -q`.
+  "pytest.ini",
+  "tox.ini",
+  "setup.cfg",
+  "conftest.py",
   "go.mod",
   "Taskfile.yml",
   "Taskfile.yaml",
@@ -166,6 +173,25 @@ function pythonRecipes(
   return [{ command, recipeName: "pytest", sourcePath: observation.path, sourceVersion: observation.sourceVersion }];
 }
 
+/**
+ * Whether a pytest-family configuration file actually configures pytest.
+ * `pytest.ini` and `conftest.py` exist for no other reason; `tox.ini` and
+ * `setup.cfg` are shared with other tools and only count when they carry a
+ * `[pytest]` / `[tool:pytest]` section.
+ */
+export function configuresPytest(observation: RepositoryFileObservation): boolean {
+  switch (observation.path) {
+    case "pytest.ini":
+    case "conftest.py":
+      return true;
+    case "tox.ini":
+    case "setup.cfg":
+      return /^\s*\[(?:pytest|tool:pytest)\]\s*$/m.test(observation.content);
+    default:
+      return false;
+  }
+}
+
 function goRecipes(observation: RepositoryFileObservation): readonly NativeTestRecipe[] {
   if (!/^\s*module\s+\S+/m.test(observation.content)) return [];
   return [{
@@ -214,6 +240,17 @@ function recipesForObservation(
       return cargoRecipes(observation);
     case "pyproject.toml":
       return pythonRecipes(observation, observedPaths);
+    case "pytest.ini":
+    case "tox.ini":
+    case "setup.cfg":
+    case "conftest.py":
+      if (!configuresPytest(observation)) return [];
+      return [{
+        command: observedPaths.has("uv.lock") ? "uv run pytest" : "python -m pytest",
+        recipeName: "pytest",
+        sourcePath: observation.path,
+        sourceVersion: observation.sourceVersion,
+      }];
     case "go.mod":
       return goRecipes(observation);
     case "Taskfile.yml":
@@ -427,6 +464,14 @@ function runnersForObservation(
       const prefix = observedPaths.has("uv.lock") ? "uv run " : "python -m ";
       return fixed({ test: `${prefix}pytest`, unit_test: `${prefix}pytest` });
     }
+    case "pytest.ini":
+    case "tox.ini":
+    case "setup.cfg":
+    case "conftest.py": {
+      if (!configuresPytest(observation)) return {};
+      const prefix = observedPaths.has("uv.lock") ? "uv run " : "python -m ";
+      return fixed({ test: `${prefix}pytest`, unit_test: `${prefix}pytest` });
+    }
     case "go.mod":
       if (!/^\s*module\s+\S+/m.test(observation.content)) return {};
       return fixed({ test: "go test ./...", unit_test: "go test ./...", typecheck: "go build ./..." });
@@ -458,4 +503,88 @@ export function discoverVerificationRunners(
     }
   }
   return catalog;
+}
+
+// ─────────────────── Task-scoped repository map selection ────────────────────
+
+/**
+ * Token ceiling for the repository-map fragment.
+ *
+ * Measured 2026-08-29: the map shipped 16–18k tokens per attempt — the
+ * alphabetically-first 200 indexed files, with a symbol extractor that skips
+ * `export function/class/const`, so most lines were a bare path. It was
+ * recompiled on every attempt, it was never ranked against the task, and no
+ * eval has ever shown it helps. Phase 1 replaces it with retrieval; until
+ * then it is capped and ranked so it costs about 1.5k instead of 18k.
+ */
+export const REPOSITORY_MAP_TOKEN_BUDGET = 1_500;
+
+/** Bytes per token used to size the map. Matches the calibrated estimator. */
+const REPOSITORY_MAP_BYTES_PER_TOKEN = 3.6;
+
+export interface RepositoryMapSelectionEntry {
+  readonly path: string;
+  readonly symbols: readonly string[];
+}
+
+export interface RepositoryMapSelection {
+  readonly entries: readonly RepositoryMapSelectionEntry[];
+  readonly omittedEntries: number;
+}
+
+/** Normalize a contract scope pattern to the literal directory prefix it fixes. */
+function scopePrefix(pattern: string): string {
+  const normalized = pattern.replaceAll("\\", "/").replace(/^\.\//, "");
+  const segments = normalized.split("/").filter((segment) => segment.length > 0);
+  const wildcardIndex = segments.findIndex((segment) => /[*?[\]]/.test(segment));
+  const prefix = wildcardIndex >= 0 ? segments.slice(0, wildcardIndex) : segments;
+  return prefix.join("/");
+}
+
+/**
+ * Rank and cap the repository map for one task.
+ *
+ * Files inside the contract's allowed scope come first (write paths ahead of
+ * read paths — those are the files the task is actually about), then
+ * everything else in the index's own order. Entries are admitted until the
+ * rendered lines reach {@link REPOSITORY_MAP_TOKEN_BUDGET}; the caller
+ * reports the remainder as omitted so the model knows to search rather than
+ * assume the list is complete.
+ *
+ * `**` collapses to an empty prefix, which matches everything — that is the
+ * common case and it degrades to "index order, capped", never to "nothing".
+ */
+export function selectTaskScopedRepositoryMap(
+  entries: readonly RepositoryMapSelectionEntry[],
+  options: {
+    readonly writePaths?: readonly string[] | undefined;
+    readonly readPaths?: readonly string[] | undefined;
+    readonly tokenBudget?: number | undefined;
+  } = {},
+): RepositoryMapSelection {
+  const budget = options.tokenBudget ?? REPOSITORY_MAP_TOKEN_BUDGET;
+  const writePrefixes = (options.writePaths ?? []).map(scopePrefix).filter((prefix) => prefix.length > 0);
+  const readPrefixes = (options.readPaths ?? []).map(scopePrefix).filter((prefix) => prefix.length > 0);
+  const rank = (path: string): number => {
+    if (writePrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) return 0;
+    if (readPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) return 1;
+    return 2;
+  };
+  const ranked = entries
+    .map((entry, index) => ({ entry, rank: rank(entry.path), index }))
+    .sort((left, right) => left.rank - right.rank || left.index - right.index);
+
+  const budgetBytes = Math.max(0, Math.floor(budget * REPOSITORY_MAP_BYTES_PER_TOKEN));
+  const selected: RepositoryMapSelectionEntry[] = [];
+  let usedBytes = 0;
+  for (const candidate of ranked) {
+    const line = candidate.entry.symbols.length === 0
+      ? candidate.entry.path
+      : `${candidate.entry.path}: ${candidate.entry.symbols.join(", ")}`;
+    const lineBytes = new TextEncoder().encode(line).byteLength + 1;
+    if (usedBytes + lineBytes > budgetBytes && selected.length > 0) break;
+    selected.push(candidate.entry);
+    usedBytes += lineBytes;
+  }
+  return { entries: selected, omittedEntries: Math.max(0, entries.length - selected.length) };
 }

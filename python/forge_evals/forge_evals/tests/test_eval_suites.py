@@ -71,8 +71,9 @@ def test_external_manifests_pin_exact_sources_and_scopes() -> None:
     """External suites must use exact upstream pins and honest image policies."""
     terminal = load_benchmark_manifest(SUITES_DIR / "terminal-bench.yaml")
     assert terminal.adapter_kind == "harbor"
-    assert terminal.dataset == "terminal-bench"
+    assert terminal.dataset == "terminal-bench/terminal-bench-2"
     assert terminal.dataset_version == "2.0"
+    # 89 task directories at the exact Harbor registry task-source commit.
     assert terminal.task_count == 89
     assert terminal.registry_commit == TERMINAL_BENCH_HARBOR_COMMIT
     assert terminal.task_commit == TERMINAL_BENCH_TASK_COMMIT
@@ -88,6 +89,33 @@ def test_external_manifests_pin_exact_sources_and_scopes() -> None:
     assert swe.task_count == 500
     assert swe.cohorts == ("python-repos",)
     assert swe.image_digest_policy == "per_instance_required"
+
+
+def test_terminal_bench_manifest_records_harbor_release_version() -> None:
+    """Keep the Harbor package version alongside its immutable commit pin."""
+    data = yaml.safe_load(
+        (SUITES_DIR / "terminal-bench.yaml").read_text(encoding="utf-8")
+    )
+    suite = data["suite"]
+    adapter = suite["adapter"]
+    assert adapter["harness"]["version"] == "0.22.0"
+    assert adapter["registry"]["commit"] == "41a50d62d7f35677cc34ba3a0c36f042a4fef68c"
+    assert adapter["task_source"]["commit"] == "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+    assert adapter["task_count"] == 89
+
+
+def test_swe_bench_pro_manifest_pins_the_scale_dataset_and_evaluator() -> None:
+    """SWE-bench Pro is a separate suite with its own dataset and harness."""
+    pro = load_benchmark_manifest(SUITES_DIR / "swe-bench-pro.yaml")
+    assert pro.adapter_kind == "swebench"
+    assert pro.suite_id == "swe-bench-pro"
+    assert pro.dataset == "ScaleAI/SWE-bench_Pro"
+    assert pro.dataset_revision == "7ab5114912baf22bb098818e604c02fe7ad2c11f"
+    assert pro.harness_commit == "ca10a60a5fcae51e6948ffe1485d4153d421e6c5"
+    assert pro.split == "test"
+    assert pro.language == "multi"
+    assert pro.task_count == 731
+    assert pro.image_digest_policy == "per_instance_required"
 
 
 def test_swe_bench_verified_manifest_has_no_suite_wide_image_pin() -> None:

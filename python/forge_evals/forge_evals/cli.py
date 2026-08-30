@@ -4,6 +4,7 @@ Built with :mod:`argparse` (no Click/Typer dependency, keeping the install
 footprint small). Provides commands for the standard eval workflow:
 
 - ``terminus-eval run`` — run a single harness on a task.
+- ``terminus-eval compare`` — run an identity-locked paired live campaign.
 - ``terminus-eval bench-check`` — validate external benchmark suite manifests
   through their adapters (offline; no harness or credentials required).
 - ``terminus-eval aggregate`` — aggregate JSONL run records into a summary.
@@ -23,7 +24,8 @@ import re
 import sys
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +93,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command", required=False)
     _add_run_cmd(sub)
+    _add_compare_cmd(sub)
     _add_aggregate_cmd(sub)
     _add_dashboard_cmd(sub)
     _add_promote_cmd(sub)
@@ -254,9 +257,54 @@ def _add_run_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     p.add_argument("--provider", default="fake", help="Provider id.")
     p.add_argument("--model", default="fake-1", help="Model id.")
     p.add_argument(
+        "--effort",
+        choices=["low", "medium", "high", "max"],
+        default=None,
+        help="Reasoning effort; sets the turn's reasoning_effort and the "
+        "session's default_reasoning_effort.",
+    )
+    p.add_argument(
+        "--provider-account",
+        default=None,
+        help="Pin the provider account id that must serve --model "
+        "(default: the account whose catalog lists the model).",
+    )
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Per-turn tool-call ceiling, sent as POST /v1/turns budget.max_steps "
+        "and enforced by the control plane (it may only tighten the task "
+        "contract's own budget, never raise it).",
+    )
+    p.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="Per-turn total token ceiling, sent as POST /v1/turns "
+        "budget.max_tokens and enforced by the control plane.",
+    )
+    p.add_argument(
         "--fixture-mode",
         action="store_true",
         help="Explicitly run the deterministic fake harness; output is never release evidence.",
+    )
+    p.add_argument(
+        "--workspace",
+        default=None,
+        help="Scratch workspace the task is materialised into and graded in "
+        "(default: <output-dir>/workspaces/<suite>/<task>/<seed>).",
+    )
+    p.add_argument(
+        "--no-setup",
+        action="store_true",
+        help="Do not run the task package's setup.sh; grade the task directory in place.",
+    )
+    p.add_argument(
+        "--instance-file",
+        default=None,
+        help="SWE-bench Pro: path to a JSON/JSONL file of instance records "
+        "(instance_id, repo, base_commit, problem_statement, ...).",
     )
     p.add_argument("--output-dir", default="evals/results", help="Directory to write run records.")
     p.add_argument(
@@ -267,11 +315,287 @@ def _add_run_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     )
 
 
+def _add_compare_cmd(sub: argparse._SubParsersAction[Any]) -> None:
+    """Add the fail-closed cross-harness campaign command."""
+    p = sub.add_parser(
+        "compare",
+        help="Run the same materialized task through live Terminus/OpenCode/Pi harnesses.",
+    )
+    p.add_argument("--suite", required=True)
+    p.add_argument("--task", required=True)
+    p.add_argument("--task-dir", required=True)
+    p.add_argument(
+        "--harness",
+        action="append",
+        required=True,
+        choices=["terminus-live", "upstream-opencode", "pi"],
+    )
+    p.add_argument("--candidate-harness", required=True)
+    p.add_argument(
+        "--harness-pin",
+        action="append",
+        required=True,
+        metavar="HARNESS=REVISION",
+        help="Repeat once per harness; revision must be an exact Git or sha256 identity.",
+    )
+    p.add_argument(
+        "--harness-provider-account",
+        action="append",
+        default=[],
+        metavar="HARNESS=ACCOUNT_ID",
+    )
+    p.add_argument(
+        "--provider-alias",
+        action="append",
+        default=[],
+        metavar="HARNESS=PROVIDER_ID",
+        help="Allow a server-resolved provider id to map to the canonical provider.",
+    )
+    p.add_argument("--provider", required=True, help="Canonical model provider id.")
+    p.add_argument("--model", required=True)
+    p.add_argument("--api-version", default="catalog-1")
+    p.add_argument("--effort", choices=["low", "medium", "high", "max"], default="high")
+    p.add_argument("--seeds", type=int, default=1)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--max-steps", type=int, default=50)
+    p.add_argument("--max-tokens", type=int, default=200_000)
+    p.add_argument("--max-wall-seconds", type=int, default=300)
+    p.add_argument("--holdout-partition", default="local_diagnostic")
+    p.add_argument("--provider-route", default="anonymous-shared-backend")
+    p.add_argument("--min-pairs", type=int, default=2)
+    p.add_argument("--holm-family-size", type=int, default=1)
+    p.add_argument("--practical-threshold", type=float, default=0.10)
+    p.add_argument("--output-dir", required=True)
+
+
+def _parse_assignments(values: Sequence[str], *, name: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw in values:
+        key, separator, value = raw.partition("=")
+        if not separator or not key.strip() or not value.strip():
+            raise ValueError(f"{name} must use HARNESS=VALUE: {raw!r}")
+        if key in parsed:
+            raise ValueError(f"duplicate {name} for {key}")
+        parsed[key] = value
+    return parsed
+
+
+def _parse_aliases(values: Sequence[str]) -> dict[str, frozenset[str]]:
+    aliases: dict[str, set[str]] = {}
+    for raw in values:
+        key, separator, value = raw.partition("=")
+        if not separator or not key.strip() or not value.strip():
+            raise ValueError(f"provider alias must use HARNESS=PROVIDER_ID: {raw!r}")
+        aliases.setdefault(key, set()).add(value)
+    return {key: frozenset(value) for key, value in aliases.items()}
+
+
+def _campaign_hash(value: object) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _cmd_compare(args: argparse.Namespace) -> int:
+    from .runners import (
+        CrossHarnessPlan,
+        CrossHarnessRunner,
+        CrossTaskSpec,
+        HarnessSpec,
+        OpenCodeCliAdapter,
+        PiCliAdapter,
+    )
+    from .runners.terminus_harness import TerminusHarness
+
+    harness_ids = list(args.harness)
+    if len(harness_ids) != len(set(harness_ids)):
+        raise ValueError("--harness values must be unique")
+    if args.candidate_harness not in harness_ids:
+        raise ValueError("--candidate-harness must also appear in --harness")
+    pins = _parse_assignments(args.harness_pin, name="harness pin")
+    if set(pins) != set(harness_ids):
+        raise ValueError("--harness-pin must name every and only selected harness")
+    accounts = _parse_assignments(
+        args.harness_provider_account,
+        name="harness provider account",
+    )
+    unknown_accounts = set(accounts) - set(harness_ids)
+    if unknown_accounts:
+        raise ValueError(f"provider accounts name unknown harnesses: {sorted(unknown_accounts)}")
+    aliases = _parse_aliases(args.provider_alias)
+    unknown_aliases = set(aliases) - set(harness_ids)
+    if unknown_aliases:
+        raise ValueError(f"provider aliases name unknown harnesses: {sorted(unknown_aliases)}")
+
+    output_dir = Path(args.output_dir).resolve()
+
+    def factory_for(harness_id: str) -> Any:
+        if harness_id == "terminus-live":
+            return TerminusHarness.from_env()
+        if harness_id == "upstream-opencode":
+            return OpenCodeCliAdapter(artifact_root=output_dir / "artifacts" / "upstream-opencode")
+        if harness_id == "pi":
+            return PiCliAdapter(artifact_root=output_dir / "artifacts" / "pi")
+        raise ValueError(f"unsupported live harness: {harness_id}")
+
+    harnesses = [
+        HarnessSpec(
+            harness_id=harness_id,
+            harness_commit=pins[harness_id],
+            factory=factory_for(harness_id),
+            harness_config_hash=_campaign_hash(
+                {
+                    "harness": harness_id,
+                    "provider": args.provider,
+                    "model": args.model,
+                    "effort": args.effort,
+                    "max_steps": args.max_steps,
+                    "max_tokens": args.max_tokens,
+                    "max_wall_seconds": args.max_wall_seconds,
+                }
+            ),
+            provider_aliases=aliases.get(harness_id, frozenset()),
+            pin_verified=True,
+            provider_account_id=accounts.get(harness_id),
+            reasoning_effort=args.effort,
+        )
+        for harness_id in harness_ids
+    ]
+    seeds = list(range(args.seed, args.seed + args.seeds))
+    snapshot = ModelCapabilitySnapshot(
+        provider=args.provider,
+        model=args.model,
+        api_version=args.api_version,
+        context_window=200_000,
+        max_output_tokens=min(args.max_tokens, 128_000),
+        supports_tool_calls=True,
+        supports_streaming=True,
+        supports_cache=True,
+    )
+    plan = CrossHarnessPlan(
+        tasks=[
+            CrossTaskSpec(
+                suite=args.suite,
+                task=args.task,
+                task_dir=Path(args.task_dir).resolve(),
+                holdout_partition=args.holdout_partition,
+            )
+        ],
+        harnesses=harnesses,
+        model_snapshot=snapshot,
+        seeds=seeds,
+        budgets=Budgets(
+            max_tool_calls=args.max_steps,
+            max_total_tokens=args.max_tokens,
+            max_wall_seconds=args.max_wall_seconds,
+        ),
+        experiment_assignments=[
+            {
+                "provider_route": args.provider_route,
+                "reasoning_effort": args.effort,
+            }
+        ],
+        output_dir=output_dir,
+        require_exact_pins=True,
+        tool_schema_hash=_campaign_hash(
+            {"semantic_capabilities": ["read", "write", "edit", "execute"]}
+        ),
+    )
+    result = CrossHarnessRunner().run(plan)
+    reports: list[dict[str, Any]] = []
+    for baseline in harness_ids:
+        if baseline == args.candidate_harness:
+            continue
+        evidence = result.derive_paired_evidence(
+            baseline,
+            args.candidate_harness,
+            min_pairs=args.min_pairs,
+            require_live=True,
+            require_independent_verification=True,
+            required_holdout_partition=args.holdout_partition,
+            required_tasks=[args.task],
+            required_seeds=seeds,
+            require_provider_receipts=True,
+            holm_family_size=args.holm_family_size,
+            practical_improvement_threshold=args.practical_threshold,
+        )
+        reports.append(evidence.to_dict())
+    report = {
+        "schema": "terminus.paired-campaign.v1",
+        "candidate_harness": args.candidate_harness,
+        "harnesses": harness_ids,
+        "tasks": [args.task],
+        "seeds": seeds,
+        "record_count": len(result.records),
+        "eligible": all(bool(item["eligible"]) for item in reports),
+        "superiority_demonstrated": all(
+            bool(item["eligible"]) and bool(item["significance_passed"]) for item in reports
+        ),
+        "comparisons": reports,
+    }
+    _write_json(report, str(output_dir / "report.json"))
+    print(
+        f"paired campaign completed: records={len(result.records)} "
+        f"eligible={report['eligible']} superiority={report['superiority_demonstrated']}"
+    )
+    return 0 if report["eligible"] else 2
+
+
+def _live_run_request(args: argparse.Namespace, seed: int) -> RunRequest:
+    """Build one live :class:`RunRequest` from the parsed CLI arguments."""
+    budgets = Budgets()
+    if args.max_steps is not None:
+        budgets = replace(budgets, max_tool_calls=int(args.max_steps))
+    if args.max_tokens is not None:
+        budgets = replace(budgets, max_total_tokens=int(args.max_tokens))
+    return RunRequest(
+        suite=args.suite,
+        task=args.task,
+        task_dir=Path(args.task_dir),
+        harness_id="terminus-live",
+        harness_commit=args.harness_commit,
+        model_snapshot=ModelCapabilitySnapshot(
+            provider=args.provider,
+            model=args.model,
+            api_version=os.environ.get("TERMINUS_LIVE_API_VERSION", "2026-08"),
+            context_window=200_000,
+            max_output_tokens=8_192,
+            supports_tool_calls=True,
+            supports_streaming=True,
+            supports_cache=True,
+        ),
+        random_seed=seed,
+        budgets=budgets,
+        reasoning_effort=args.effort,
+        provider_account_id=args.provider_account,
+    )
+
+
 def _cmd_run_live(args: argparse.Namespace) -> int:
-    """Execute one live evaluation through the Terminus control plane (R8)."""
+    """Execute one live evaluation through the Terminus control plane (R8).
+
+    Three suite families are routed here:
+
+    * ``terminal-bench`` / ``harbor`` — delegated to Harbor through the pinned
+      adapter, with the Terminus agent shim registered as Harbor's agent.
+    * ``swe-bench-pro`` / ``swe-bench*`` — one Terminus turn on a materialised
+      instance checkout, then the pinned evaluator (or an honest
+      ``evaluation_pending`` with the prediction path).
+    * everything else — an internal task package graded by its own declared
+      grader.
+    """
     from .runners import TrajectoryRecorder
-    from .runners.live_runner import run_live_task
+    from .runners.live_runner import (
+        LiveRunError,
+        materialize_task_workspace,
+        run_live_task,
+        workspace_diff,
+    )
     from .runners.terminus_harness import TerminusControlError, TerminusHarness
+
+    if _is_harbor_suite(args.suite):
+        return _cmd_run_harbor(args)
 
     try:
         harness = TerminusHarness.from_env()
@@ -284,68 +608,200 @@ def _cmd_run_live(args: argparse.Namespace) -> int:
     n = 0
     for i in range(args.seeds):
         seed = args.seed + i
-        request = RunRequest(
-            suite=args.suite,
-            task=args.task,
-            task_dir=Path(args.task_dir),
-            harness_id="terminus-live",
-            harness_commit=args.harness_commit,
-            model_snapshot=ModelCapabilitySnapshot(
-                provider=args.provider,
-                model=args.model,
-                api_version=os.environ.get("TERMINUS_LIVE_API_VERSION", "2026-08"),
-                context_window=200_000,
-                max_output_tokens=8_192,
-                supports_tool_calls=True,
-                supports_streaming=True,
-                supports_cache=True,
-            ),
-            random_seed=seed,
-        )
+        request = _live_run_request(args, seed)
         recorder = TrajectoryRecorder(run_id=f"{args.suite}-{args.task}-{seed}")
-        result, patch_payload = run_live_task(harness, request, recorder)
 
-        # R8/Cubic: actually bridge to the pinned evaluator when this suite is
-        # an external benchmark and a real patch exists. Results land beside
-        # the run records; absence of the tool records explicit "unavailable".
-        evaluation_report: dict[str, Any] | None = None
-        if args.suite.startswith("swe-bench") and patch_payload.get("diff"):
-            from .runners.live_runner import (
-                build_swebench_evaluation_argv,
-                ensure_temp_predictions_dir,
-                invoke_external_evaluator,
+        if _is_swebench_pro_suite(args.suite):
+            record = _run_swebench_pro_seed(args, harness, request, recorder, seed)
+        else:
+            package_dir = Path(args.task_dir)
+            try:
+                materialized = materialize_task_workspace(
+                    package_dir,
+                    _internal_workspace(args, seed),
+                    run_setup=not args.no_setup,
+                )
+            except LiveRunError as error:
+                print(f"live run unavailable: {error}", file=sys.stderr)
+                return 2
+            # The agent is pointed at the scratch tree; the package (grader,
+            # hidden tests, acceptance criteria, task.yaml identity) stays
+            # outside anything the model may edit.
+            run_request = replace(
+                request,
+                task_dir=materialized.workspace,
+                task_package_dir=package_dir,
             )
-
-            predictions_dir = ensure_temp_predictions_dir()
-            argv = build_swebench_evaluation_argv(
-                patch_diff=str(patch_payload["diff"]),
-                instance_id=args.task.replace("/", "__"),
-                predictions_dir=predictions_dir,
-                suite_manifest=f"suites/{args.suite}.yaml",
+            result, patch_payload = run_live_task(harness, run_request, recorder)
+            if not patch_payload.get("diff") and materialized.base_commit:
+                # The control plane returned nothing; the workspace is a git
+                # repository now, so the diff is still recoverable locally.
+                local = workspace_diff(materialized.workspace, materialized.base_commit)
+                if local:
+                    patch_payload = {**patch_payload, "diff": local, "diff_source": "local_git"}
+            record = build_live_run_record(
+                harness_result=result,
+                request=run_request,
+                patch_payload=patch_payload,
+                seed=seed,
+                task_package_dir=package_dir,
+                workspace=materialized.workspace,
+                workspace_base_commit=materialized.base_commit,
+                grader_assets_dir=materialized.grader_assets_dir,
+                trajectory=recorder.to_dicts(),
             )
-            if argv is None:
-                evaluation_report = {"status": "evaluator_unavailable"}
-            else:
-                evaluation_report = {
-                    "status": "invoked",
-                    "argv": [*argv[:2], "..."],
-                    **invoke_external_evaluator(argv),
-                }
-
-        record = build_live_run_record(
-            harness_result=result,
-            request=request,
-            patch_payload=patch_payload,
-            seed=seed,
-        )
-        if evaluation_report is not None:
-            notes = json.loads(record.notes) if record.notes else {}
-            notes["evaluation"] = evaluation_report
-            object.__setattr__(record, "notes", json.dumps(notes, sort_keys=True))
+            record.artifacts.append({"kind": "task_workspace", **materialized.to_dict()})
         _write_record(record, output_dir, args.format)
         n += 1
+        print(
+            f"  run {n}/{args.seeds}: {record.run_id} outcome={record.outcome.value} "
+            f"success={record.success} steps={record.steps} "
+            f"cost_usd={record.cost.computed_usd if record.cost else 'unknown'}"
+        )
     print(f"live runs completed: {n}")
     return 0
+
+
+def _internal_workspace(args: argparse.Namespace, seed: int) -> Path:
+    """Where this seed's scratch workspace lives."""
+    if args.workspace:
+        return Path(str(args.workspace))
+    safe_task = str(args.task).replace("/", "__")
+    return Path(str(args.output_dir)) / "workspaces" / str(args.suite) / safe_task / str(seed)
+
+
+def _is_harbor_suite(suite: str) -> bool:
+    """Whether a suite id routes to the Harbor / Terminal-Bench adapter."""
+    normalized = suite.strip().lower()
+    return normalized in {"terminal-bench", "harbor"} or normalized.startswith("terminal-bench")
+
+
+def _is_swebench_pro_suite(suite: str) -> bool:
+    normalized = suite.strip().lower()
+    return normalized in {"swe-bench-pro", "swebench-pro"} or normalized.startswith("swe-bench-pro")
+
+
+def _suite_manifest_path(suite: str) -> Path:
+    """Locate a suite manifest relative to the repository root."""
+    repo_root = Path(__file__).resolve().parents[3]
+    return repo_root / "evals" / "suites" / f"{suite}.yaml"
+
+
+def _cmd_run_harbor(args: argparse.Namespace) -> int:
+    """Run Terminal-Bench through Harbor with the Terminus agent shim."""
+    from .runners.harbor_agent import TERMINUS_HARBOR_AGENT_IMPORT_PATH, harbor_agent_env
+    from .runners.harbor_runner import HarborUnavailable, run_harbor_tasks
+
+    manifest_path = _suite_manifest_path("terminal-bench")
+    if not manifest_path.exists():
+        print(f"error: suite manifest not found: {manifest_path}", file=sys.stderr)
+        return 1
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        env = harbor_agent_env()
+    except RuntimeError as error:
+        print(f"live run unavailable: {error}", file=sys.stderr)
+        return 2
+
+    n = 0
+    for i in range(args.seeds):
+        seed = args.seed + i
+        request = _live_run_request(args, seed)
+        try:
+            record = run_harbor_tasks(
+                manifest_path=manifest_path,
+                request=request,
+                seed=seed,
+                agent_import_path=TERMINUS_HARBOR_AGENT_IMPORT_PATH,
+                agent_env=env,
+                jobs_dir=output_dir / "harbor-jobs",
+            )
+        except HarborUnavailable as error:
+            print(f"harbor run unavailable: {error}", file=sys.stderr)
+            return 2
+        _write_record(record, output_dir, args.format)
+        n += 1
+        print(f"  harbor run {n}/{args.seeds}: {record.run_id} outcome={record.outcome.value}")
+    print(f"live runs completed: {n}")
+    return 0
+
+
+def _run_swebench_pro_seed(
+    args: argparse.Namespace,
+    harness: Any,
+    request: RunRequest,
+    recorder: Any,
+    seed: int,
+) -> RunRecord:
+    """Run one SWE-bench Pro instance end to end and record the outcome."""
+    from .runners.swebench_pro import (
+        SweBenchProError,
+        evaluate_prediction,
+        grader_result_for_report,
+        load_instance,
+        materialize_instance,
+        write_prediction_files,
+    )
+
+    manifest_path = _suite_manifest_path("swe-bench-pro")
+    instance = load_instance(
+        args.task,
+        instance_file=Path(args.instance_file) if args.instance_file else None,
+    )
+    workspace = Path(args.task_dir)
+    materialization = materialize_instance(instance, workspace)
+    # The issue text is the instruction; SWE-bench Pro ships no prompt.md and
+    # writing one into the checkout would show up in the extracted patch.
+    request = replace(request, task_dir=workspace, instruction=instance.instruction())
+    from .runners.live_runner import run_live_task
+
+    result, patch_payload = run_live_task(harness, request, recorder)
+    diff = str(patch_payload.get("diff") or "")
+    if not diff.strip():
+        diff = materialization.local_diff()
+    prediction = write_prediction_files(
+        instance_id=instance.instance_id,
+        model_name_or_path=f"terminus-live/{request.model_snapshot.model}",
+        model_patch=diff,
+        output_dir=Path(args.output_dir) / "predictions",
+    )
+    try:
+        evaluation = evaluate_prediction(prediction, manifest_path=manifest_path)
+    except SweBenchProError as error:
+        evaluation = {"status": "evaluator_error", "error": str(error)}
+    record = build_live_run_record(
+        harness_result=result,
+        request=request,
+        patch_payload=patch_payload,
+        seed=seed,
+        workspace=workspace,
+        # The instance's own base commit: every diff in the prediction is
+        # taken against it, exactly as the evaluator expects.
+        workspace_base_commit=materialization.base_commit,
+        trajectory=recorder.to_dicts(),
+        external_evaluation=evaluation,
+    )
+    # The verdict for an external benchmark belongs to the external evaluator,
+    # not to an internal task grader the instance does not ship.
+    record.grader_results = [grader_result_for_report(evaluation)]
+    record.artifacts.append(
+        {
+            "kind": "swebench_pro_prediction",
+            "instance_id": instance.instance_id,
+            "predictions_path": str(prediction.predictions_path),
+            "patches_path": str(prediction.patches_path),
+            "base_commit": instance.base_commit,
+            "repo": instance.repo,
+            # The dataset publishes a per-instance image *tag*, not a digest,
+            # so the suite's per_instance_required policy is not satisfied by
+            # it; the gap is recorded rather than papered over.
+            "image_reference": instance.image_reference,
+            "image_digest_status": "tag_only",
+            "materialization": materialization.to_dict(),
+        }
+    )
+    return record
 
 
 def build_live_run_record(
@@ -353,17 +809,30 @@ def build_live_run_record(
     request: RunRequest,
     patch_payload: dict[str, Any],
     seed: int,
+    *,
+    task_package_dir: Path | None = None,
+    workspace: Path | None = None,
+    workspace_base_commit: str | None = None,
+    grader_assets_dir: Path | None = None,
+    trajectory: list[dict[str, Any]] | None = None,
+    external_evaluation: dict[str, Any] | None = None,
 ) -> RunRecord:
     """Compose one honest RunRecord from a live harness result.
 
-    Grader results stay empty until an external grader or the control plane's
-    verification evidence is reconciled; completion alone is never recorded as
-    success (anti-gaming rule).
+    ``success`` comes from the task's **declared grader**, executed here
+    against the post-run workspace. The control plane's own verification
+    conclusion is recorded separately as ``harness_verdict`` so a
+    false-positive completion is visible rather than scored as a pass.
     """
+    from .runners.harness_runner import apply_metrics_to_record
+    from .runners.task_graders import load_task_grader_spec, run_task_grader
+
     notes = json.loads(harness_result.notes) if harness_result.notes else {}
-    usage = notes.get("provider_usage") or {}
-    outcome = harness_result.outcome if isinstance(harness_result.outcome, Outcome) else Outcome(
-        str(harness_result.outcome).split(".")[-1]
+    metrics = dict(getattr(harness_result, "metrics", {}) or {})
+    outcome = (
+        harness_result.outcome
+        if isinstance(harness_result.outcome, Outcome)
+        else Outcome(str(harness_result.outcome).split(".")[-1])
     )
     artifacts = list(harness_result.artifacts)
     if patch_payload.get("diff"):
@@ -374,42 +843,96 @@ def build_live_run_record(
                 "truncated": bool(patch_payload.get("truncated")),
             }
         )
-    environment_digest = f"remote:{notes.get('workspace_id', 'unknown')}"
-    return RunRecord(
+
+    # The environment digest is the harness's content-addressed digest of the
+    # fixture tree plus the control plane's stable identity. It is never a
+    # session label: `evals/registry.yaml` requires a real content digest and
+    # the local exit gate rejects anything that is not `sha256:<64 hex>`.
+    environment_digest = harness_result.environment_digest or _fallback_environment_digest(request)
+
+    # The grader, the hidden tests and `task.yaml` live in the task *package*;
+    # the agent only ever edits the workspace. When they are the same directory
+    # this collapses to the pre-existing in-place behaviour.
+    package_dir = task_package_dir or request.task_package_dir or request.task_dir
+    grader_spec = load_task_grader_spec(package_dir)
+    grade_workspace = workspace or request.task_dir
+    grader_results = [
+        run_task_grader(
+            package_dir,
+            grade_workspace,
+            objective=f"{request.suite}/{request.task}",
+            spec=grader_spec,
+            grader_assets_dir=grader_assets_dir,
+        )
+    ]
+
+    resolved_model_snapshot = {
+        **request.model_snapshot.to_dict(),
+        **(metrics.get("model_snapshot") or {}),
+        "steering": metrics.get("steering", {}),
+    }
+
+    record = RunRecord(
         run_id=f"live-{request.suite}-{request.task}-{seed}-{uuid.uuid4().hex[:8]}",
         suite=request.suite,
         task=request.task,
         harness=request.harness_id,
         harness_commit=request.harness_commit,
-        model_capability_snapshot={
-            "provider": request.model_snapshot.provider,
-            "model": request.model_snapshot.model,
-        },
+        # The harness's live snapshot wins over the caller's guess: `--provider`
+        # defaults to a placeholder, and "fake" must never describe a real run.
+        model_capability_snapshot=resolved_model_snapshot,
         environment_digest=environment_digest,
         random_seed=seed,
-        budgets={},
-        experiment_assignments=[],
+        budgets=request.budgets.to_dict(),
+        experiment_assignments=list(request.experiment_assignments),
         outcome=outcome,
-        grader_results=[],
-        cost=None,
+        grader_results=grader_results,
+        cost=harness_result.cost,
         artifacts=artifacts,
         context_manifests=list(getattr(harness_result, "context_manifests", []) or []),
+        trajectory=list(trajectory or []),
+        evidence_class=harness_result.evidence_class,
+        provider_receipts=list(harness_result.provider_receipts),
         notes=json.dumps(
             {
                 **notes,
                 "mode": "live",
-                "input_tokens": int(usage.get("input_tokens", 0)),
-                "output_tokens": int(usage.get("output_tokens", 0)),
-                "cached_tokens": int(usage.get("cached_tokens", 0)),
-                "evaluation": ("pending_grader" if patch_payload.get("diff") else "no_patch"),
+                "token_source": metrics.get("token_source", "unavailable"),
+                "grader": grader_spec.grader_id,
+                "evaluation": (
+                    external_evaluation
+                    if external_evaluation is not None
+                    else ("graded" if grader_spec.available else "no_task_grader")
+                ),
             },
             sort_keys=True,
         ),
         evaluation_identity=build_evaluation_identity(
             request,
             environment_digest=environment_digest,
+            model_snapshot=resolved_model_snapshot,
         ),
     )
+    apply_metrics_to_record(record, metrics)
+    record.attempts = list(metrics.get("attempts") or [])
+    record.workspace_base_commit = workspace_base_commit
+    # The record is composed after the run, so `start` is back-dated from the
+    # measured wall clock rather than left at "when we wrote the file".
+    ended = record.start
+    record.end = ended
+    if record.wall_clock_ms is not None:
+        record.start = ended - timedelta(milliseconds=record.wall_clock_ms)
+    return record
+
+
+def _fallback_environment_digest(request: RunRequest) -> str:
+    """Content-address the task tree when the harness returned no digest."""
+    from .runners.environment_digest import LiveEnvironmentDigest
+
+    return LiveEnvironmentDigest.build(
+        workspace_root=request.task_dir,
+        task_dir=request.task_package_dir or request.task_dir,
+    ).to_digest()
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -422,9 +945,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    live_requested = (
-        args.harness in {"terminus-live", "terminus"}
-        or (bool(os.environ.get("TERMINUS_CONTROL_URL")) and not args.fixture_mode)
+    live_requested = args.harness in {"terminus-live", "terminus"} or (
+        bool(os.environ.get("TERMINUS_CONTROL_URL")) and not args.fixture_mode
     )
     if live_requested:
         return _cmd_run_live(args)
@@ -744,6 +1266,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     """Dispatch to the right subcommand handler."""
     handlers = {
         "run": _cmd_run,
+        "compare": _cmd_compare,
         "bench-check": _cmd_bench_check,
         "aggregate": _cmd_aggregate,
         "dashboard": _cmd_dashboard,
@@ -796,7 +1319,9 @@ def _cmd_bench_check(args: argparse.Namespace) -> int:
     if not suites_dir.is_dir():
         print(f"error: suites directory does not exist: {suites_dir}", file=sys.stderr)
         return 1
-    files = [Path(name) for name in args.suites] if args.suites else sorted(suites_dir.glob("*.yaml"))
+    files = (
+        [Path(name) for name in args.suites] if args.suites else sorted(suites_dir.glob("*.yaml"))
+    )
     if not files:
         print(f"no suite manifests found in {suites_dir}", file=sys.stderr)
         return 1
@@ -811,7 +1336,9 @@ def _cmd_bench_check(args: argparse.Namespace) -> int:
         try:
             raw = __import__("yaml").safe_load(full.read_text(encoding="utf-8"))
             suite_block = raw.get("suite") if isinstance(raw, dict) else None
-            has_adapter = isinstance(suite_block, dict) and isinstance(suite_block.get("adapter"), dict)
+            has_adapter = isinstance(suite_block, dict) and isinstance(
+                suite_block.get("adapter"), dict
+            )
             if not has_adapter:
                 print(f"[bench-check] skip {full.name}: no external benchmark adapter section")
                 skipped += 1

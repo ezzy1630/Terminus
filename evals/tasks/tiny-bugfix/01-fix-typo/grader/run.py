@@ -36,6 +36,9 @@ def main() -> None:
         and "hidden" not in p.parts
         and p.name != "test_lib.py"
         and "__pycache__" not in p.parts
+        # Tooling the fixture provisions for the agent (`.venv`, caches) is
+        # not agent-authored source; dot-directories are never graded.
+        and not any(part.startswith(".") for part in p.relative_to(root).parts)
     ]
     if extra_source_files:
         fail(f"unexpected source files created: {[str(p) for p in extra_source_files]}")
@@ -54,9 +57,14 @@ def main() -> None:
     if not re.search(r"receives?\b", text):
         fail("no correct spelling 'receive' found in src/lib.py")
 
+    # The workspace's own interpreter carries pytest (setup.sh provisions
+    # `.venv`); the grader's host interpreter need not.
+    venv_python = root / ".venv" / "bin" / "python"
+    python = str(venv_python) if venv_python.exists() else sys.executable
+
     # 4. Hidden test passes.
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "hidden/test_fix.py"],
+        [python, "-m", "pytest", "-q", "hidden/test_fix.py"],
         capture_output=True,
         text=True,
     )
@@ -65,7 +73,7 @@ def main() -> None:
 
     # 5. Public test still passes.
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "test_lib.py"],
+        [python, "-m", "pytest", "-q", "test_lib.py"],
         capture_output=True,
         text=True,
     )

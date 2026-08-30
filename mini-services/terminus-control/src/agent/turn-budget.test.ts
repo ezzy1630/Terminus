@@ -132,10 +132,13 @@ describe("TurnBudget", () => {
   });
 
   test("hard maximum caps a raised soft budget", () => {
-    const budget = new TurnBudget({ maxSteps: 100, hardMaxSteps: HARD_MAX_STEPS });
+    // 200 steps, not 24: the old ceiling silently clamped the configured
+    // budget and killed real coding turns mid-edit with steps_exhausted.
+    expect(HARD_MAX_STEPS).toBe(200);
+    const budget = new TurnBudget({ maxSteps: HARD_MAX_STEPS + 500, hardMaxSteps: HARD_MAX_STEPS });
     expect(budget.canStartStep().allowed).toBe(true);
     let guard = 0;
-    while (budget.canStartStep().allowed && guard < 200) {
+    while (budget.canStartStep().allowed && guard < HARD_MAX_STEPS + 100) {
       budget.recordStep();
       guard += 1;
     }

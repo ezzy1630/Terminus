@@ -19,6 +19,11 @@ hmac = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
 keyring = { workspace = true }
+# Used for `spawn_blocking` + `time::timeout` only: the broker moves a
+# blocking credential resolve onto the blocking pool under a deadline so an
+# OS keychain prompt cannot park a tokio worker (see
+# `SECRET_RESOLVE_TIMEOUT`).
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

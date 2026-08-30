@@ -1,0 +1,15 @@
+# Root bun config.
+#
+# `bun test <paths>` walks the entire cwd tree to resolve its path filters.
+# The Cargo `target/` tree on this repo is large enough that the walk alone
+# costs ~30 s per invocation (and looks like a hang under load). Prune the
+# build/vendor trees that never contain first-party tests.
+[test]
+pathIgnorePatterns = [
+  "target/**",
+  "vendor/**",
+  "python/.venv/**",
+  ".terminus-dev/**",
+  "**/dist/**",
+  "**/.venv/**",
+]

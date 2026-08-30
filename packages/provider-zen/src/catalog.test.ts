@@ -11,6 +11,7 @@ const available = {
     { id: "free-chat", object: "model", owned_by: "opencode" },
     { id: "paid-responses", object: "model", owned_by: "opencode" },
     { id: "messages-model", object: "model", owned_by: "opencode" },
+    { id: "deprecated-model", object: "model", owned_by: "opencode" },
     { id: "unknown-model", object: "model", owned_by: "opencode" },
   ],
 };
@@ -45,6 +46,14 @@ const modelsDev = {
         limit: { context: 128_000, output: 16_000 },
         cost: { input: 0.3, output: 1.2 },
       },
+      "deprecated-model": {
+        id: "deprecated-model",
+        name: "Deprecated Model",
+        status: "deprecated",
+        tool_call: true,
+        limit: { context: 128_000, output: 16_000 },
+        cost: { input: 0, output: 0 },
+      },
     },
   },
 };
@@ -64,6 +73,7 @@ describe("Zen and Go catalog discovery", () => {
       ["paid-responses", "responses", false],
     ]);
     expect(result.rejected).toEqual([
+      { modelId: "deprecated-model", reason: "model is deprecated in the decoded opencode catalog" },
       { modelId: "unknown-model", reason: "model is absent from the decoded opencode catalog" },
     ]);
   });

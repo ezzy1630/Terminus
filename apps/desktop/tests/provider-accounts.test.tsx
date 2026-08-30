@@ -312,6 +312,14 @@ describe("install and sign-in hints", () => {
     ])).toEqual([]);
   });
 
+  test("does not ask for an OpenCode login when anonymous Zen is connected", () => {
+    expect(discoveryHints(discovery(), [
+      account({ id: "z", source: "zen", display_name: "OpenCode Zen", auth_kind: "anonymous" }),
+    ])).toEqual([
+      "Codex CLI is installed but not signed in — run `codex` to sign in.",
+    ]);
+  });
+
   test("renders the hints in the section", async () => {
     installList(response([], { discovery: discovery({ installed_tools: ["opencode"] }) }));
     render(<ProviderAccountSettings />);

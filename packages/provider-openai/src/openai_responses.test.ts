@@ -10,10 +10,13 @@ import type {
 } from "@terminus/provider-core";
 import {
   OpenAiRenderer,
+  ReasoningReplayLedger,
   renderResponsesRequest,
   decodeOpenAiResponsesStream,
   decodeOpenAiChatStream,
   schemaSatisfiesStrictMode,
+  toResponsesInputItems,
+  type OpenAiChatMessage,
 } from "./index.js";
 
 const DEFAULT_PROVIDER_CAPS: ProviderCapabilitySnapshot = {
@@ -164,13 +167,22 @@ describe("OpenAI Responses Connector", () => {
 
     expect(body.model).toBe("openai/gpt-4o");
     expect(body.stream).toBe(true);
-    expect(body.previous_response_id).toBe("resp_12345");
+    // Stateless by construction: `store: false` means the endpoint keeps
+    // nothing to continue from, so a continuation id is never valid here.
+    expect(body.previous_response_id).toBeUndefined();
     expect(body.max_output_tokens).toBe(4096);
     expect(body.store).toBe(false);
+    expect(body.include).toEqual(["reasoning.encrypted_content"]);
+    expect(body.truncation).toBe("auto");
+    expect(body.parallel_tool_calls).toBe(true);
+    expect(body.text).toEqual({ verbosity: "low" });
+    // No explicit key was supplied, so the compiled prefix hash routes it.
+    expect(body.prompt_cache_key).toBe(`sha256:${"0".repeat(64)}`);
 
     const reasoning = body.reasoning as { effort: string; summary: string };
     expect(reasoning).toBeDefined();
     expect(reasoning.effort).toBe("medium");
+    expect(reasoning.summary).toBe("auto");
 
     const tools = body.tools as Array<{ type: string; name: string; strict?: boolean }>;
     expect(tools).toHaveLength(1);
@@ -179,12 +191,120 @@ describe("OpenAI Responses Connector", () => {
     // The fixture schema satisfies strict mode, so the claim is made.
     expect(tools[0]!.strict).toBe(true);
 
+    // The stable prefix travels as `instructions`, not as a leading developer
+    // item inside the array that changes on every attempt.
+    expect(body.instructions).toBe("System instructions.");
     const inputItems = body.input as Array<{ role: string; content: string }>;
-    expect(inputItems).toHaveLength(2);
-    expect(inputItems[0]!.role).toBe("developer");
-    expect(inputItems[0]!.content).toBe("System instructions.");
-    expect(inputItems[1]!.role).toBe("user");
-    expect(inputItems[1]!.content).toBe("Search for main.rs");
+    expect(inputItems).toHaveLength(1);
+    expect(inputItems[0]!.role).toBe("user");
+    expect(inputItems[0]!.content).toBe("Search for main.rs");
+  });
+
+  test("sends the reasoning effort the caller chose, unconditionally", async () => {
+    const base: CanonicalRenderInput = {
+      provider: DEFAULT_PROVIDER_CAPS,
+      model: DEFAULT_MODEL_CAPS,
+      manifestId: "01934567-89ab-7000-8000-cdef01234567" as Uuid7,
+      fragments: [mkFragment("f1", "authority", "System instructions.")],
+      toolSchemas: [],
+      cachePlan: { stablePrefixHash: `sha256:${"0".repeat(64)}` as ContentHash, breakpoints: [] },
+      continuationId: null,
+      outputProfile: "terse",
+      // The reserve used to gate the wire field; it is accounting only now.
+      reasoningReserveTokens: 0n as TokenCount,
+      outputReserveTokens: 4096n as TokenCount,
+      hardInputLimit: 100000n as TokenCount,
+      signal: null,
+    };
+
+    const high = await renderResponsesRequest(base, { reasoningEffort: "high" });
+    expect((high.body as Record<string, unknown>).reasoning).toEqual({ effort: "high", summary: "auto" });
+
+    // `max` used to collapse to `high` for every model. A model whose family
+    // publishes the top rungs keeps them.
+    const solInput: CanonicalRenderInput = {
+      ...base,
+      model: { ...DEFAULT_MODEL_CAPS, modelKey: "gpt-5.6-sol" as ModelKey },
+    };
+    const sol = await renderResponsesRequest(solInput, { reasoningEffort: "max" });
+    expect((sol.body as Record<string, unknown>).reasoning).toEqual({ effort: "max", summary: "auto" });
+
+    // A model that advertises its own ladder is clamped into that ladder.
+    const clamped = await renderResponsesRequest(base, {
+      reasoningEffort: "max",
+      reasoningLevels: ["low", "medium", "high", "xhigh"],
+    });
+    expect((clamped.body as Record<string, unknown>).reasoning).toEqual({ effort: "xhigh", summary: "auto" });
+
+    // An unrecognised family saturates at `high` rather than guessing a rung
+    // the endpoint would reject.
+    const legacy = await renderResponsesRequest(base, { reasoningEffort: "max" });
+    expect((legacy.body as Record<string, unknown>).reasoning).toEqual({ effort: "high", summary: "auto" });
+  });
+
+  test("replays every banked reasoning item immediately before its tool call", async () => {
+    const ledger = new ReasoningReplayLedger();
+    ledger.ingest([
+      { kind: "text", reasoningItem: { id: "rs_1", encryptedContent: "blob-1", summary: ["first"] } },
+      {
+        kind: "tool_call",
+        toolCall: { toolCallId: "call_1", toolName: "search", arguments: { query: "x" } },
+      },
+      { kind: "text", reasoningItem: { id: "rs_2", encryptedContent: "blob-2", summary: [] } },
+      {
+        kind: "tool_call",
+        toolCall: { toolCallId: "call_2", toolName: "search", arguments: { query: "y" } },
+      },
+    ]);
+
+    const messages: OpenAiChatMessage[] = [
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "call_1", type: "function", function: { name: "search", arguments: "{}" } },
+          { id: "call_2", type: "function", function: { name: "search", arguments: "{}" } },
+        ],
+      },
+    ];
+
+    expect(toResponsesInputItems(messages, ledger)).toEqual([
+      { role: "user", content: "go" },
+      {
+        type: "reasoning",
+        id: "rs_1",
+        encrypted_content: "blob-1",
+        summary: [{ type: "summary_text", text: "first" }],
+      },
+      { type: "function_call", call_id: "call_1", name: "search", arguments: "{}" },
+      { type: "reasoning", id: "rs_2", encrypted_content: "blob-2", summary: [] },
+      { type: "function_call", call_id: "call_2", name: "search", arguments: "{}" },
+    ]);
+  });
+
+  test("captures encrypted reasoning items off the Responses stream", async () => {
+    async function* sse(): AsyncIterable<string> {
+      yield "event: response.output_item.done\ndata: {\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_9\",\"encrypted_content\":\"gAAAA\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"planning\"}]}}\n\n";
+      // An item with no blob is not replayable and must not be banked.
+      yield "event: response.output_item.done\ndata: {\"output_index\":1,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_10\",\"summary\":[]}}\n\n";
+      yield "event: response.output_item.done\ndata: {\"output_index\":2,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_7\",\"name\":\"search\",\"arguments\":\"{}\"}}\n\n";
+      yield "event: response.completed\ndata: {\"response\":{\"id\":\"resp_1\"}}\n\n";
+    }
+    const chunks: any[] = [];
+    for await (const chunk of decodeOpenAiResponsesStream(sse())) chunks.push(chunk);
+
+    expect(chunks[0]).toEqual({
+      kind: "text",
+      reasoningItem: { id: "rs_9", encryptedContent: "gAAAA", summary: ["planning"] },
+    });
+    expect(chunks[1]!.kind).toBe("tool_call");
+
+    const ledger = new ReasoningReplayLedger();
+    ledger.ingest(chunks);
+    expect(ledger.itemsFor("call_7")).toEqual([
+      { id: "rs_9", encryptedContent: "gAAAA", summary: ["planning"] },
+    ]);
   });
 
   /**
@@ -218,7 +338,7 @@ describe("OpenAI Responses Connector", () => {
     const rendered = await renderResponsesRequest(input);
     expect(JSON.stringify(rendered.body)).not.toContain("cache_control");
     const items = (rendered.body as Record<string, unknown>).input as Array<Record<string, unknown>>;
-    expect(items[0]).toEqual({ role: "developer", content: "System instructions." });
+    expect(items[0]).toEqual({ role: "user", content: "Search for main.rs" });
   });
 
   test("streams and decodes Responses API SSE frames", async () => {
@@ -270,7 +390,7 @@ describe("OpenAI Responses Connector", () => {
     async function* chatSseGenerator(): AsyncIterable<string> {
       yield "data: {\"id\":\"chat_123\",\"choices\":[{\"delta\":{\"content\":\"Hi!\"}}]}\n\n";
       yield "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"reasoning...\"}}]}\n\n";
-      yield "data: {\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":20}}}\n\n";
+      yield "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":20}}}\n\n";
       yield "data: [DONE]\n\n";
     }
 
@@ -285,6 +405,7 @@ describe("OpenAI Responses Connector", () => {
     expect(chunks[2]).toEqual({
       kind: "done",
       providerRequestId: "chat_123",
+      stopReason: "length",
       usage: {
         inputTokens: 50n as TokenCount,
         cachedInputTokens: 20n as TokenCount,

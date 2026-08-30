@@ -13,14 +13,27 @@ snapshot — that path doesn't need this module.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import random
+import re
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from ..run_record import RunRecord
-from .harness_runner import Budgets, Harness, HarnessRunner, ModelCapabilitySnapshot, RunRequest
+from ..run_record import GraderResult, RunRecord
+from .harness_runner import (
+    Budgets,
+    Harness,
+    HarnessRunner,
+    ModelCapabilitySnapshot,
+    RunRequest,
+    build_evaluation_identity,
+)
+from .live_runner import LiveRunError, materialize_task_workspace
+from .task_graders import run_task_grader
 
 if TYPE_CHECKING:
     from ..paired_evaluation import PairedEvaluationEvidence
@@ -42,6 +55,11 @@ class HarnessSpec:
     harness_id: str
     harness_commit: str
     factory: Harness
+    harness_config_hash: str = "missing:harness_config_hash"
+    provider_aliases: frozenset[str] = field(default_factory=frozenset)
+    pin_verified: bool = False
+    provider_account_id: str | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +69,7 @@ class TaskSpec:
     suite: str
     task: str
     task_dir: Path
+    holdout_partition: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +90,9 @@ class CrossHarnessPlan:
     # If True, harness order is randomized per task to avoid ordering effects.
     randomize_harness_order: bool = True
     rng_seed: int = 0
+    output_dir: Path | None = None
+    require_exact_pins: bool = False
+    tool_schema_hash: str = "missing:tool_schema_hash"
 
     @property
     def total_runs(self) -> int:
@@ -170,8 +192,14 @@ class CrossHarnessRunner:
 
     def run(self, plan: CrossHarnessPlan) -> CrossHarnessResult:
         """Execute the plan and return all records."""
+        _validate_plan(plan)
         rng = random.Random(plan.rng_seed)
         records: list[RunRecord] = []
+        output_dir = plan.output_dir or Path(tempfile.mkdtemp(prefix="terminus-paired-"))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        records_path = output_dir / "runs.jsonl"
+        if records_path.exists():
+            raise ValueError(f"paired campaign output already exists: {records_path}")
         total = plan.total_runs
         completed = 0
         for task in plan.tasks:
@@ -180,23 +208,169 @@ class CrossHarnessRunner:
                 if plan.randomize_harness_order:
                     rng.shuffle(harnesses)
                 for hs in harnesses:
+                    workspace = (
+                        output_dir
+                        / "workspaces"
+                        / _safe_component(task.suite)
+                        / _safe_component(task.task)
+                        / _safe_component(hs.harness_id)
+                        / str(seed)
+                    )
+                    materialized = materialize_task_workspace(task.task_dir, workspace)
+                    if not materialized.is_scratch:
+                        raise LiveRunError(
+                            f"paired task {task.task_dir} has no setup.sh; refusing to let "
+                            "harnesses share the immutable task package"
+                        )
+                    repository_digest = _workspace_digest(materialized.workspace)
+                    policy_hash = _hash_file(task.task_dir / "policy.yaml")
+                    instruction_hash = _hash_file(task.task_dir / "prompt.md")
+                    network_policy = _network_policy(task.task_dir)
+                    task_version = _task_version(task.task_dir)
                     runner = HarnessRunner(harness=hs.factory)
                     request = RunRequest(
                         suite=task.suite,
                         task=task.task,
-                        task_dir=task.task_dir,
+                        task_dir=materialized.workspace,
+                        task_package_dir=task.task_dir,
                         harness_id=hs.harness_id,
                         harness_commit=hs.harness_commit,
                         model_snapshot=plan.model_snapshot,
                         random_seed=seed,
                         budgets=plan.budgets,
                         experiment_assignments=list(plan.experiment_assignments),
+                        task_version=task_version,
+                        repository_digest=repository_digest,
+                        sandbox_policy_hash=policy_hash,
+                        network_policy=network_policy,
+                        tool_schema_hash=plan.tool_schema_hash,
+                        instruction_hash=instruction_hash,
+                        harness_config_hash=hs.harness_config_hash,
+                        holdout_partition=task.holdout_partition,
+                        provider_account_id=hs.provider_account_id,
+                        reasoning_effort=hs.reasoning_effort,
                     )
                     record = runner.run(request)
+                    _validate_provider_receipts(record, plan.model_snapshot, hs)
+                    grade = run_task_grader(
+                        task.task_dir,
+                        materialized.workspace,
+                        objective=f"{task.suite}/{task.task}",
+                        grader_assets_dir=materialized.grader_assets_dir,
+                    )
+                    record.grader_results.append(grade)
+                    record.independently_verified = _grader_executed(grade)
+                    record.environment_digest = repository_digest
+                    record.evaluation_identity = build_evaluation_identity(
+                        request,
+                        environment_digest=repository_digest,
+                    )
+                    record.workspace_base_commit = materialized.base_commit
+                    record.artifacts.append({"kind": "task_workspace", **materialized.to_dict()})
                     records.append(record)
+                    with records_path.open("a", encoding="utf-8") as output:
+                        output.write(record.to_jsonl_line() + "\n")
                     completed += 1
                     self.reporter(completed, total, record)
         return CrossHarnessResult(records=records)
+
+
+_EXACT_REVISION = re.compile(r"(?:(?:git:)?[0-9a-f]{40,64}|sha256:[0-9a-f]{64})")
+
+
+def _validate_plan(plan: CrossHarnessPlan) -> None:
+    if not plan.tasks:
+        raise ValueError("paired campaign requires at least one task")
+    if len(plan.harnesses) < 2:
+        raise ValueError("paired campaign requires at least two harnesses")
+    if not plan.seeds or any(seed < 0 for seed in plan.seeds):
+        raise ValueError("paired campaign requires non-negative seeds")
+    cells = [(task.suite, task.task) for task in plan.tasks]
+    if len(cells) != len(set(cells)):
+        raise ValueError("paired campaign contains duplicate task cells")
+    harness_ids = [harness.harness_id for harness in plan.harnesses]
+    if len(harness_ids) != len(set(harness_ids)):
+        raise ValueError("paired campaign contains duplicate harness ids")
+    if plan.require_exact_pins:
+        for harness in plan.harnesses:
+            if (
+                not harness.pin_verified
+                or _EXACT_REVISION.fullmatch(harness.harness_commit) is None
+            ):
+                raise ValueError(f"harness {harness.harness_id} does not have a verified exact pin")
+            if harness.harness_config_hash.startswith("missing:"):
+                raise ValueError(f"harness {harness.harness_id} has no config hash")
+
+
+def _safe_component(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._") or "cell"
+
+
+def _hash_file(path: Path) -> str:
+    if not path.is_file():
+        return f"missing:{path.name}"
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _workspace_digest(workspace: Path) -> str:
+    """Hash the model-visible initial tree, excluding generated tool environments."""
+    digest = hashlib.sha256()
+    ignored = {".git", ".venv", "__pycache__", ".pytest_cache"}
+    for path in sorted(candidate for candidate in workspace.rglob("*") if candidate.is_file()):
+        relative = path.relative_to(workspace)
+        if any(part in ignored for part in relative.parts):
+            continue
+        digest.update(relative.as_posix().encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(path.read_bytes())
+        digest.update(b"\x00")
+    return "sha256:" + digest.hexdigest()
+
+
+def _task_yaml(package: Path) -> dict[str, Any]:
+    import yaml
+
+    path = package / "task.yaml"
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    if not isinstance(loaded, dict):
+        return {}
+    nested = loaded.get("task")
+    return dict(nested) if isinstance(nested, dict) else loaded
+
+
+def _task_version(package: Path) -> str:
+    task = _task_yaml(package)
+    value = task.get("version") or task.get("source_commit")
+    return str(value) if value else "missing:task_version"
+
+
+def _network_policy(package: Path) -> str:
+    task = _task_yaml(package)
+    return json.dumps(task.get("allowed_network", []), sort_keys=True, separators=(",", ":"))
+
+
+def _validate_provider_receipts(
+    record: RunRecord,
+    snapshot: ModelCapabilitySnapshot,
+    harness: HarnessSpec,
+) -> None:
+    aliases = {snapshot.provider, *harness.provider_aliases}
+    for receipt in record.provider_receipts:
+        model = str(receipt.get("model") or "")
+        provider = str(receipt.get("provider") or "")
+        if model and model.split("/", 1)[-1] != snapshot.model.split("/", 1)[-1]:
+            raise ValueError(
+                f"harness {harness.harness_id} ran model {model!r}, expected {snapshot.model!r}"
+            )
+        if provider and provider not in aliases:
+            raise ValueError(
+                f"harness {harness.harness_id} ran provider {provider!r}, expected one of "
+                f"{sorted(aliases)!r}"
+            )
+
+
+def _grader_executed(result: GraderResult) -> bool:
+    return result.metadata.get("grader_status") == "ran"
 
 
 def run_paired_comparison(

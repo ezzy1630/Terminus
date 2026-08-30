@@ -88,7 +88,8 @@ mod tests {
             r#match: RuleMatch {
                 executable_any: vec!["pnpm".into(), "pytest".into(), "cargo".into()],
                 ..Default::default()
-            },
+            }
+            .into(),
             effect: RuleEffect::Allow,
         });
         rules.push(Rule {
@@ -99,7 +100,8 @@ mod tests {
                 executable_any: vec!["git".into()],
                 argv_contains_any: vec!["push".into()],
                 ..Default::default()
-            },
+            }
+            .into(),
             effect: RuleEffect::Prompt,
         });
         rules.push(Rule {
@@ -110,7 +112,8 @@ mod tests {
                 executable_any: vec!["curl".into(), "wget".into()],
                 argv_contains_any: vec!["|".into(), "bash".into(), "sh".into()],
                 ..Default::default()
-            },
+            }
+            .into(),
             effect: RuleEffect::Deny,
         });
         rules.push(Rule {
@@ -119,9 +122,10 @@ mod tests {
             priority: 50,
             r#match: RuleMatch {
                 effects_any: vec![EffectType::WriteLocal],
-                working_directory_glob: vec!["**/.git/**".to_string()],
+                working_directory_glob: vec!["**/.git".to_string(), "**/.git/**".to_string()],
                 ..Default::default()
-            },
+            }
+            .into(),
             effect: RuleEffect::Deny,
         });
         rules
@@ -161,6 +165,27 @@ mod tests {
         let report = engine.evaluate(&command);
         assert_eq!(report.decision, Decision::Allow);
         assert!(!report.rule_ids.contains(&"prompt-git-push".to_string()));
+    }
+
+    #[test]
+    fn default_rule_set_allows_only_the_exact_workspace_tree_hash_shell_probe() {
+        const TREE_HASH_SCRIPT: &str = "find . -type f -not -path \"./.git/*\" -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256";
+        let engine = PolicyEngine::new(crate::default_rule_set());
+        let mut probe = NormalizedCommand::new("/bin/sh");
+        probe.argv = vec!["-c".into(), TREE_HASH_SCRIPT.into()];
+        probe.effect_types.insert(EffectType::ExecuteLocal);
+
+        let allowed = engine.evaluate(&probe);
+        assert_eq!(allowed.decision, Decision::AllowWithConstraints);
+        assert!(allowed
+            .rule_ids
+            .contains(&"allow-workspace-tree-hash".to_string()));
+        assert_eq!(allowed.constraints.max_output_bytes, Some(1_024));
+
+        probe.argv = vec!["-c".into(), "echo arbitrary shell".into()];
+        let arbitrary = engine.evaluate(&probe);
+        assert_eq!(arbitrary.decision, Decision::Deny);
+        assert!(arbitrary.rule_ids.is_empty());
     }
 
     #[test]
@@ -252,7 +277,8 @@ mod tests {
             r#match: RuleMatch {
                 network_destinations_any: vec!["registry.internal.example".to_string()],
                 ..Default::default()
-            },
+            }
+            .into(),
             effect: RuleEffect::Deny,
         });
         let engine = PolicyEngine::new(rules);

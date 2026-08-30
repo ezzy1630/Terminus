@@ -3,9 +3,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   CHATGPT_CODEX_FORBIDDEN_BODY_FIELDS,
+  CODEX_MODELS_ETAG_HEADER,
+  CODEX_TURN_STATE_HEADER,
   ChatGptCodexRenderer,
+  CodexTurnState,
   chatGptCodexBody,
   chatGptCodexReasoningLevel,
+  chatGptCodexRequestHeaders,
   type ChatGptCodexModelProfile,
 } from "./chatgpt_codex.js";
 import { toResponsesInputItems, type OpenAiChatMessage } from "./index.js";
@@ -74,11 +78,38 @@ describe("chatGptCodexBody", () => {
       include: ["reasoning.encrypted_content"],
       prompt_cache_key: "thread-1",
       reasoning: { effort: "high", summary: "auto" },
+      // Verified accepted by the live endpoint; the desktop wants short prose.
+      text: { verbosity: "low" },
+      // Two opaque correlation ids; no credential, no user content.
+      client_metadata: { session_id: "thread-1", thread_id: "thread-1" },
       // Same schema, verbatim — only the strict claim is withdrawn.
       tools: [{ ...READ_TOOL_CLAIMING_STRICT, strict: false }],
       tool_choice: "auto",
       parallel_tool_calls: true,
     });
+  });
+
+  test("carries the caller's own session and thread ids when it has both", () => {
+    const body = chatGptCodexBody(responsesBody(), {
+      promptCacheKey: "session-9",
+      sessionId: "session-9",
+      threadId: "thread-4",
+      profile: PROFILE,
+    });
+    expect(body.client_metadata).toEqual({ session_id: "session-9", thread_id: "thread-4" });
+  });
+
+  test("keeps text.verbosity the caller asked for", () => {
+    const body = chatGptCodexBody(responsesBody(), { textVerbosity: "medium", profile: PROFILE });
+    expect(body.text).toEqual({ verbosity: "medium" });
+  });
+
+  test("strips fields the live endpoint has never been observed to accept", () => {
+    // `truncation` is a legitimate Responses parameter and is absent from the
+    // measured Codex body; this endpoint 400s the whole request on one
+    // unknown key, so it does not travel here.
+    const body = chatGptCodexBody({ ...responsesBody(), truncation: "auto" }, { profile: PROFILE });
+    expect(body).not.toHaveProperty("truncation");
   });
 
   test("withdraws the strict claim from every function tool", () => {
@@ -260,5 +291,84 @@ describe("ChatGptCodexRenderer", () => {
     } as Parameters<typeof renderer.continuationPolicy>[0]);
     expect(changed.canContinue).toBe(false);
     expect(changed.requiresRerender).toBe(true);
+  });
+});
+
+describe("Codex per-turn continuity headers", () => {
+  const identity = {
+    originator: "terminus",
+    userAgent: "terminus/1.2.3",
+    accountId: "acct-9",
+    sessionId: "session-9",
+    threadId: "thread-9",
+  } as const;
+
+  test("nothing is echoed until a response has supplied a token", () => {
+    const state = new CodexTurnState();
+    expect(state.requestHeaders()).toEqual({});
+    expect(state.turnStateToken).toBeNull();
+    expect(state.modelsCatalogEtag).toBeNull();
+    // The first request of a turn must not carry a stale token.
+    expect(chatGptCodexRequestHeaders({ ...identity, turnState: state })[CODEX_TURN_STATE_HEADER])
+      .toBeUndefined();
+  });
+
+  test("the token from one response is echoed on the next request of the turn", () => {
+    const state = new CodexTurnState();
+    state.observe({ [CODEX_TURN_STATE_HEADER]: "opaque-a", [CODEX_MODELS_ETAG_HEADER]: 'W/"cat-1"' });
+    expect(state.requestHeaders()).toEqual({ [CODEX_TURN_STATE_HEADER]: "opaque-a" });
+    expect(state.modelsCatalogEtag).toBe('W/"cat-1"');
+    expect(chatGptCodexRequestHeaders({ ...identity, turnState: state })[CODEX_TURN_STATE_HEADER])
+      .toBe("opaque-a");
+    // A later response replaces it; the newest token is the one to echo.
+    state.observe({ [CODEX_TURN_STATE_HEADER]: "opaque-b" });
+    expect(state.turnStateToken).toBe("opaque-b");
+    // The catalogue token is not cleared by a response that omits it.
+    expect(state.modelsCatalogEtag).toBe('W/"cat-1"');
+  });
+
+  test("empty, absent, and non-string header values never overwrite a good token", () => {
+    const state = new CodexTurnState();
+    state.observe({ [CODEX_TURN_STATE_HEADER]: "opaque-a" });
+    state.observe({ [CODEX_TURN_STATE_HEADER]: "" });
+    state.observe(undefined);
+    state.observe(null);
+    state.observe({ [CODEX_TURN_STATE_HEADER]: 7 as unknown as string });
+    expect(state.turnStateToken).toBe("opaque-a");
+  });
+
+  test("headers are read case-insensitively, as the wire delivers them", () => {
+    const state = new CodexTurnState();
+    state.observe({ "X-Codex-Turn-State": "opaque-c", "X-Models-Etag": "cat-2" });
+    expect(state.turnStateToken).toBe("opaque-c");
+    expect(state.modelsCatalogEtag).toBe("cat-2");
+  });
+
+  test("thread id is sent twice, as thread-id and x-client-request-id", () => {
+    const headers = chatGptCodexRequestHeaders(identity);
+    expect(headers["thread-id"]).toBe("thread-9");
+    expect(headers["x-client-request-id"]).toBe("thread-9");
+    expect(headers["session-id"]).toBe("session-9");
+    expect(headers["chatgpt-account-id"]).toBe("acct-9");
+  });
+
+  test("`version` is never sent and the identity is Terminus's own", () => {
+    // `version` names a Codex CLI release; there is no honest value for it
+    // here, and the endpoint does not require one.
+    const headers = chatGptCodexRequestHeaders(identity);
+    expect(headers.version).toBeUndefined();
+    expect(headers.originator).toBe("terminus");
+    expect(headers["user-agent"]).toBe("terminus/1.2.3");
+  });
+
+  test("absent optional identity fields are omitted, not sent blank", () => {
+    const headers = chatGptCodexRequestHeaders({
+      originator: "terminus",
+      userAgent: "terminus/1.2.3",
+      accountId: null,
+      sessionId: "   ",
+      threadId: undefined,
+    });
+    expect(Object.keys(headers).sort()).toEqual(["originator", "user-agent"]);
   });
 });

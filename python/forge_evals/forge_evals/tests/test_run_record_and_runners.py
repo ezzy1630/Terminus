@@ -468,3 +468,78 @@ def test_run_record_serialization_includes_all_fields(tmp_path: Path) -> None:
     assert expected_keys.issubset(d.keys())
     # JSON-serializable.
     json.dumps(d, default=str)
+
+
+# ── first-class run metrics (Phase 0 item 11) ─────────────────────────────
+
+
+def _metric_record() -> RunRecord:
+    record = RunRecord.new(
+        suite="terminus-internal",
+        task="tiny-bugfix/01-fix-typo",
+        harness="terminus-live",
+        harness_commit="c" * 40,
+        environment_digest="sha256:" + "d" * 64,
+        random_seed=42,
+    )
+    record.grader_results = [
+        GraderResult(grader_id="task:t", grader_version="1.0", passed=True, score=1.0)
+    ]
+    record.tokens_input_fresh = 2_000
+    record.tokens_input_cached = 8_000
+    record.tokens_output = 500
+    record.tokens_reasoning = 120
+    record.cache_hit_ratio = 0.8
+    record.steps = 6
+    record.tool_error_rate = 0.25
+    record.repair_turns = 1
+    record.ttft_ms = 640
+    record.wall_clock_ms = 42_000
+    record.stop_reason = "stop"
+    record.harness_verdict = {"admitted": False, "status": "failed"}
+    record.end = record.start
+    return record
+
+
+def test_metrics_survive_json_and_parquet_round_trips(tmp_path: Path) -> None:
+    from forge_evals.analysis.load_runs import load_runs_from_parquet
+
+    record = _metric_record()
+    restored = RunRecord.from_dict(json.loads(record.to_jsonl_line()))
+    assert restored.tokens_input_fresh == 2_000
+    assert restored.cache_hit_ratio == 0.8
+    assert restored.tool_error_rate == 0.25
+    assert restored.repair_turns == 1
+    assert restored.ttft_ms == 640
+    assert restored.wall_clock_ms == 42_000
+    assert restored.stop_reason == "stop"
+    assert restored.harness_verdict["status"] == "failed"
+
+    from forge_evals.analysis.load_runs import records_to_dataframe
+
+    frame = records_to_dataframe([record])
+    assert frame["tokens_input_cached"][0] == 8_000
+    assert frame["success"][0] is True
+    # The harness said the verification failed; the grader passed. Visible.
+    assert frame["harness_grader_disagreement"][0] is True
+
+    parquet_path = tmp_path / "runs.parquet"
+    frame.write_parquet(parquet_path)
+    catalog = load_runs_from_parquet(parquet_path)
+    reloaded = catalog.records[0]
+    assert reloaded.tokens_output == 500
+    assert reloaded.steps == 6
+    assert reloaded.stop_reason == "stop"
+    assert reloaded.harness_verdict["admitted"] is False
+
+
+def test_success_requires_a_grader_verdict() -> None:
+    graded = _metric_record()
+    assert graded.success is True
+
+    ungraded = _metric_record()
+    ungraded.grader_results = []
+    # No grader ran: absence of a verdict is not a passing verdict, and there
+    # is nothing to disagree with the harness about.
+    assert ungraded.success is False
+    assert ungraded.harness_grader_disagreement is False

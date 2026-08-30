@@ -17,7 +17,7 @@
 import type { Rfc3339Timestamp, Uuid7, ContentHash, ArtifactUri, ByteCount, ModelKey } from "@terminus/domain";
 import { computeContentHash, type ContextFragment, type ContextScope } from "@terminus/context-ir";
 import type { ModelTokenizer } from "./tokenizer.js";
-import { resolveTokenizer } from "./tokenizer.js";
+import { estimateMessageTokens, resolveTokenizer } from "./tokenizer.js";
 
 // ──────────────────────── Discovered instruction ─────────────────────────────
 
@@ -47,6 +47,37 @@ export const DEFAULT_INSTRUCTION_FILENAMES = [
 
 export const DEFAULT_MAX_INSTRUCTION_BYTES = 64 * 1024; // 64 KB
 
+/**
+ * Directory segments that can never contribute an instruction file.
+ *
+ * A discovered instruction becomes a hard-required `project_rule` fragment at
+ * authority 80–95: it outranks skills, retrieved content, and everything the
+ * model reads with a tool. An AGENTS.md or CLAUDE.md under `node_modules/`,
+ * `vendor/`, or `.git/` is third-party text that nobody in this repository
+ * wrote, and promoting it hands a dependency author authority over the agent.
+ * The exposure is not hypothetical: a vendored OpenCode checkout in this tree
+ * ships a 24,684-byte `packages/llm/AGENTS.md`, more than twice the size of
+ * the repository's own root AGENTS.md.
+ */
+export const EXCLUDED_INSTRUCTION_DIRECTORY_SEGMENTS: ReadonlySet<string> = new Set([
+  "node_modules",
+  "vendor",
+  ".git",
+]);
+
+/**
+ * True when a path lies under a vendored or version-control directory, and so
+ * must not be searched for instruction files. Accepts absolute or
+ * repository-relative paths; `.` and `/` are the workspace root.
+ */
+export function isExcludedInstructionPath(path: string): boolean {
+  if (path === "." || path === "/" || path.length === 0) return false;
+  return path
+    .replaceAll("\\", "/")
+    .split("/")
+    .some((segment) => EXCLUDED_INSTRUCTION_DIRECTORY_SEGMENTS.has(segment));
+}
+
 export interface InstructionDiscoveryConfig {
   /** The workspace root directory. */
   readonly workspaceRoot: string;
@@ -60,6 +91,45 @@ export interface InstructionDiscoveryConfig {
   readonly maxBytes?: number | undefined;
   /** Resolve an authoritative source version, such as a git blob hash. */
   readonly sourceVersion?: ((path: string, content: string) => string) | undefined;
+}
+
+/**
+ * Repository-relative directories worth probing for instruction files, given
+ * the paths a task touches (its changed files and its contract scope).
+ *
+ * Only the literal prefix before the first wildcard is enumerated, so `**`
+ * collapses to the workspace root. Vendored directories contribute nothing at
+ * any depth — see {@link isExcludedInstructionPath}. Absolute paths and
+ * anything containing `..` are ignored: a candidate directory must be inside
+ * the workspace by construction, not by a later check.
+ *
+ * The result is ordered shallowest-first so the caller reads the root before
+ * the leaves.
+ */
+export function instructionCandidateDirectories(
+  paths: readonly string[],
+): readonly string[] {
+  const directories = new Set<string>(["."]);
+  for (const rawPath of paths) {
+    const normalized = rawPath.replaceAll("\\", "/").replace(/^\.\//, "");
+    if (normalized.length === 0 || normalized.startsWith("/")) continue;
+    const segments = normalized.split("/").filter((segment) => segment.length > 0);
+    if (segments.includes("..")) continue;
+    if (isExcludedInstructionPath(normalized)) continue;
+    const wildcardIndex = segments.findIndex((segment) => /[*?[\]]/.test(segment));
+    const prefix = wildcardIndex >= 0
+      ? segments.slice(0, wildcardIndex)
+      : segments.slice(0, Math.max(segments.length - 1, 0));
+    for (let length = 1; length <= prefix.length; length += 1) {
+      const directory = prefix.slice(0, length).join("/");
+      if (isExcludedInstructionPath(directory)) break;
+      directories.add(directory);
+    }
+  }
+  return [...directories].sort((left, right) => {
+    const depth = (value: string): number => value === "." ? 0 : value.split("/").length;
+    return depth(left) - depth(right) || left.localeCompare(right);
+  });
 }
 
 // ──────────────────────── Discovery function ─────────────────────────────────
@@ -87,8 +157,10 @@ export function discoverInstructions(
   // Normalize paths without a backtracking regular expression on caller input.
   const root = trimTrailingSlashes(config.workspaceRoot);
   const cwd = trimTrailingSlashes(config.workingDirectory);
+  const isWithinWorkspace = (path: string): boolean =>
+    path === root || (root === "/" ? path.startsWith("/") : path.startsWith(`${root}/`));
 
-  if (!cwd.startsWith(root)) {
+  if (!isWithinWorkspace(cwd)) {
     // Working directory must be within workspace root.
     return [];
   }
@@ -97,7 +169,18 @@ export function discoverInstructions(
   let current = cwd;
   let depth = 0;
 
-  while (current.startsWith(root) && depth <= maxDepth) {
+  while (isWithinWorkspace(current) && depth <= maxDepth) {
+    // A vendored directory contributes nothing, at any depth. Checked on the
+    // path *below* the workspace root so a workspace that itself lives under
+    // e.g. `~/vendor/` still discovers its own instructions.
+    if (isExcludedInstructionPath(current.slice(root.length))) {
+      if (current === root) break;
+      const skipParent = current.substring(0, current.lastIndexOf("/"));
+      if (skipParent === current || skipParent === "") break;
+      current = skipParent;
+      depth++;
+      continue;
+    }
     for (let fileIndex = 0; fileIndex < filenames.length; fileIndex++) {
       const filename = filenames[fileIndex]!;
       const fullPath = `${current}/${filename}`;
@@ -231,7 +314,7 @@ export function instructionsToFragments(
         { kind: "file_changed" as const, selector: inst.path },
       ],
       estimatedTokens: {
-        [input.modelKey]: tokenizer.estimateTextTokens(inst.content),
+        [input.modelKey]: estimateMessageTokens(tokenizer, inst.content),
       } as Readonly<Record<string, number>>,
       selectionFeatures: {
         relevance: authority / 100,

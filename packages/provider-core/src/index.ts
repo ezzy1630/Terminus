@@ -17,12 +17,20 @@ import type {
 } from "@terminus/domain";
 import { CompilationAuthorityError } from "@terminus/domain";
 import type { ContextFragment, ContextManifest } from "@terminus/context-ir";
+import type { ReasoningReplayEntry } from "./reasoning_replay.js";
 
 // ────────────────────────── Capability snapshots (§38.2) ─────────────────────
 
 export interface ContextWindow {
   readonly advertisedTokens: number;
   readonly testedSafeTokens: number;
+  /**
+   * The largest single response this model will produce, from the catalogue's
+   * `limit.output` or the family ceiling (`resolveMaxOutputTokens`). Optional
+   * because snapshots built before this field existed omit it; a consumer that
+   * reads it must supply its own fallback.
+   */
+  readonly maxOutputTokens?: number | undefined;
   readonly roleSupport: readonly string[];
   readonly imageInput: boolean;
   readonly toolCalling: boolean;
@@ -159,6 +167,25 @@ export const providerToolResultTranscriptSchema = z.object({
 export type ProviderToolCallTranscript = z.infer<typeof providerToolCallTranscriptSchema>;
 export type ProviderToolResultTranscript = z.infer<typeof providerToolResultTranscriptSchema>;
 
+/**
+ * One opaque reasoning item the provider emitted and expects back verbatim.
+ *
+ * OpenAI's Responses API with `store: false` keeps nothing server-side, so the
+ * only way a reasoning chain survives a tool round trip is for the client to
+ * replay the encrypted item immediately before the message or function call it
+ * produced (`include: ["reasoning.encrypted_content"]`). Anthropic's thinking
+ * blocks work the same way through `signature`. The payload is never read or
+ * rewritten here — it is a provider-owned blob carried unchanged.
+ */
+export interface ProviderReasoningItem {
+  /** The provider's own item id (`rs_…`), replayed with the item. */
+  readonly id: string;
+  /** The opaque payload: OpenAI `encrypted_content`, Anthropic `signature`. */
+  readonly encryptedContent: string;
+  /** Human-readable summary parts, when the provider returned any. */
+  readonly summary: readonly string[];
+}
+
 export interface ProviderResponseChunk {
   readonly kind: "text" | "tool_call" | "error" | "done";
   readonly text?: string | undefined;
@@ -171,6 +198,16 @@ export interface ProviderResponseChunk {
   /** Provider-native request/response identifier, when exposed by the stream. */
   readonly providerRequestId?: string | undefined;
   readonly reasoning?: string | undefined;
+  /**
+   * A completed reasoning item, in wire order relative to the tool call or
+   * message it precedes. Carried on a `text` chunk so no consumer has to learn
+   * a fifth chunk kind; consumers that only read `text`/`reasoning` ignore it.
+   */
+  readonly reasoningItem?: ProviderReasoningItem | undefined;
+  /** The provider's own terminal stop reason, verbatim (e.g. `refusal`). */
+  readonly stopReason?: string | undefined;
+  /** Why the provider stopped, when it explained (Anthropic `stop_details`). */
+  readonly stopDetail?: string | undefined;
 }
 
 export interface ProjectedResponse {
@@ -178,7 +215,24 @@ export interface ProjectedResponse {
   readonly toolCalls: readonly ProviderToolCallChunk[];
   readonly reasoning: string | null;
   readonly continuationId: string | null;
-  readonly finishReason: "stop" | "tool_use" | "length" | "error" | "cancelled";
+  /**
+   * `refusal` is a *successful* HTTP 200 on Anthropic's current models: a
+   * safety classifier declined the request and `content` is not an answer.
+   * It is a distinct terminal state — never retry it, never read the text as
+   * a result — which is why it is its own kind rather than `error`.
+   */
+  readonly finishReason: "stop" | "tool_use" | "length" | "error" | "cancelled" | "refusal";
+  /** The provider's explanation when `finishReason` is `refusal`. */
+  readonly refusalReason?: string | null | undefined;
+  /** Every reasoning item this response emitted, in wire order. */
+  readonly reasoningItems?: readonly ProviderReasoningItem[] | undefined;
+  /**
+   * The same items, keyed by the provider call each one must be replayed
+   * before. This is the persistable form: the flat list above has lost that
+   * association, and a renderer rebuilt after a restart needs it to replay a
+   * tool call the database still holds.
+   */
+  readonly reasoningReplay?: readonly ReasoningReplayEntry[] | undefined;
 }
 
 // ────────────────────────── Usage / cost (§38.14) ────────────────────────────
@@ -968,6 +1022,8 @@ export type {
 };
 
 export * from "./model_profile.js";
+export * from "./model_family.js";
+export * from "./reasoning_replay.js";
 export * from "./catalog/index.js";
 export * from "./tool-args-repair.js";
 export * from "./conformance/types.js";

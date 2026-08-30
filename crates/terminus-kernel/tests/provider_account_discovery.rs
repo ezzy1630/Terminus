@@ -537,6 +537,33 @@ fn missing_stores_produce_an_empty_discovery_without_warnings() {
     assert!(!discovery.opencode_installed);
 }
 
+#[test]
+fn opencode_standard_user_install_is_detected_outside_path() {
+    let fixture = fixture();
+    let home = tempfile::tempdir().expect("temporary home");
+    let bin = home.path().join(".opencode/bin");
+    std::fs::create_dir_all(&bin).expect("create OpenCode bin directory");
+    let executable = bin.join("opencode");
+    std::fs::write(&executable, b"#!/bin/sh\n").expect("write OpenCode executable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+            .expect("mark OpenCode executable");
+    }
+    let service = fixture.kernel.provider_accounts.clone().with_roots(
+        LocalCredentialRoots::empty()
+            .with_home_dir(home.path())
+            .with_path_override(""),
+    );
+
+    let discovery = service
+        .discover_local(&ctx(&discover_token(&fixture.kernel)))
+        .expect("discovery succeeds");
+
+    assert!(discovery.opencode_installed);
+}
+
 // ---------- import ----------
 
 /// Swap the OS keychain for an in-memory store under the SAME

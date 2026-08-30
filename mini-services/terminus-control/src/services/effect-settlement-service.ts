@@ -41,6 +41,13 @@ export interface EffectSettlementInput {
   readonly resultTranscriptHash: string;
   readonly errorJson: string | null;
   readonly truncation: unknown;
+  /**
+   * Workspace path → observed sha256 for the files this call read or wrote.
+   * Persisted on the tool_result episode so a later turn can restore its
+   * read-before-edit knowledge from the durable log instead of forcing the
+   * model to re-read files it already read.
+   */
+  readonly observedSourceVersions?: Readonly<Record<string, string>> | undefined;
 }
 
 export interface EffectUnknownInput {

@@ -23,6 +23,7 @@ interface HarnessOptions {
   readonly responses: ReadonlyArray<{ text?: string; calls?: ReadonlyArray<ProviderToolCallChunk>; finishReason?: string }>;
   readonly sideEffectClassOf?: (toolName: string) => string;
   readonly effectMetadataOf?: (call: ProviderToolCallChunk) => OperationEffectMetadata;
+  readonly mutatesWorkspaceOf?: (call: ProviderToolCallChunk) => boolean;
   readonly failOnCallIds?: readonly string[];
   /** Scripted settlements by call id; a settled error is an observation, not a stop. */
   readonly settleAs?: Readonly<Record<string, EngineToolSettlement>>;
@@ -55,6 +56,7 @@ async function runHarness(options: HarnessOptions) {
     })(),
     sideEffectClassOf: options.sideEffectClassOf ?? ((name) => (name === "read" ? "read" : "workspace_write")),
     ...(options.effectMetadataOf === undefined ? {} : { effectMetadataOf: options.effectMetadataOf }),
+    ...(options.mutatesWorkspaceOf === undefined ? {} : { mutatesWorkspaceOf: options.mutatesWorkspaceOf }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     compileContext: async () => ({
       rendered: { providerId: "test", model: "test/model" as never, request: {} as never, predictedCachedTokens: 0n as never, body: {} },
@@ -153,6 +155,22 @@ describe("CodingTurnEngine", () => {
     });
     expect(trace).toContain("settle:exec:bad");
     expect(trace).toContain("settle:read:ok");
+    expect(trace).toContain("begin:2");
+    expect(stop.kind).toBe("completion_proposal");
+  });
+
+  test("a settled policy denial skips speculative follow-up calls and gives the model one clean response", async () => {
+    const { stop, trace } = await runHarness({
+      responses: [
+        { calls: [toolCall("denied", "exec"), toolCall("speculative", "read")] },
+        { text: "The tool was unavailable, so I stopped and answered directly." },
+      ],
+      settleAs: {
+        denied: { status: "denied", errorCode: "PERMISSION_DENIED", errorClass: "policy_denied" },
+      },
+    });
+    expect(trace).toContain("settle:exec:denied");
+    expect(trace).not.toContain("settle:read:speculative");
     expect(trace).toContain("begin:2");
     expect(stop.kind).toBe("completion_proposal");
   });
@@ -274,6 +292,23 @@ describe("CodingTurnEngine", () => {
     expect(trace).toEqual(["r1", "p1", "r2"]);
   });
 
+  test("workspace mutation classification is independent from process batching", async () => {
+    const observations: OperationObservation[] = [];
+    const { stop } = await runHarness({
+      responses: [
+        { calls: [toolCall("ls-1", "exec")] },
+        { text: "done" },
+      ],
+      sideEffectClassOf: () => "process",
+      mutatesWorkspaceOf: (call) => call.toolCallId !== "ls-1",
+      onOperationObserved: (observation) => { observations.push(observation); },
+    });
+
+    expect(stop.kind).toBe("completion_proposal");
+    expect(observations).toHaveLength(1);
+    expect(observations[0]?.mutatesWorkspace).toBe(false);
+  });
+
   test("budget exhaustion is reported, not thrown", async () => {
     const engine = new CodingTurnEngine({
       budget: { maxSteps: 0, hardMaxSteps: 24 },
@@ -300,6 +335,55 @@ describe("CodingTurnEngine", () => {
     });
     const stop = await engine.run();
     expect(stop.kind).toBe("budget_stop");
+    expect(engine.budget.steps).toBe(0);
+  });
+
+  test("stagnation allows one response-only finalization attempt", async () => {
+    const denied: EngineToolSettlement = {
+      status: "denied",
+      errorCode: "WORKSPACE_PATH_DENIED",
+      errorClass: "workspace_path_denied",
+    };
+    const { stop, trace, budget } = await runHarness({
+      responses: [
+        { calls: [toolCall("d1", "exec", "outside-1")] },
+        { calls: [toolCall("d2", "exec", "outside-2")] },
+        { calls: [toolCall("d3", "exec", "outside-3")] },
+        { calls: [toolCall("d4", "exec", "outside-4")] },
+        { text: "The requested change is complete; the extra probes were denied." },
+      ],
+      settleAs: { d1: denied, d2: denied, d3: denied, d4: denied },
+    });
+
+    expect(trace).toContain("begin:5");
+    expect(stop.kind).toBe("completion_proposal");
+    expect(budget.steps).toBe(5);
+  });
+
+  test("stagnation finalization attempt cannot execute another tool", async () => {
+    const denied: EngineToolSettlement = {
+      status: "denied",
+      errorCode: "WORKSPACE_PATH_DENIED",
+      errorClass: "workspace_path_denied",
+    };
+    const { stop, trace, budget } = await runHarness({
+      responses: [
+        { calls: [toolCall("d1", "exec", "outside-1")] },
+        { calls: [toolCall("d2", "exec", "outside-2")] },
+        { calls: [toolCall("d3", "exec", "outside-3")] },
+        { calls: [toolCall("d4", "exec", "outside-4")] },
+        { calls: [toolCall("blocked", "write", "another-change")] },
+      ],
+      settleAs: { d1: denied, d2: denied, d3: denied, d4: denied },
+    });
+
+    expect(trace).toContain("begin:5");
+    expect(trace).not.toContain("settle:write:blocked");
+    expect(stop).toMatchObject({
+      kind: "budget_stop",
+      reason: "stagnation_detected",
+    });
+    expect(budget.steps).toBe(5);
   });
 
   test("settlement refusals propagate to the caller", async () => {
@@ -369,19 +453,28 @@ describe("CodingTurnEngine", () => {
   test("tool calls from a length-stopped response are never executed", async () => {
     const { stop, trace } = await runHarness({
       responses: [
-        { calls: [toolCall("t1", "exec")], finishReason: "length" },
+        { calls: [toolCall("t1", "exec")], text: "starting", finishReason: "length" },
         { text: "never reached" },
       ],
     });
     expect(trace.filter((t) => t.startsWith("settle:"))).toEqual([]);
-    expect(stop).toEqual({ kind: "truncated_tool_calls", toolCallCount: 1 });
+    // The stop carries the partial text and attempt identity so the caller
+    // can nudge the model to continue instead of failing the turn.
+    expect(stop.kind).toBe("truncated_tool_calls");
+    if (stop.kind === "truncated_tool_calls") {
+      expect(stop.toolCallCount).toBe(1);
+      expect(stop.text).toBe("starting");
+      expect(stop.attemptId).toBe("attempt-1");
+    }
   });
 
-  test("length stop without pending tool calls still settles normally", async () => {
+  test("a length-stopped message is reported as truncated, not as the answer", async () => {
+    // Settling on it published half a sentence as a completed turn.
     const { stop } = await runHarness({
       responses: [{ text: "partial answer", finishReason: "length" }],
     });
-    expect(stop.kind).toBe("completion_proposal");
+    expect(stop.kind).toBe("length");
+    if (stop.kind === "length") expect(stop.text).toBe("partial answer");
   });
 
   test("steering drained at the stop boundary keeps the turn alive", async () => {

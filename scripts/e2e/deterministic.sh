@@ -52,10 +52,12 @@ export TERMINUS_KERNEL_CONTROL_BOOTSTRAP=1
 export TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN="e2e_bootstrap_0123456789abcdefghijklmnop"
 export DATABASE_URL="file:$TMP_DIR/control.db"
 mkdir -p "$TERMINUS_DATA"
-# Register a real local root. Separate kernel integration coverage proves that
-# multiple registered roots remain isolated; this lifecycle uses one root so
-# its Git revision and verification fixtures stay deterministic.
-export TERMINUS_E2E_WORKSPACE_ROOT="$TERMINUS_DATA"
+# Keep the test workspace separate from the kernel's private state. Using the
+# kernel data directory as a workspace forced the Seatbelt profile to choose
+# between hiding durable jobs/artifacts and letting the provider fixture read
+# its own source. Production never grants a task access to TERMINUS_DATA, and
+# the lifecycle test must prove the same boundary.
+export TERMINUS_E2E_WORKSPACE_ROOT="$TMP_DIR/workspace"
 # Port 0 keeps allocation atomic inside the control-plane listener. The
 # supervisor reads the actual bound port from the service's startup record.
 export TERMINUS_CONTROL_PORT="${TERMINUS_E2E_CONTROL_PORT:-0}"
@@ -73,10 +75,10 @@ export TERMINUS_E2E_WORKSPACE_ALIAS_URI="$(
   python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).absolute().as_uri())' \
     "$TMP_DIR/workspace-alias"
 )"
-cp "$ROOT/scripts/e2e/fixtures/read.txt" "$TERMINUS_DATA/e2e-fixture.txt"
-cp "$ROOT/scripts/e2e/fixtures/read.txt" "$TERMINUS_DATA/scope-denied.txt"
-cp "$ROOT/scripts/e2e/provider-stdio-fixture.ts" "$TERMINUS_DATA/terminus-provider-fixture.ts"
-chmod 700 "$TERMINUS_DATA/terminus-provider-fixture.ts"
+cp "$ROOT/scripts/e2e/fixtures/read.txt" "$TERMINUS_E2E_WORKSPACE_ROOT/e2e-fixture.txt"
+cp "$ROOT/scripts/e2e/fixtures/read.txt" "$TERMINUS_E2E_WORKSPACE_ROOT/scope-denied.txt"
+cp "$ROOT/scripts/e2e/provider-stdio-fixture.ts" "$TERMINUS_E2E_WORKSPACE_ROOT/terminus-provider-fixture.ts"
+chmod 700 "$TERMINUS_E2E_WORKSPACE_ROOT/terminus-provider-fixture.ts"
 export TERMINUS_E2E_PROVIDER_RESPONSE_TEXT="Terminus provider fixture received local/e2e-model through kernel job input."
 provider_runtime="$(command -v bun)"
 export TERMINUS_LOCAL_PROVIDER_COMMAND_JSON="$(
@@ -87,17 +89,18 @@ print(json.dumps({
     "args": [sys.argv[2]],
     "model": "local/e2e-model",
     "timeout_seconds": 10,
+    "tools_enabled": True,
 }, separators=(",", ":")))
-' "$provider_runtime" "$TERMINUS_DATA/terminus-provider-fixture.ts"
+' "$provider_runtime" "$TERMINUS_E2E_WORKSPACE_ROOT/terminus-provider-fixture.ts"
 )"
 # The kernel's isolated data root is the execution workspace used by this
 # harness. Give it a real immutable VCS baseline so verification can bind its
 # plan and admission proof to an actual revision instead of a synthetic token.
-git -C "$TERMINUS_DATA" init -q
-git -C "$TERMINUS_DATA" config user.email "terminus-e2e@example.invalid"
-git -C "$TERMINUS_DATA" config user.name "Terminus E2E"
-git -C "$TERMINUS_DATA" add e2e-fixture.txt scope-denied.txt terminus-provider-fixture.ts
-git -C "$TERMINUS_DATA" commit -q -m "e2e baseline"
+git -C "$TERMINUS_E2E_WORKSPACE_ROOT" init -q
+git -C "$TERMINUS_E2E_WORKSPACE_ROOT" config user.email "terminus-e2e@example.invalid"
+git -C "$TERMINUS_E2E_WORKSPACE_ROOT" config user.name "Terminus E2E"
+git -C "$TERMINUS_E2E_WORKSPACE_ROOT" add e2e-fixture.txt scope-denied.txt terminus-provider-fixture.ts
+git -C "$TERMINUS_E2E_WORKSPACE_ROOT" commit -q -m "e2e baseline"
 
 echo "[e2e] preparing isolated SQLite database"
 DATABASE_URL="$DATABASE_URL" bun run "$ROOT/scripts/migrate.ts" >"$TMP_DIR/migrate.log" 2>&1
@@ -200,16 +203,22 @@ start_control() {
       sleep 0.1
       continue
     fi
-    if curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" \
-      -H "Authorization: Bearer $TERMINUS_CONTROL_TOKEN" >/dev/null 2>&1; then
+    health_json="$(
+      curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" \
+        -H "Authorization: Bearer $TERMINUS_CONTROL_TOKEN" 2>/dev/null || true
+    )"
+    if [[ "$health_json" == *'"ready":true'* ]]; then
       break
     fi
     sleep 0.1
   done
 
-  if ! curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" \
-    -H "Authorization: Bearer $TERMINUS_CONTROL_TOKEN" >/dev/null; then
-    echo "[e2e] control plane did not become healthy; see $CONTROL_LOG" >&2
+  health_json="$(
+    curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" \
+      -H "Authorization: Bearer $TERMINUS_CONTROL_TOKEN" 2>/dev/null || true
+  )"
+  if [[ "$health_json" != *'"ready":true'* ]]; then
+    echo "[e2e] control plane did not become ready; see $CONTROL_LOG" >&2
     exit 1
   fi
 }

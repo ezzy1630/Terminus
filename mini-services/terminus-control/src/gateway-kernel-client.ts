@@ -6,11 +6,20 @@ import type {
   RequestContext,
 } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import type { CredentialBoundGatewayClient, GatewayHttpRequest } from "@terminus/provider-zen";
-import { isUnimplemented, observableToAsyncIterable } from "./direct-provider-transport.js";
+import {
+  asCancellation,
+  ConnectorCancelledError,
+  isHeadReceipt,
+  isUnimplemented,
+  observableToAsyncIterable,
+  transportErrorInit,
+} from "./direct-provider-transport.js";
 import { ProviderTransportError } from "./providers/provider-retry.js";
 
 const GATEWAY_HOST = "opencode.ai";
 const GATEWAY_PORT = 443;
+/** Matches the kernel's own per-value response-header bound. */
+const MAX_RESPONSE_HEADER_CHARS = 4096;
 
 /**
  * One connected account's HTTPS surface, as the kernel connector sees it.
@@ -97,6 +106,9 @@ export class KernelConnectorClient implements CredentialBoundGatewayClient {
   private readonly userAgent: string | null;
   /** Receipt headers from the last settled response, for status reporting. */
   private lastResponseHeaders: Readonly<Record<string, string>> = {};
+  /** `Date.now()` at dispatch and at the first body frame of the last request. */
+  private lastDispatchedAtMs: number | null = null;
+  private lastFirstBodyAtMs: number | null = null;
 
   constructor(
     private readonly connectors: ConnectorService,
@@ -119,8 +131,26 @@ export class KernelConnectorClient implements CredentialBoundGatewayClient {
     return this.lastResponseHeaders;
   }
 
+  /**
+   * Dispatch → first body frame for the last request, in milliseconds.
+   *
+   * Only the transport sees the body frames. The caller's first *decoded*
+   * chunk is later by however long the provider spent on leading SSE events
+   * that produced no token, and the head frame is earlier — it measures the
+   * kernel's own round trip, not the provider's.
+   */
+  timeToFirstBodyMs(): number | null {
+    if (this.lastDispatchedAtMs === null || this.lastFirstBodyAtMs === null) return null;
+    return Math.max(0, this.lastFirstBodyAtMs - this.lastDispatchedAtMs);
+  }
+
   async *stream(input: GatewayHttpRequest): AsyncIterable<Uint8Array> {
     assertNotAborted(input.signal, `${this.label} request was aborted`);
+    // Per request, not per client: a stale `x-codex-turn-state` from the
+    // previous dispatch must never be echoed as if this one had returned it.
+    this.lastResponseHeaders = {};
+    this.lastDispatchedAtMs = null;
+    this.lastFirstBodyAtMs = null;
     const anonymous = input.credentialBindingId === "";
     const expectedAuthStyle = anonymous ? "none" : "bearer";
     if (input.authStyle !== expectedAuthStyle) {
@@ -183,28 +213,49 @@ export class KernelConnectorClient implements CredentialBoundGatewayClient {
     // classifier reads.
     let fallbackToUnary = false;
     let observedStream = false;
+    // "Last receipt wins" still yields the terminal one: the head frame is
+    // consumed by its own branch and never assigned here.
     let receipt: ConnectorChunk["receipt"] = undefined;
+    let head: ConnectorChunk["receipt"] = undefined;
     let errorPrefix = new Uint8Array(new ArrayBuffer(0));
+    this.lastDispatchedAtMs = Date.now();
     try {
       for await (const chunk of this.eachChunk(request, input.signal)) {
         observedStream = true;
         if (chunk.bytes !== undefined && chunk.bytes.byteLength > 0) {
+          if (this.lastFirstBodyAtMs === null) this.lastFirstBodyAtMs = Date.now();
           assertNotAborted(input.signal, `${this.label} request was aborted during streaming`);
           errorPrefix = appendBounded(errorPrefix, chunk.bytes);
           yield* splitSseChunks(chunk.bytes);
         }
-        if (chunk.receipt !== undefined) receipt = chunk.receipt;
+        if (chunk.receipt === undefined) continue;
+        if (isHeadReceipt(chunk.receipt)) {
+          // Rate-limit headers are readable before the body now, so a 429 no
+          // longer has to be streamed to completion before its `retry-after`
+          // can be honoured.
+          head = chunk.receipt;
+          this.rememberResponseHeaders(chunk.receipt);
+          const headStatus = chunk.receipt.statusCode;
+          if (headStatus !== undefined && (headStatus < 200 || headStatus > 299)) {
+            throw new ProviderTransportError(
+              `${this.label} returned HTTP ${headStatus}`,
+              transportErrorInit(chunk.receipt, headStatus),
+            );
+          }
+          continue;
+        }
+        receipt = chunk.receipt;
       }
     } catch (error) {
       // A kernel without ExecuteStream rejects before performing the
       // request, so the buffered call below is safe. Everything else is a
       // real failure and must not be retried against a live request.
       if (isUnimplemented(error) && !observedStream) fallbackToUnary = true;
-      else throw error;
+      else throw asCancellation(error, `${this.label} request was cancelled`);
     }
     if (!fallbackToUnary) {
       this.rememberResponseHeaders(receipt);
-      const streamedStatus = receipt?.statusCode;
+      const streamedStatus = receipt?.statusCode ?? head?.statusCode;
       if (streamedStatus === undefined) {
         throw new Error(
           `${this.label} stream did not settle: ${receipt?.outcome ?? "missing receipt"}`,
@@ -213,7 +264,7 @@ export class KernelConnectorClient implements CredentialBoundGatewayClient {
       if (streamedStatus < 200 || streamedStatus > 299) {
         throw new ProviderTransportError(
           `${this.label} returned HTTP ${streamedStatus}${providerErrorSuffix(errorPrefix)}`,
-          { status: streamedStatus },
+          transportErrorInit(receipt ?? head, streamedStatus),
         );
       }
       return;
@@ -224,6 +275,7 @@ export class KernelConnectorClient implements CredentialBoundGatewayClient {
       `${this.label} request was aborted`,
     );
     this.rememberResponseHeaders(response.receipt);
+    if (response.body.byteLength > 0) this.lastFirstBodyAtMs = Date.now();
     const status = response.receipt?.statusCode;
     if (status === undefined) {
       throw new Error(`${this.label} dispatch did not settle: ${response.receipt?.outcome ?? "missing receipt"}`);
@@ -231,7 +283,7 @@ export class KernelConnectorClient implements CredentialBoundGatewayClient {
     if (status < 200 || status > 299) {
       throw new ProviderTransportError(
         `${this.label} returned HTTP ${status}${providerErrorSuffix(response.body)}`,
-        { status },
+        transportErrorInit(response.receipt, status),
       );
     }
     for (const chunk of splitSseChunks(response.body)) {
@@ -253,13 +305,23 @@ export class KernelConnectorClient implements CredentialBoundGatewayClient {
     return { ...headers, "user-agent": this.userAgent };
   }
 
+  /**
+   * Merges rather than replaces: the head frame carries the headers and the
+   * terminal receipt may carry none, so replacing would discard what the
+   * head just delivered. `stream()` clears the map per request, which is what
+   * keeps one dispatch's headers out of the next.
+   *
+   * The value cap matches the kernel's own bound (4096 bytes). It used to be
+   * 256, which silently truncated `x-codex-turn-state` — echoing a corrupted
+   * token is worse than echoing none.
+   */
   private rememberResponseHeaders(receipt: ConnectorChunk["receipt"]): void {
     const headers = receipt?.responseHeaders ?? [];
     if (headers.length === 0) return;
-    const collected: Record<string, string> = {};
+    const collected: Record<string, string> = { ...this.lastResponseHeaders };
     for (const header of headers) {
       if (typeof header.name !== "string" || typeof header.value !== "string") continue;
-      collected[header.name.toLowerCase()] = header.value.slice(0, 256);
+      collected[header.name.toLowerCase()] = header.value.slice(0, MAX_RESPONSE_HEADER_CHARS);
     }
     this.lastResponseHeaders = collected;
   }
@@ -314,7 +376,9 @@ export class KernelGatewayClient extends KernelConnectorClient {
 }
 
 function assertNotAborted(signal: AbortSignal | null, message: string): void {
-  if (signal?.aborted === true) throw new Error(message);
+  // ConnectorCancelledError, not a bare Error: turn teardown must classify as
+  // `cancelled` (an interrupted turn) rather than as an internal fault.
+  if (signal?.aborted === true) throw new ConnectorCancelledError(message);
 }
 
 function withAbortSignal<T>(
@@ -323,7 +387,7 @@ function withAbortSignal<T>(
   message: string,
 ): Promise<T> {
   if (signal?.aborted === true) {
-    return Promise.reject(new Error(message));
+    return Promise.reject(new ConnectorCancelledError(message));
   }
   if (!signal) {
     return promise;
@@ -331,7 +395,7 @@ function withAbortSignal<T>(
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => {
       signal.removeEventListener("abort", onAbort);
-      reject(new Error(message));
+      reject(new ConnectorCancelledError(message));
     };
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(
@@ -341,7 +405,7 @@ function withAbortSignal<T>(
       },
       (err) => {
         signal.removeEventListener("abort", onAbort);
-        reject(err);
+        reject(asCancellation(err, message));
       },
     );
   });

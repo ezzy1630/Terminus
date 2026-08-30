@@ -60,12 +60,13 @@ pub async fn request(
     state
         .kernel
         .secrets
-        .request(
+        .request_async(
             &req.envelope.request_context,
             &req.envelope.effect_intent,
             &req.uri,
             &requested_by,
         )
+        .await
         .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
     // The kernel's SecretService::request returned Ok(()) — it has validated
     // capability and recorded the audit event. We still fetch a handle from
@@ -75,7 +76,8 @@ pub async fn request(
         .kernel
         .secrets
         .broker()
-        .request(&req.uri, &requested_by)
+        .request_async(&req.uri, &requested_by)
+        .await
         .map_err(|e| {
             ApiError::new(
                 terminus_kernel_protocol::ErrorCode::PermissionDenied,

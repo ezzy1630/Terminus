@@ -11,13 +11,18 @@
       "enforced": [
         "AmbientSecretDenial",
         "FilesystemIsolation",
+        "ProtectedGit",
+        "SecretIsolation",
         "ProcessIsolation",
         "NetworkIsolation",
         "PluginAmbientAuthorityDenial"
       ],
       "notes": [
         "seatbelt profile generated from SandboxProfile (ADR-0035 §4)",
-        "filesystem: deny-default + per-rule (subpath …) allowances",
+        "filesystem: deny-default + explicit system/toolchain read list; the workspace root is the writable root",
+        "git: .git stays readable and its object database writable; .git/hooks and .git/config are write-protected",
+        "secrets: ~/.ssh, ~/.aws, ~/.config/gcloud, ~/.gnupg, ~/.netrc, keychains, ~/.claude, ~/.terminus and the kernel state dir are denied unconditionally",
+        "environment: env -i plus an explicit denylist over the caller's public_env (KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL, AWS_*, ANTHROPIC_*, OPENAI_*, DYLD_*, LD_*, SSH_AUTH_SOCK)",
         "network: Deny emits NO socket allowance; ProxyRequired restricts outbound to the broker unix socket",
         "cgroups/no-new-privs/seccomp: not expressible in Seatbelt — resource limits come from the caller's process supervision",
         "pid/mount/user namespaces: unsupported on macOS (use container or microVM backends)"

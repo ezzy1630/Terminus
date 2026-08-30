@@ -336,6 +336,7 @@ function artifactReference(p: Record<string, unknown>): string | null {
  *   - tool.authorized     { ... }
  *   - tool.settled        { tool, result_status }
  *   - turn.provider_text_delta { text }
+ *   - turn.provider_reasoning_delta { text }
  *   - turn.response_validating { ... }
  *   - task.completed      { ... }
  *
@@ -644,6 +645,9 @@ export function decodeFeed(
         break;
       }
       case "turn.tool_settlement": {
+        // The control plane emits this boundary even when the provider made
+        // zero calls. Do not tell the user tools ran when none did.
+        if (p.tool_calls === 0) break;
         notePhase("tool_settlement", eventTimestamp(p, ev, taskCreatedAt));
         break;
       }
@@ -865,6 +869,19 @@ export function decodeFeed(
         }
         const m = openAgentMessage();
         if (m) appendStreamContent(m, text);
+        break;
+      }
+      case "turn.provider_reasoning_delta": {
+        const at = eventTimestamp(p, ev, taskCreatedAt);
+        notePhase("provider_running", at);
+        const text = typeof p.text === "string" ? p.text : null;
+        if (openReasoning === null || text === null || text.length === 0) break;
+        const current = openReasoning.text ?? "";
+        openReasoning.text = boundedText(
+          current + text,
+          "Reasoning",
+          MAX_MESSAGE_FIELD_CHARS,
+        );
         break;
       }
       // `tool.authorized` and `tool.started` are policy bookkeeping: they name

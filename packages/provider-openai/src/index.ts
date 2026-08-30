@@ -17,15 +17,23 @@ import type {
   ProjectedResponse,
   UsageRecord,
   ProviderResponseChunk,
+  ProviderReasoningItem,
   ProviderRequest,
   ProviderTransport,
   ContinuationInput,
   ContinuationDecision,
   ProviderToolSchema,
   ReasoningEffort,
+  ContextFragment,
 } from "@terminus/provider-core";
-import { BaseProviderRenderer } from "@terminus/provider-core";
+import {
+  BaseProviderRenderer,
+  ReasoningReplayLedger,
+  resolveModelFamily,
+} from "@terminus/provider-core";
 import type { TokenCount } from "@terminus/domain";
+
+export { ReasoningReplayLedger };
 
 // ────────────────────────── OpenAI wire shapes ───────────────────────────────
 
@@ -61,7 +69,7 @@ export interface OpenAiRequestBody {
   readonly tool_choice?: "auto" | "none" | "required" | { readonly type: "function"; readonly function: { readonly name: string } } | undefined;
   readonly temperature?: number | undefined;
   readonly max_output_tokens?: number | undefined;
-  readonly reasoning_effort?: "minimal" | "low" | "medium" | "high" | undefined;
+  readonly reasoning_effort?: string | undefined;
   readonly store?: boolean | undefined;
   readonly previous_response_id?: string | undefined;
   readonly stream: true;
@@ -80,56 +88,157 @@ export interface OpenAiResponsesTool {
 }
 
 export interface OpenAiResponsesReasoningConfig {
-  readonly effort?: "minimal" | "low" | "medium" | "high" | undefined;
+  /**
+   * The level as the *model* names it, not as Terminus names it: GPT-5.6
+   * accepts `none|low|medium|high|xhigh|max` and an unrecognised level is a
+   * 400, so this is a string rather than a closed union.
+   */
+  readonly effort?: string | undefined;
   readonly summary?: "auto" | "none" | undefined;
+}
+
+/** `text.verbosity` — how long the model's prose answer should be. */
+export type OpenAiTextVerbosity = "low" | "medium" | "high";
+
+export interface OpenAiResponsesTextConfig {
+  readonly verbosity: OpenAiTextVerbosity;
+}
+
+/** One `summary_text` part of a replayed reasoning item. */
+export interface OpenAiResponsesReasoningSummaryPart {
+  readonly type: "summary_text";
+  readonly text: string;
 }
 
 export interface OpenAiResponsesInputItem {
   readonly role?: "system" | "developer" | "user" | "assistant" | undefined;
   readonly content?: string | undefined;
-  readonly type?: "message" | "function_call" | "function_call_output" | undefined;
+  readonly type?: "message" | "function_call" | "function_call_output" | "reasoning" | undefined;
   readonly call_id?: string | undefined;
   readonly name?: string | undefined;
   readonly arguments?: string | undefined;
   readonly output?: string | undefined;
+  /** `reasoning` items only: the provider's own item id (`rs_…`). */
+  readonly id?: string | undefined;
+  /** `reasoning` items only: the opaque blob from `include`. */
+  readonly encrypted_content?: string | undefined;
+  /** `reasoning` items only: the summary parts, replayed as received. */
+  readonly summary?: readonly OpenAiResponsesReasoningSummaryPart[] | undefined;
 }
 
 export interface OpenAiResponsesRequestBody {
   readonly model: string;
+  /** The stable prefix. A Responses request carries it here, not as a message. */
+  readonly instructions?: string | undefined;
   readonly input: string | readonly OpenAiResponsesInputItem[];
   readonly tools?: readonly OpenAiResponsesTool[] | undefined;
   readonly tool_choice?: "auto" | "none" | "required" | { readonly type: "function"; readonly name: string } | undefined;
   readonly temperature?: number | undefined;
   readonly max_output_tokens?: number | undefined;
   readonly reasoning?: OpenAiResponsesReasoningConfig | undefined;
+  readonly text?: OpenAiResponsesTextConfig | undefined;
   readonly store?: boolean | undefined;
+  readonly include?: readonly string[] | undefined;
+  readonly parallel_tool_calls?: boolean | undefined;
+  readonly truncation?: "auto" | "disabled" | undefined;
+  readonly prompt_cache_key?: string | undefined;
   readonly previous_response_id?: string | undefined;
   readonly stream: true;
   readonly metadata?: Readonly<Record<string, string>> | undefined;
 }
 
+/**
+ * What a stateless Responses caller must ask for.
+ *
+ * `store: false` means the endpoint keeps nothing between requests, so the
+ * reasoning chain only survives a tool round trip if the client asks for the
+ * encrypted item and plays it back. Requesting it without replaying it — which
+ * is what the Codex profile did — pays for the field and throws it away.
+ */
+export const OPENAI_RESPONSES_INCLUDE = ["reasoning.encrypted_content"] as const;
+
 // ────────────────────────── Renderer ─────────────────────────────────────────
 
 /**
- * Map the Terminus effort level onto OpenAI's scale. `max` has no separate
- * OpenAI level, so it saturates at `high` rather than silently downgrading to
- * the default.
+ * Levels that mean "as much as this model will do", strongest first.
+ * `ultra` is a Codex-CLI-only level; it is honoured when a model advertises it
+ * and never invented.
+ */
+const MAXIMAL_LEVELS = ["ultra", "max", "xhigh", "high"] as const;
+
+export interface OpenAiReasoningEffortContext {
+  /** Levels this exact model advertises, in the catalogue's own order. */
+  readonly levels?: readonly string[] | undefined;
+  /** The model id, used to recognise a family whose ladder is known. */
+  readonly modelId?: string | undefined;
+}
+
+/**
+ * Map the Terminus effort onto the level this model actually accepts.
+ *
+ * The old mapping collapsed `max` to `high` unconditionally, which silently
+ * threw away the top two rungs of GPT-5.6's ladder (`xhigh`, `max`) — the UI
+ * offered "Max" and the wire carried "high". Three sources of truth, in order:
+ *
+ *   1. the model's own advertised levels, when the caller has them (the Codex
+ *      catalogue publishes `supported_reasoning_levels` per slug);
+ *   2. the model family, when the ladder is documented (GPT-5.6 takes
+ *      `none|low|medium|high|xhigh|max`);
+ *   3. otherwise the conservative pre-5.x ladder, where `high` is the top.
+ *
+ * A guessed level is a 400, so the fallback saturates rather than invents.
  */
 export function openAiReasoningEffort(
   effort: ReasoningEffort | null | undefined,
-): "minimal" | "low" | "medium" | "high" {
-  switch (effort) {
-    case "low": return "low";
-    case "high": return "high";
-    case "max": return "high";
-    case "medium": return "medium";
-    default: return "medium";
+  context: OpenAiReasoningEffortContext = {},
+): string {
+  const levels = context.levels ?? [];
+  if (levels.length > 0) return clampIntoLevels(effort, levels);
+  const family = context.modelId === undefined ? "other" : resolveModelFamily(context.modelId);
+  if (effort === "max") return family === "gpt-5.6" ? "max" : "high";
+  if (effort === "low" || effort === "medium" || effort === "high") return effort;
+  return "medium";
+}
+
+function clampIntoLevels(
+  effort: ReasoningEffort | null | undefined,
+  levels: readonly string[],
+): string {
+  const has = (name: string): string | null => levels.find((level) => level === name) ?? null;
+  if (effort === "max") {
+    for (const candidate of MAXIMAL_LEVELS) {
+      const found = has(candidate);
+      if (found !== null) return found;
+    }
+    return levels[levels.length - 1]!;
   }
+  if (effort === "low" || effort === "medium" || effort === "high") {
+    const exact = has(effort);
+    if (exact !== null) return exact;
+  }
+  return has("medium") ?? levels[0]!;
 }
 
 export interface OpenAiRendererOptions {
-  /** Per-turn reasoning depth (H7). Absent keeps the previous `medium`. */
+  /** Per-turn reasoning depth (H7). Absent keeps the vendor default. */
   readonly reasoningEffort?: ReasoningEffort | null | undefined;
+  /** Levels this exact model advertises; clamps `max` onto the strongest. */
+  readonly reasoningLevels?: readonly string[] | undefined;
+  /**
+   * `text.verbosity`. `low` by default: GPT-5.6 is already terse and the
+   * desktop/TUI shows a transcript, not an essay. Legacy "be brief" prompt
+   * text is the wrong lever here — 5.6 over-corrects on it.
+   */
+  readonly textVerbosity?: OpenAiTextVerbosity | undefined;
+  /**
+   * Cache-routing affinity. Falls back to the compiled stable-prefix hash,
+   * which is stable for exactly as long as the prefix it names.
+   */
+  readonly promptCacheKey?: string | null | undefined;
+  /** Defaults to true; a model whose catalogue denies it passes false. */
+  readonly parallelToolCalls?: boolean | undefined;
+  /** Per-turn store for encrypted reasoning items, replayed on the next attempt. */
+  readonly reasoningReplay?: ReasoningReplayLedger | undefined;
 }
 
 export class OpenAiRenderer extends BaseProviderRenderer {
@@ -156,6 +265,14 @@ export class OpenAiRenderer extends BaseProviderRenderer {
     };
   }
 
+  /** The effort this renderer will put on the wire for one model. */
+  reasoningEffortFor(modelId: string): string {
+    return openAiReasoningEffort(this.options.reasoningEffort, {
+      ...(this.options.reasoningLevels === undefined ? {} : { levels: this.options.reasoningLevels }),
+      modelId,
+    });
+  }
+
   async render(input: CanonicalRenderInput): Promise<RenderedProviderRequest> {
     this.assertCompilationAuthority(input);
     const messages = renderMessages(input);
@@ -174,9 +291,12 @@ export class OpenAiRenderer extends BaseProviderRenderer {
         : input.outputProfile === "structured"
           ? { temperature: 0 }
           : {}),
-      ...(input.reasoningReserveTokens > 0n
-        ? { reasoning_effort: openAiReasoningEffort(this.options.reasoningEffort) }
-        : {}),
+      // Unconditional: the reasoning reserve is a *context accounting* number,
+      // and gating the wire field on it meant the effort the user picked never
+      // left the process (the reserve was hardcoded to 0). A model that does
+      // not reason has this field stripped one layer up, where the catalogue
+      // is known.
+      reasoning_effort: this.reasoningEffortFor(String(input.model.modelKey)),
       ...(input.provider.policy.retentionMode === "organization_zdr"
         ? { store: false }
         : {}),
@@ -220,6 +340,11 @@ export class OpenAiRenderer extends BaseProviderRenderer {
           break;
         case "done":
           if (chunk.continuationId) continuationId = chunk.continuationId;
+          if (chunk.stopReason === "length" && finishReason === "stop") {
+            finishReason = "length";
+          } else if (chunk.stopReason === "content_filter") {
+            finishReason = "refusal";
+          }
           break;
         default: {
           const _exhaustive: never = chunk.kind;
@@ -227,12 +352,23 @@ export class OpenAiRenderer extends BaseProviderRenderer {
         }
       }
     }
+    // Projecting a response is also when the reasoning chain is banked: the
+    // items are attached to the tool calls they preceded so the next attempt
+    // in this turn can replay each one immediately before its call.
+    // Keyed, not flat: the entries are what gets persisted so a renderer
+    // rebuilt after a restart can still replay the encrypted item immediately
+    // before the `function_call` it produced.
+    const replay = this.options.reasoningReplay?.ingestAll(response.chunks) ?? { items: [], entries: [] };
+    const reasoningItems = replay.items;
+    const replayEntries = replay.entries;
     return {
       text: textParts.join(""),
       toolCalls,
       reasoning,
       continuationId,
       finishReason,
+      ...(reasoningItems.length > 0 ? { reasoningItems } : {}),
+      ...(replayEntries.length > 0 ? { reasoningReplay: replayEntries } : {}),
     };
   }
 
@@ -557,6 +693,7 @@ export function sanitizeResponsesBody(
  */
 export function toResponsesInputItems(
   messages: readonly OpenAiChatMessage[],
+  reasoningReplay?: ReasoningReplayLedger | undefined,
 ): readonly OpenAiResponsesInputItem[] {
   const items: OpenAiResponsesInputItem[] = [];
   for (const message of messages) {
@@ -574,6 +711,12 @@ export function toResponsesInputItems(
         items.push({ role: "assistant", content: message.content });
       }
       for (const call of toolCalls) {
+        // The reasoning that produced this call goes back immediately before
+        // it, in the order the model emitted it. Anywhere else and the model
+        // reads it as reasoning about a different step.
+        for (const item of reasoningReplay?.itemsFor(call.id) ?? []) {
+          items.push(reasoningInputItem(item));
+        }
         items.push({
           type: "function_call",
           call_id: call.id,
@@ -593,6 +736,49 @@ export function toResponsesInputItems(
   return items;
 }
 
+/** One banked reasoning item, as the Responses API expects it back. */
+export function reasoningInputItem(item: ProviderReasoningItem): OpenAiResponsesInputItem {
+  return {
+    type: "reasoning",
+    id: item.id,
+    encrypted_content: item.encryptedContent,
+    summary: item.summary.map((text) => ({ type: "summary_text" as const, text })),
+  };
+}
+
+/**
+ * Fragment kinds that make up the stable prefix.
+ *
+ * A Responses request names its system prompt `instructions`, a top-level
+ * string outside `input`. Sending it as leading `developer` items instead —
+ * which is what this did — puts the one genuinely static part of the request
+ * inside the array that changes every attempt, and costs the prefix its own
+ * identity in the cache. The task contract is deliberately *not* here: it
+ * changes per task and belongs with the task, in `input`.
+ */
+const INSTRUCTION_FRAGMENT_KINDS: ReadonlySet<string> = new Set(["authority", "project_rule"]);
+
+export interface InstructionSplit {
+  readonly instructions: string;
+  readonly remaining: readonly ContextFragment[];
+}
+
+/** Split the compiled fragments into the `instructions` string and the rest. */
+export function splitInstructionFragments(
+  fragments: readonly ContextFragment[],
+): InstructionSplit {
+  const instructions: string[] = [];
+  const remaining: ContextFragment[] = [];
+  for (const fragment of fragments) {
+    if (INSTRUCTION_FRAGMENT_KINDS.has(fragment.kind)) {
+      instructions.push(fragmentText(fragment));
+      continue;
+    }
+    remaining.push(fragment);
+  }
+  return { instructions: instructions.join("\n\n"), remaining };
+}
+
 /** Render a native OpenAI Responses API request body. */
 export async function renderResponsesRequest(
   input: CanonicalRenderInput,
@@ -601,27 +787,51 @@ export async function renderResponsesRequest(
   const renderer = new OpenAiRenderer(options);
   const rendered = await renderer.render(input);
   const body = rendered.body as unknown as OpenAiRequestBody;
+  const { instructions, remaining } = splitInstructionFragments(input.fragments);
+  const items = toResponsesInputItems(
+    renderMessages({ ...input, fragments: remaining }),
+    options.reasoningReplay,
+  );
+  const promptCacheKey = typeof options.promptCacheKey === "string" && options.promptCacheKey !== ""
+    ? options.promptCacheKey
+    // Not a session id, but the next best stable thing this layer can see: the
+    // hash of the prefix whose cache entry the key is meant to route to.
+    : String(input.cachePlan.stablePrefixHash);
+  const hasTools = body.tools !== undefined && body.tools.length > 0;
   const responsesBody: OpenAiResponsesRequestBody = {
     model: body.model,
-    input: toResponsesInputItems(body.messages),
+    ...(instructions === "" ? {} : { instructions }),
+    input: items,
     stream: true,
-    ...(body.tools && body.tools.length > 0
+    ...(hasTools
       ? {
-          tools: body.tools.map((t) => ({
+          tools: body.tools!.map((t) => ({
             type: "function" as const,
             name: t.function.name,
             description: t.function.description,
             parameters: t.function.parameters,
             strict: t.function.strict,
           })),
+          // Both vendors default this on and the harness executes calls
+          // concurrently; saying so explicitly is what stops the model from
+          // serialising a read batch it could have issued at once.
+          parallel_tool_calls: options.parallelToolCalls ?? true,
         }
       : {}),
     ...(body.max_output_tokens !== undefined ? { max_output_tokens: body.max_output_tokens } : {}),
     ...(body.reasoning_effort !== undefined
       ? { reasoning: { effort: body.reasoning_effort, summary: "auto" } }
       : {}),
-    ...(body.previous_response_id !== undefined ? { previous_response_id: body.previous_response_id } : {}),
-    ...(body.store !== undefined ? { store: body.store } : {}),
+    text: { verbosity: options.textVerbosity ?? "low" },
+    // Stateless by construction. `store: true` leaves a copy of every request
+    // on OpenAI's side and buys only `previous_response_id`, which this
+    // renderer replaces with an explicit encrypted-reasoning replay.
+    store: false,
+    include: [...OPENAI_RESPONSES_INCLUDE],
+    // The endpoint drops the oldest input items rather than failing the whole
+    // request when the compiled prompt overshoots the window.
+    truncation: "auto",
+    prompt_cache_key: promptCacheKey,
   };
   return {
     ...rendered,
@@ -633,5 +843,5 @@ export type { ProviderRenderer, ProviderResponseChunk };
 
 export * from "./model_profiles.js";
 export * from "./stream.js";
+export * from "./codex_turn_state.js";
 export * from "./chatgpt_codex.js";
-

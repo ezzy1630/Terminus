@@ -5,8 +5,8 @@ use axum::extract::{Path, Query, State};
 use axum::Extension;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
+use terminus_authz::TokenClaims;
 use terminus_kernel_protocol::{CommandSpec, OutputChunk, ProcessEvent};
 
 use crate::api::Envelope;
@@ -52,7 +52,7 @@ pub async fn start(
     } else {
         &req.sandbox_profile_id
     };
-    let (durable_job_id, _outcome, mut rx) = state
+    let (durable_job_id, outcome, mut rx) = state
         .kernel
         .jobs
         .start(
@@ -67,18 +67,41 @@ pub async fn start(
 
     // The first event MUST be ProcessEvent::Started; we wait for it (with a
     // short timeout) to get the ids.
-    let Ok(Some(first)) = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
-    else {
-        return Err(ApiError::internal(
-            "process failed to emit Started event within 2s",
-            trace_id.0,
-        ));
+    let first = match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
+        Ok(Some(event)) => event,
+        _ => {
+            let compensated = compensate_unobserved_process(
+                state.kernel.jobs.manager(),
+                &durable_job_id,
+                &outcome,
+                "process did not emit its Started event",
+            )
+            .await;
+            return Err(ApiError::internal(
+                if compensated {
+                    "process failed to emit Started event within 2s; spawned process was stopped"
+                } else {
+                    "process failed to emit Started event within 2s; process compensation failed"
+                },
+                trace_id.0,
+            ));
+        }
     };
     let (process_id, process_job_id, resolved_executable) = match first.clone() {
         ProcessEvent::Started(s) => (s.process_id, s.job_id, s.resolved_executable),
         other => {
+            let compensated = compensate_unobserved_process(
+                state.kernel.jobs.manager(),
+                &durable_job_id,
+                &outcome,
+                "process emitted a non-Started first event",
+            )
+            .await;
             return Err(ApiError::internal(
-                format!("expected Started event, got {other:?}"),
+                format!(
+                    "expected Started event, got {other:?}; process compensation {}",
+                    if compensated { "succeeded" } else { "failed" }
+                ),
                 trace_id.0,
             ));
         }
@@ -90,14 +113,22 @@ pub async fn start(
         .await
         .ok_or_else(|| ApiError::internal("job disappeared after start", &trace_id.0))?
         .lease_token;
-    persist_job_event(&manager, &durable_job_id, &lease_token, &first)
-        .await
-        .map_err(|error| {
-            ApiError::internal(
-                format!("process event persistence failed: {error}"),
-                &trace_id.0,
-            )
-        })?;
+    if let Err(error) = persist_job_event(&manager, &durable_job_id, &lease_token, &first).await {
+        let compensated = compensate_unobserved_process(
+            &manager,
+            &durable_job_id,
+            &outcome,
+            "initial process event persistence failed",
+        )
+        .await;
+        return Err(ApiError::internal(
+            format!(
+                "process event persistence failed: {error}; process compensation {}",
+                if compensated { "succeeded" } else { "failed" }
+            ),
+            &trace_id.0,
+        ));
+    }
 
     // The AppState supervisor owns this task and aborts/joins it during
     // server shutdown.
@@ -121,6 +152,13 @@ pub async fn start(
                         %error,
                         "stopping process projection observer after durable event failure"
                     );
+                    compensate_unobserved_process(
+                        &manager,
+                        &event_job_id,
+                        &outcome,
+                        "process event persistence failed",
+                    )
+                    .await;
                     break;
                 }
                 match ev {
@@ -158,6 +196,40 @@ pub async fn start(
         job_id: process_job_id,
         resolved_executable,
     }))
+}
+
+/// A process whose durable event chain is broken must not continue outside
+/// kernel observation. Cancellation is attempted through the tracked process
+/// id and then the fenced OS identity; the durable job is marked orphaned so
+/// a later reconciliation cannot mistake it for a clean exit.
+async fn compensate_unobserved_process(
+    manager: &terminus_jobs::JobManager,
+    job_id: &str,
+    outcome: &terminus_process::SpawnOutcome,
+    reason: &str,
+) -> bool {
+    if let Err(error) = manager.compensate_spawned(outcome, reason).await {
+        tracing::error!(
+            target: "terminus_kernel_audit",
+            event = "unobserved_process_compensation_failed",
+            %job_id,
+            process_id = %outcome.process_id,
+            %error,
+            "failed to stop a process after its durable event chain broke"
+        );
+        return false;
+    }
+    if let Err(error) = manager.mark_orphaned(job_id).await {
+        tracing::error!(
+            target: "terminus_kernel_audit",
+            event = "compensated_process_settlement_failed",
+            %job_id,
+            process_id = %outcome.process_id,
+            %error,
+            "process was stopped but its durable orphaned state could not be recorded"
+        );
+    }
+    true
 }
 
 async fn persist_job_event(
@@ -240,13 +312,24 @@ pub async fn cancel(
 #[derive(Debug, Deserialize)]
 pub struct OutputQuery {
     #[serde(default)]
-    pub cursor: u64,
+    pub cursor: Option<u64>,
+    #[serde(default)]
+    pub stdout_cursor: Option<u64>,
+    #[serde(default)]
+    pub stderr_cursor: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct OutputResponse {
     pub process_id: String,
+    /// Compatibility cursor for legacy clients. It advances conservatively
+    /// across both streams and may replay bytes, but never skips one stream.
     pub cursor: u64,
+    pub stdout_cursor: u64,
+    pub stderr_cursor: u64,
+    pub stdout_chunks: Vec<OutputChunk>,
+    pub stderr_chunks: Vec<OutputChunk>,
+    /// Deprecated stream-ambiguous projection retained for old clients.
     pub chunks: Vec<OutputChunk>,
     pub exited: Option<terminus_kernel_protocol::ProcessExited>,
     /// True when older output was dropped from the retained buffer because
@@ -264,6 +347,8 @@ pub struct OutputResponse {
 #[derive(Debug, Serialize)]
 pub struct OutputContinuation {
     pub cursor: u64,
+    pub stdout_cursor: u64,
+    pub stderr_cursor: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout_artifact: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -273,109 +358,139 @@ pub struct OutputContinuation {
 pub async fn output(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Query(q): Query<HashMap<String, String>>,
+    Query(q): Query<OutputQuery>,
+    Extension(claims): Extension<TokenClaims>,
 ) -> Result<Json<OutputResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let cursor = q
-        .get("cursor")
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-    let (mut chunks, mut truncated, memory_projection_present) = {
-        // Clone only the tail the client has not seen; cloning the whole
-        // history per poll made every request O(total output).
-        let guard = state.process_outputs.lock().await;
-        guard.get(&id).map_or_else(
-            || (Vec::new(), false, false),
-            |buffer| {
-                let chunks = buffer
-                    .chunks
-                    .iter()
-                    .filter(|chunk| chunk.cursor > cursor)
-                    .cloned()
-                    .collect();
-                (chunks, buffer.truncated, true)
-            },
-        )
-    };
-    let mut continuation = None;
-    let mut exited = {
-        let guard = state.process_exits.lock().await;
-        guard.get(&id).cloned()
-    };
-
-    // The process-local maps are deliberately bounded and are cleared on a
-    // kernel restart. Reconstruct the projection from the durable job record
-    // and its retained stdout/stderr chunks when that fast path is absent.
     let manager = state.kernel.jobs.manager().clone();
-    if let Some(record) = manager.find_by_process_id(&id).await {
-        let mut durable_chunks = Vec::new();
-        let mut available_from = 0_u64;
-        for stream in ["stdout", "stderr"] {
-            match manager.output_since(&record.id, stream, cursor).await {
-                Ok(stream_chunks) => {
-                    durable_chunks.extend(stream_chunks.into_iter().map(|chunk| OutputChunk {
-                        cursor: chunk.end_cursor,
-                        bytes: chunk.bytes,
-                        redacted: chunk.redacted,
-                    }))
-                }
-                Err(terminus_jobs::JobError::OutputTruncated {
-                    available_from: stream_cursor,
-                    ..
-                }) => {
-                    truncated = true;
-                    available_from = available_from.max(stream_cursor);
-                }
-                Err(error) => {
-                    return Err(ApiError::internal(
-                        format!("durable process output replay failed: {error}"),
-                        &trace_id.0,
-                    ));
-                }
-            }
-        }
-        durable_chunks.sort_by_key(|chunk| chunk.cursor);
-        if !memory_projection_present
-            && (!durable_chunks.is_empty() || record.state.is_terminal() || truncated)
-        {
-            chunks = durable_chunks;
-        }
-        if record.state == terminus_jobs::JobState::Exited {
-            exited = process_exit_from_record(&record);
-        }
-        let record_boundary = record
-            .stdout_truncated_before
-            .max(record.stderr_truncated_before);
-        let continuation_cursor = available_from.max(record_boundary);
-        if truncated && continuation_cursor > 0 {
-            continuation = Some(OutputContinuation {
-                cursor: continuation_cursor,
-                stdout_artifact: record.stdout_artifact.clone(),
-                stderr_artifact: record.stderr_artifact.clone(),
-            });
-        }
-    }
+    let record = manager
+        .find_by_process_id(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("process {id} not found"), &trace_id.0))?;
+    authorize_process_owner(&record, &claims, &trace_id.0)?;
 
-    if truncated && continuation.is_none() {
-        let memory_boundary = chunks.first().map_or(cursor, |chunk| {
-            chunk.cursor.saturating_sub(chunk.bytes.len() as u64)
-        });
-        continuation = Some(OutputContinuation {
-            cursor: memory_boundary,
-            stdout_artifact: None,
-            stderr_artifact: None,
-        });
-    }
-
-    let new_cursor = chunks.last().map_or(cursor, |chunk| chunk.cursor);
+    let compatibility_cursor = q.cursor.unwrap_or(0);
+    let requested_stdout_cursor = q.stdout_cursor.unwrap_or(compatibility_cursor);
+    let requested_stderr_cursor = q.stderr_cursor.unwrap_or(compatibility_cursor);
+    let stdout = durable_process_output(
+        &manager,
+        &record.id,
+        "stdout",
+        requested_stdout_cursor,
+        &trace_id.0,
+    )
+    .await?;
+    let stderr = durable_process_output(
+        &manager,
+        &record.id,
+        "stderr",
+        requested_stderr_cursor,
+        &trace_id.0,
+    )
+    .await?;
+    let stdout_cursor = stdout
+        .chunks
+        .last()
+        .map_or(requested_stdout_cursor, |chunk| chunk.cursor);
+    let stderr_cursor = stderr
+        .chunks
+        .last()
+        .map_or(requested_stderr_cursor, |chunk| chunk.cursor);
+    let cursor = conservative_legacy_cursor(stdout_cursor, stderr_cursor);
+    let mut chunks = stdout.chunks.clone();
+    chunks.extend(stderr.chunks.iter().cloned());
+    chunks.sort_by_key(|chunk| chunk.cursor);
+    let truncated = stdout.available_from.is_some() || stderr.available_from.is_some();
+    let continuation = truncated.then(|| {
+        let stdout_boundary = stdout
+            .available_from
+            .unwrap_or(record.stdout_truncated_before);
+        let stderr_boundary = stderr
+            .available_from
+            .unwrap_or(record.stderr_truncated_before);
+        OutputContinuation {
+            cursor: conservative_legacy_cursor(stdout_boundary, stderr_boundary),
+            stdout_cursor: stdout_boundary,
+            stderr_cursor: stderr_boundary,
+            stdout_artifact: record.stdout_artifact.clone(),
+            stderr_artifact: record.stderr_artifact.clone(),
+        }
+    });
+    let exited = process_exit_from_record(&record);
     Ok(Json(OutputResponse {
         process_id: id,
-        cursor: new_cursor,
+        cursor,
+        stdout_cursor,
+        stderr_cursor,
+        stdout_chunks: stdout.chunks,
+        stderr_chunks: stderr.chunks,
         chunks,
         exited,
         truncated,
         continuation,
     }))
+}
+
+struct DurableProcessOutput {
+    chunks: Vec<OutputChunk>,
+    available_from: Option<u64>,
+}
+
+async fn durable_process_output(
+    manager: &terminus_jobs::JobManager,
+    job_id: &str,
+    stream: &str,
+    cursor: u64,
+    trace_id: &str,
+) -> Result<DurableProcessOutput, ApiError> {
+    match manager.output_since(job_id, stream, cursor).await {
+        Ok(chunks) => Ok(DurableProcessOutput {
+            chunks: chunks
+                .into_iter()
+                .map(|chunk| OutputChunk {
+                    cursor: chunk.end_cursor,
+                    bytes: chunk.bytes,
+                    redacted: chunk.redacted,
+                })
+                .collect(),
+            available_from: None,
+        }),
+        Err(terminus_jobs::JobError::OutputTruncated { available_from, .. }) => {
+            Ok(DurableProcessOutput {
+                chunks: Vec::new(),
+                available_from: Some(available_from),
+            })
+        }
+        Err(error) => Err(ApiError::internal(
+            format!("durable process {stream} replay failed: {error}"),
+            trace_id,
+        )),
+    }
+}
+
+fn authorize_process_owner(
+    record: &terminus_jobs::JobRecord,
+    claims: &TokenClaims,
+    trace_id: &str,
+) -> Result<(), ApiError> {
+    if claims.binder.task_id != "*" && claims.binder.task_id != record.owner_task_id {
+        return Err(ApiError::permission_denied(
+            "process capability is bound to a different task",
+            trace_id,
+        ));
+    }
+    Ok(())
+}
+
+/// Legacy clients have one cursor for two byte-addressed streams. Advancing
+/// to the larger value can lose the lagging stream permanently; the smaller
+/// non-zero boundary may replay bytes, but cannot skip them.
+fn conservative_legacy_cursor(stdout_cursor: u64, stderr_cursor: u64) -> u64 {
+    match (stdout_cursor, stderr_cursor) {
+        (0, stderr) => stderr,
+        (stdout, 0) => stdout,
+        (stdout, stderr) => stdout.min(stderr),
+    }
 }
 
 fn process_exit_from_record(
@@ -414,4 +529,17 @@ fn termination_projection(receipt: &str) -> (i32, String) {
         return (-1, signal.to_string());
     }
     (-1, receipt.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::conservative_legacy_cursor;
+
+    #[test]
+    fn legacy_cursor_never_advances_past_the_lagging_stream() {
+        assert_eq!(conservative_legacy_cursor(100, 50), 50);
+        assert_eq!(conservative_legacy_cursor(50, 100), 50);
+        assert_eq!(conservative_legacy_cursor(100, 0), 100);
+        assert_eq!(conservative_legacy_cursor(0, 50), 50);
+    }
 }

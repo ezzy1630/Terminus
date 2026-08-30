@@ -787,3 +787,342 @@ async fn an_oversized_caller_header_value_is_rejected() {
     let error = broker.execute(&op, &grant).await.unwrap_err();
     assert!(error.to_string().contains("exceeds"), "{error}");
 }
+
+// ---------------------------------------------------------------------------
+// Incremental streaming (Phase 0 item 8): a CREDENTIALED response must reach
+// the sink as it arrives, already credential-scrubbed across chunk
+// boundaries, and cancellation must tear the connection down instead of
+// letting the upstream finish generating a completion nobody will read.
+// ---------------------------------------------------------------------------
+
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use terminus_connector::{CancelToken, ChunkSink, ConnectorError, ResponseHead};
+
+type SinkFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ConnectorError>> + Send + 'a>>;
+
+/// Records everything the broker streams, timestamps the first chunk, and
+/// can cancel the dispatch the moment the first chunk lands.
+#[derive(Clone, Default)]
+struct Recorder {
+    head: Arc<Mutex<Option<ResponseHead>>>,
+    chunks: Arc<Mutex<Vec<Vec<u8>>>>,
+    first_chunk_at: Arc<Mutex<Option<Instant>>>,
+    cancel_on_first_chunk: Option<CancelToken>,
+}
+
+impl Recorder {
+    fn body(&self) -> Vec<u8> {
+        self.chunks.lock().unwrap().concat()
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body()).to_string()
+    }
+}
+
+impl ChunkSink for Recorder {
+    fn on_head(&mut self, head: ResponseHead) -> SinkFuture<'_> {
+        let slot = self.head.clone();
+        Box::pin(async move {
+            *slot.lock().unwrap() = Some(head);
+            Ok(())
+        })
+    }
+
+    fn on_chunk(&mut self, bytes: &[u8]) -> SinkFuture<'_> {
+        let payload = bytes.to_vec();
+        let chunks = self.chunks.clone();
+        let first = self.first_chunk_at.clone();
+        let cancel = self.cancel_on_first_chunk.clone();
+        Box::pin(async move {
+            {
+                let mut guard = first.lock().unwrap();
+                if guard.is_none() {
+                    *guard = Some(Instant::now());
+                }
+            }
+            chunks.lock().unwrap().push(payload);
+            if let Some(token) = cancel {
+                token.cancel();
+            }
+            Ok(())
+        })
+    }
+}
+
+const SSE_HEAD: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+
+/// Accept one request, write `pieces` with `gap` between them, then close.
+/// Returns the instant the LAST piece was written.
+async fn serve_sse_pieces(listener: TcpListener, pieces: Vec<Vec<u8>>, gap: Duration) -> Instant {
+    let (mut sock, _) = listener.accept().await.unwrap();
+    let mut buf = [0u8; 16384];
+    let mut raw = Vec::new();
+    loop {
+        let n = sock.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..n]);
+        if let Some(pos) = find_head_end(&raw) {
+            let cl = content_length(&raw[..pos]).unwrap_or(0);
+            if raw.len() >= pos + 4 + cl {
+                break;
+            }
+        }
+    }
+    sock.write_all(SSE_HEAD).await.unwrap();
+    for (index, piece) in pieces.iter().enumerate() {
+        if index > 0 {
+            tokio::time::sleep(gap).await;
+        }
+        sock.write_all(piece).await.unwrap();
+        sock.flush().await.unwrap();
+    }
+    let done = Instant::now();
+    drop(sock);
+    done
+}
+
+#[tokio::test]
+async fn a_credentialed_stream_emits_its_first_chunk_before_the_body_completes() {
+    let (broker, port, listener) = fixture_stack().await;
+    let grant = mint_grant(port);
+    let op = operation("/repos/acme/widget/pulls", port);
+
+    let first_event =
+        b"event: message_start\ndata: {\"type\":\"message_start\",\"index\":0}\n\n".to_vec();
+    let second_event = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_vec();
+    let gap = Duration::from_millis(600);
+    let server = tokio::spawn(serve_sse_pieces(
+        listener,
+        vec![first_event.clone(), second_event.clone()],
+        gap,
+    ));
+
+    let mut recorder = Recorder::default();
+    let started = Instant::now();
+    let response = broker
+        .execute_streaming(&op, &grant, &mut recorder, &CancelToken::new())
+        .await
+        .unwrap();
+    let settled = started.elapsed();
+    let last_write = server.await.unwrap();
+
+    let first_chunk_at = recorder
+        .first_chunk_at
+        .lock()
+        .unwrap()
+        .expect("the sink saw at least one chunk");
+    assert!(
+        first_chunk_at < last_write,
+        "the first chunk must reach the sink before the upstream finished writing the body"
+    );
+    assert!(
+        settled >= gap,
+        "the fixture must actually have spanned the gap (took {settled:?})"
+    );
+    assert!(
+        first_chunk_at.duration_since(started) < gap,
+        "time-to-first-chunk ({:?}) must not equal time-to-last-chunk",
+        first_chunk_at.duration_since(started)
+    );
+
+    // The head reached the sink before any body byte, with the status.
+    let head = recorder.head.lock().unwrap().clone().expect("head frame");
+    assert_eq!(head.status_code, 200);
+    assert!(head.is_event_stream());
+
+    // Every byte arrived, and the streamed bytes equal the buffered body.
+    let mut expected = first_event;
+    expected.extend_from_slice(&second_event);
+    assert_eq!(recorder.body(), expected);
+    assert_eq!(response.body, expected);
+    assert_eq!(response.receipt.status_code, Some(200));
+}
+
+#[tokio::test]
+async fn sse_emissions_land_on_event_boundaries() {
+    let (broker, port, listener) = fixture_stack().await;
+    let grant = mint_grant(port);
+    let op = operation("/repos/acme/widget/pulls", port);
+
+    // Split the wire mid-event so alignment has real work to do.
+    let pieces = vec![
+        b"event: a\ndata: {\"index\":0,\"text\":\"the quick brown fox\"}\n\nevent: b\ndata: {\"in"
+            .to_vec(),
+        b"dex\":1,\"text\":\"jumps over the lazy dog\"}\n\n".to_vec(),
+    ];
+    let server = tokio::spawn(serve_sse_pieces(
+        listener,
+        pieces.clone(),
+        Duration::from_millis(120),
+    ));
+
+    let mut recorder = Recorder::default();
+    broker
+        .execute_streaming(&op, &grant, &mut recorder, &CancelToken::new())
+        .await
+        .unwrap();
+    let _ = server.await.unwrap();
+
+    let chunks = recorder.chunks.lock().unwrap().clone();
+    assert!(chunks.len() >= 2, "expected incremental emissions");
+    for chunk in &chunks {
+        assert!(
+            chunk.ends_with(b"\n\n"),
+            "an SSE emission was cut mid-event: {:?}",
+            String::from_utf8_lossy(chunk)
+        );
+    }
+    assert_eq!(chunks.concat(), pieces.concat());
+}
+
+#[tokio::test]
+async fn a_credential_split_across_tcp_writes_is_redacted_on_the_streamed_path() {
+    let (broker, port, listener) = fixture_stack().await;
+    let grant = mint_grant(port);
+    let op = operation("/repos/acme/widget/pulls", port);
+
+    let credential = String::from_utf8(CREDENTIAL.to_vec()).unwrap();
+    let event = format!("event: echo\ndata: {{\"token\":\"{credential}\"}}\n\n");
+    // Cut the wire in the MIDDLE of the credential: the carry buffer is the
+    // only thing that can catch this.
+    let cut = event.find(&credential).unwrap() + credential.len() / 2;
+    let pieces = vec![
+        event.as_bytes()[..cut].to_vec(),
+        event.as_bytes()[cut..].to_vec(),
+    ];
+    let server = tokio::spawn(serve_sse_pieces(
+        listener,
+        pieces,
+        Duration::from_millis(80),
+    ));
+
+    let mut recorder = Recorder::default();
+    let response = broker
+        .execute_streaming(&op, &grant, &mut recorder, &CancelToken::new())
+        .await
+        .unwrap();
+    let _ = server.await.unwrap();
+
+    let streamed = recorder.text();
+    assert!(
+        !streamed.contains(&credential),
+        "the credential straddled a chunk boundary and leaked: {streamed}"
+    );
+    assert!(
+        streamed.contains("***REDACTED:connector-credential-bare***"),
+        "expected a redaction marker in the streamed bytes: {streamed}"
+    );
+    // The streamed bytes are byte-identical to the buffered, scrubbed body.
+    assert_eq!(recorder.body(), response.body);
+    assert!(response.receipt.response_redactions >= 1);
+}
+
+/// Accept one request, write one SSE event, then block on reads and report
+/// how long it took to observe the client's disconnect.
+async fn serve_then_await_disconnect(listener: TcpListener) -> Duration {
+    let (mut sock, _) = listener.accept().await.unwrap();
+    let mut buf = [0u8; 16384];
+    let mut raw = Vec::new();
+    loop {
+        let n = sock.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..n]);
+        if let Some(pos) = find_head_end(&raw) {
+            let cl = content_length(&raw[..pos]).unwrap_or(0);
+            if raw.len() >= pos + 4 + cl {
+                break;
+            }
+        }
+    }
+    sock.write_all(SSE_HEAD).await.unwrap();
+    sock.write_all(b"event: delta\ndata: {\"index\":0,\"text\":\"first token of many\"}\n\n")
+        .await
+        .unwrap();
+    sock.flush().await.unwrap();
+    let wrote_at = Instant::now();
+    // The upstream would happily keep generating; the only thing that ends
+    // this is the client closing the connection.
+    loop {
+        match sock.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    wrote_at.elapsed()
+}
+
+#[tokio::test]
+async fn cancelling_mid_stream_drops_the_connection_and_reports_cancelled() {
+    let (broker, port, listener) = fixture_stack().await;
+    let grant = mint_grant(port);
+    let op = operation("/repos/acme/widget/pulls", port);
+
+    let server = tokio::spawn(serve_then_await_disconnect(listener));
+
+    let cancel = CancelToken::new();
+    let mut recorder = Recorder {
+        cancel_on_first_chunk: Some(cancel.clone()),
+        ..Default::default()
+    };
+
+    let result = broker
+        .execute_streaming(&op, &grant, &mut recorder, &cancel)
+        .await;
+    let disconnect_after = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("the fixture server observed the disconnect")
+        .unwrap();
+
+    assert!(
+        matches!(result, Err(ConnectorError::Cancelled)),
+        "cancelling mid-stream must surface as Cancelled, got {result:?}"
+    );
+    assert!(
+        disconnect_after < Duration::from_secs(1),
+        "the upstream must see the client disconnect promptly, took {disconnect_after:?}"
+    );
+    assert!(
+        !recorder.chunks.lock().unwrap().is_empty(),
+        "the test must have cancelled MID-stream, not before it started"
+    );
+}
+
+#[tokio::test]
+async fn a_token_cancelled_before_dispatch_never_reaches_the_wire() {
+    let (broker, port, listener) = fixture_stack().await;
+    let grant = mint_grant(port);
+    let op = operation("/repos/acme/widget/pulls", port);
+    let accepted = Arc::new(Mutex::new(false));
+    let flag = accepted.clone();
+    let server = tokio::spawn(async move {
+        if tokio::time::timeout(Duration::from_millis(400), listener.accept())
+            .await
+            .is_ok()
+        {
+            *flag.lock().unwrap() = true;
+        }
+    });
+
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let mut recorder = Recorder::default();
+    let result = broker
+        .execute_streaming(&op, &grant, &mut recorder, &cancel)
+        .await;
+    server.await.unwrap();
+
+    assert!(matches!(result, Err(ConnectorError::Cancelled)));
+    assert!(
+        !*accepted.lock().unwrap(),
+        "a pre-cancelled dispatch must not open a connection"
+    );
+    assert!(recorder.chunks.lock().unwrap().is_empty());
+}

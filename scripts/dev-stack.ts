@@ -13,6 +13,7 @@
  *
  *   bun run dev:stack          # start kernel + control, stream logs
  *   bun run dev:stack -- --print-env   # emit shell exports and exit
+ *   bun run dev:stack -- --electron    # start the stack, then the desktop app
  *
  * State (SQLite database, kernel data, UDS socket, tokens) lives in
  * `.terminus-dev/`, which is git-ignored and created 0700 because the kernel
@@ -25,7 +26,16 @@ import { join } from "node:path";
 
 const REPO_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const STATE_DIR = join(REPO_ROOT, ".terminus-dev");
-const KERNEL_BIN = join(REPO_ROOT, "mini-services/terminus-kernel/target/release/terminus-kernel-mini");
+const KERNEL_CRATE_DIR = join(REPO_ROOT, "mini-services/terminus-kernel");
+const DESKTOP_DIR = join(REPO_ROOT, "apps/desktop");
+/**
+ * The kernel binary to launch. `TERMINUS_KERNEL_BIN` overrides the default so a
+ * build made with `CARGO_TARGET_DIR` on the internal disk can be used directly:
+ * binaries freshly linked on /Volumes/Workspace sit in a launch-time scan for
+ * minutes, and the default path is only rebuilt when it is missing, so a stale
+ * binary there must never silently run old kernel code.
+ */
+const KERNEL_BIN = process.env.TERMINUS_KERNEL_BIN ?? join(KERNEL_CRATE_DIR, "target/release/terminus-kernel-mini");
 const CONTROL_ENTRY = join(REPO_ROOT, "mini-services/terminus-control/src/index.ts");
 const CONTROL_PORT = 3050;
 const API_BASE = `http://127.0.0.1:${CONTROL_PORT}`;
@@ -59,10 +69,21 @@ function prepareState(): void {
 }
 
 function ensureKernelBinary(): void {
-  if (existsSync(KERNEL_BIN)) return;
-  console.log("[dev-stack] building the kernel (first run only, this takes a few minutes)");
+  if (process.env.TERMINUS_KERNEL_BIN !== undefined) {
+    if (!existsSync(KERNEL_BIN)) {
+      throw new Error(`TERMINUS_KERNEL_BIN does not exist: ${KERNEL_BIN}`);
+    }
+    console.log(`[dev-stack] using kernel binary from TERMINUS_KERNEL_BIN: ${KERNEL_BIN}`);
+    return;
+  }
+
+  // `cargo build` is incremental when the binary is current. Running it on
+  // every live launch is the cheap, deterministic freshness check; an mtime
+  // comparison misses build scripts, workspace dependencies, and feature
+  // changes and can put the desktop on a stale effect boundary.
+  console.log("[dev-stack] building the current kernel (incremental when unchanged)");
   const build = spawnSync("cargo", ["build", "--release"], {
-    cwd: join(REPO_ROOT, "mini-services/terminus-kernel"),
+    cwd: KERNEL_CRATE_DIR,
     stdio: "inherit",
   });
   if (build.status !== 0) throw new Error("kernel build failed");
@@ -110,8 +131,14 @@ async function waitForSocket(path: string): Promise<void> {
 
 const children: ChildProcess[] = [];
 
-function spawnService(name: string, command: string, args: string[], env: NodeJS.ProcessEnv): ChildProcess {
-  const child = spawn(command, args, { cwd: REPO_ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
+function spawnService(
+  name: string,
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  cwd = REPO_ROOT,
+): ChildProcess {
+  const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
   const relay = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream): void => {
     stream?.on("data", (chunk: Buffer) => {
       for (const line of chunk.toString().split("\n")) {
@@ -179,6 +206,13 @@ async function main(): Promise<void> {
     TERMINUS_KERNEL_CONTROL_BOOTSTRAP: "1",
     TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN: bootstrapToken,
     TERMINUS_KERNEL_TOKEN: randomToken(),
+    // Dev kernels are ad-hoc linker-signed, so every rebuild is a new code
+    // identity to the macOS Keychain and each secret read would block on a
+    // SecurityAgent prompt (observed: 30 s DEADLINE_EXCEEDED on dispatch).
+    // The file backend keeps provider credentials under the kernel data dir
+    // (0600) instead; it is only honoured together with TERMINUS_DEV=1.
+    TERMINUS_DEV: "1",
+    TERMINUS_SECRETS_BACKEND: process.env.TERMINUS_SECRETS_BACKEND ?? "file",
     RUST_LOG: process.env.RUST_LOG ?? "info",
   });
   await waitForSocket(kernelSocket);
@@ -196,12 +230,24 @@ async function main(): Promise<void> {
   });
   await waitForHealth(controlToken);
 
+  if (process.argv.includes("--electron")) {
+    spawnService("electron", "bun", ["run", "dev:electron"], {
+      ...process.env,
+      TERMINUS_API_BASE: API_BASE,
+      TERMINUS_TOKEN: controlToken,
+      VITE_TERMINUS_API_BASE: API_BASE,
+      VITE_TERMINUS_TOKEN: controlToken,
+    }, DESKTOP_DIR);
+  }
+
   console.log("");
   console.log(`[dev-stack] API      ${API_BASE}`);
   console.log(`[dev-stack] token    ${STATE_DIR}/control.token`);
-  console.log("[dev-stack] renderer  bun run dev:live   (in apps/desktop)");
-  console.log("[dev-stack] electron  bun run dev:electron:live");
-  console.log("[dev-stack] Ctrl-C to stop both services.");
+  if (!process.argv.includes("--electron")) {
+    console.log("[dev-stack] renderer  bun run dev:live   (in apps/desktop)");
+    console.log("[dev-stack] electron  bun run dev:electron:live");
+  }
+  console.log(`[dev-stack] Ctrl-C to stop ${process.argv.includes("--electron") ? "all three processes" : "both services"}.`);
 
   process.on("SIGINT", () => void shutdown(0));
   process.on("SIGTERM", () => void shutdown(0));

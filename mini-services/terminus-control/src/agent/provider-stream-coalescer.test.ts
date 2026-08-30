@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import type { ProviderResponseChunk, TokenCount, UsageRecord } from "@terminus/provider-core";
 import {
   createTextDeltaCoalescer,
+  createProviderDeltaCoalescer,
   PROVIDER_DELTA_FLUSH_CHARS,
+  PROVIDER_DELTA_FLUSH_MS,
   withMeasuredUsage,
 } from "./provider-stream-coalescer.js";
 
@@ -51,6 +53,23 @@ function manualTimers(): {
 }
 
 describe("H9 provider text deltas are coalesced by size or age", () => {
+  test("keeps visible reasoning separate from answer text", async () => {
+    const answers: string[] = [];
+    const thoughts: string[] = [];
+    const coalescer = createProviderDeltaCoalescer({
+      text: async (value) => { answers.push(value); },
+      reasoning: async (value) => { thoughts.push(value); },
+    });
+
+    await coalescer.onChunk({ kind: "text", reasoning: "Check the contract. " });
+    await coalescer.onChunk({ kind: "text", reasoning: "No tools needed." });
+    await coalescer.onChunk({ kind: "text", text: "Ready." });
+    await coalescer.flush();
+
+    expect(thoughts).toEqual(["Check the contract. No tools needed."]);
+    expect(answers).toEqual(["Ready."]);
+  });
+
   test("short text is flushed by the timer rather than held until settlement", async () => {
     const timers = manualTimers();
     const written: string[] = [];
@@ -68,7 +87,7 @@ describe("H9 provider text deltas are coalesced by size or age", () => {
     expect(written).toEqual(["Hi."]);
   });
 
-  test("the size rule fires at 64 characters, not 512", async () => {
+  test("the size rule fires at 2 KiB, and the timer bounds latency at 250ms", async () => {
     const timers = manualTimers();
     const written: string[] = [];
     const coalescer = createTextDeltaCoalescer(
@@ -76,9 +95,16 @@ describe("H9 provider text deltas are coalesced by size or age", () => {
       { setTimer: timers.setTimer, clearTimer: timers.clearTimer },
     );
 
-    expect(PROVIDER_DELTA_FLUSH_CHARS).toBe(64);
-    for (let index = 0; index < 8; index += 1) await coalescer.onChunk(text("abcdefgh"));
-    expect(written).toEqual(["abcdefgh".repeat(8)]);
+    // Every flush is a durable event written under the agent-state mutex, so
+    // the byte rule caps the *transaction* rate; the timer, not the byte
+    // count, is what bounds what the (DB-fed) UI waits for.
+    expect(PROVIDER_DELTA_FLUSH_CHARS).toBe(2_048);
+    expect(PROVIDER_DELTA_FLUSH_MS).toBe(250);
+
+    for (let index = 0; index < 31; index += 1) await coalescer.onChunk(text("a".repeat(64)));
+    expect(written).toEqual([]);
+    await coalescer.onChunk(text("a".repeat(64)));
+    expect(written).toEqual(["a".repeat(2_048)]);
     // A size flush cancels the pending timer instead of writing an empty delta.
     expect(timers.pending()).toBe(0);
   });
@@ -100,7 +126,7 @@ describe("H9 provider text deltas are coalesced by size or age", () => {
       { setTimer: timers.setTimer, clearTimer: timers.clearTimer },
     );
 
-    const sizeFlush = coalescer.onChunk(text("a".repeat(70)));
+    const sizeFlush = coalescer.onChunk(text("a".repeat(2_050)));
     await Promise.resolve();
     await Promise.resolve();
     await coalescer.onChunk(text("tail"));
@@ -108,7 +134,7 @@ describe("H9 provider text deltas are coalesced by size or age", () => {
     await sizeFlush;
     await coalescer.flush();
 
-    expect(written).toEqual(["a".repeat(70), "tail"]);
+    expect(written).toEqual(["a".repeat(2_050), "tail"]);
   });
 
   test("a timer flush failure surfaces on the next call instead of vanishing", async () => {

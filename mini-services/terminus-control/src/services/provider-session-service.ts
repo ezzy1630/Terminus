@@ -36,6 +36,13 @@ export interface ProviderGatewayConfig {
    * account id, originator, session id). The bearer is injected in the kernel.
    */
   readonly extraHeaders?: Readonly<Record<string, string>> | undefined;
+  /**
+   * Turn-scoped Codex continuity. The endpoint returns `x-codex-turn-state`
+   * on one response and expects it echoed on the next request of the same
+   * turn, so the token cannot live in the per-attempt header record built at
+   * turn start — it is read and refreshed on every dispatch.
+   */
+  readonly codexTurnState?: import("@terminus/provider-openai").CodexTurnState | undefined;
   /** The connected account, so its rate-limit receipt can be recorded. */
   readonly accountId?: string | undefined;
 }
@@ -92,6 +99,13 @@ export interface ProviderAttemptResponseInput {
   readonly continuationId: string | null;
   readonly providerRequestId: string | null;
   readonly cost: ProviderAttemptCostObservation;
+  /**
+   * Provider-opaque reasoning chain, keyed by the call each item must be
+   * replayed before. Persisted so a renderer rebuilt after a restart can
+   * still lead every replayed `tool_use`/`function_call` with the reasoning
+   * that produced it; both vendors reject the alternative.
+   */
+  readonly reasoningReplayJson?: string | null | undefined;
 }
 
 export type ProviderAttemptCostSource =

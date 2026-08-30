@@ -117,6 +117,13 @@ export interface EngineDependencies {
   readonly effectMetadataOf?: (
     call: ProviderToolCallChunk,
   ) => OperationEffectMetadata;
+  /**
+   * Whether this exact call can change workspace bytes. This is deliberately
+   * separate from the effect side-effect class: `exec` is a process effect,
+   * but `rg`, `git status`, and `pwd` are observations. Treating every process
+   * as a mutation erases stagnation history and reports fake progress.
+   */
+  readonly mutatesWorkspaceOf?: (call: ProviderToolCallChunk) => boolean;
   /** Generate an opaque unique id for attempts. */
   readonly newId: () => string;
   readonly budget?: TurnBudgetOptions;
@@ -181,6 +188,7 @@ export type CompletionSignal =
 interface ToolSettlementObservation {
   readonly observation: OperationObservation;
   readonly failed: boolean;
+  readonly denied: boolean;
   readonly error: unknown;
 }
 
@@ -210,11 +218,26 @@ export type EngineStop =
   /**
    * The provider stopped with finishReason "length" while tool calls were
    * still pending. Executing those calls would run arguments the model never
-   * finished emitting; the turn stops with this reason instead.
+   * finished emitting, so they are discarded — but the turn is *not* over:
+   * the composition root nudges the model to continue and re-runs the loop.
    */
-  | { readonly kind: "truncated_tool_calls"; readonly toolCallCount: number };
+  | { readonly kind: "truncated_tool_calls"; readonly toolCallCount: number; readonly text: string; readonly responseArtifactUri: string | null; readonly attemptId: string }
+  /**
+   * The provider stopped with finishReason "length" and no tool calls: the
+   * answer itself is cut off mid-sentence. Settling on it as the final
+   * message published a truncated answer as a completed turn.
+   */
+  | { readonly kind: "length"; readonly text: string; readonly responseArtifactUri: string | null; readonly attemptId: string };
 
 export const DOOM_LOOP_THRESHOLD = 3;
+
+/**
+ * How many times one turn nudges a length-truncated response to continue
+ * before settling on whatever text arrived. High enough that a long answer or
+ * a large patch finishes; low enough that a provider stuck at its output limit
+ * cannot spin. The turn's step/token/wall-clock budgets bound it regardless.
+ */
+export const TRUNCATION_CONTINUATION_LIMIT = 4;
 
 /**
  * H11 progress guards.
@@ -275,20 +298,18 @@ export class CodingTurnEngine {
       }
       const decision = this.budget.canStartStep();
       if (!decision.allowed) {
-        this.budget.recordStep();
         return {
           kind: "budget_stop",
           reason: decision.reason ?? "steps_exhausted",
           ledger: this.budget.ledger,
         };
       }
-      if (this.budget.isStagnant()) {
-        return {
-          kind: "budget_stop",
-          reason: "stagnation_detected",
-          ledger: this.budget.ledger,
-        };
-      }
+      // Stagnation is known only after the last tool result settles. Give the
+      // provider one bounded, response-only opportunity to consume that
+      // observation and finish. Stopping before compilation stranded useful
+      // workspace changes whenever the last few probes failed in the same
+      // way. A stagnant turn still cannot execute another tool call below.
+      const stagnantAtStart = this.budget.isStagnant();
       const attemptNumber = this.budget.steps + 1;
       this.budget.recordStep();
 
@@ -337,7 +358,13 @@ export class CodingTurnEngine {
         settled.projected.finishReason === "length"
         && toolCalls.length > 0
       ) {
-        return { kind: "truncated_tool_calls", toolCallCount: toolCalls.length };
+        return {
+          kind: "truncated_tool_calls",
+          toolCallCount: toolCalls.length,
+          text: settled.projected.text,
+          responseArtifactUri: settled.responseArtifactUri ?? null,
+          attemptId,
+        };
       }
       if (toolCalls.length === 0) {
         // Steering check at the stop boundary: guidance queued while the
@@ -365,6 +392,17 @@ export class CodingTurnEngine {
         }
         this.consecutiveEmptyCompletions = 0;
         const responseArtifactUri = settled.responseArtifactUri ?? null;
+        // A length-stopped message is not a finished answer. Reporting it as
+        // one published half a sentence as the turn's result; the caller
+        // nudges the model to continue instead.
+        if (settled.projected.finishReason === "length") {
+          return {
+            kind: "length",
+            text: settled.projected.text,
+            responseArtifactUri,
+            attemptId,
+          };
+        }
         if (settled.completion?.kind === "completion_proposal") {
           return {
             kind: "completion_proposal",
@@ -384,6 +422,17 @@ export class CodingTurnEngine {
           text: settled.projected.text,
           responseArtifactUri,
           attemptId,
+        };
+      }
+
+      // The finalization opportunity is response-only. A model that asks for
+      // another effect after repeated non-progress stops before that effect is
+      // settled, preserving the existing fail-closed stagnation boundary.
+      if (stagnantAtStart) {
+        return {
+          kind: "budget_stop",
+          reason: "stagnation_detected",
+          ledger: this.budget.ledger,
         };
       }
 
@@ -428,6 +477,7 @@ export class CodingTurnEngine {
         };
       const batches = planToolExecution(toolCalls, effectMetadataOf);
       let operationIndex = 0;
+      let policyDenied = false;
       for (const batch of batches) {
         if (this.dependencies.signal?.aborted) {
           return { kind: "interrupted" };
@@ -455,19 +505,24 @@ export class CodingTurnEngine {
             });
             outcomes.push(outcome);
             // A serial failure stops subsequent calls in provider order.
-            if (outcome.failed) break;
+            if (outcome.failed || outcome.denied) break;
           }
         }
         for (const outcome of outcomes) {
           await this.observeOperation(outcome.observation);
+          if (outcome.denied) policyDenied = true;
           if (!outcome.failed) continue;
           const stop = await this.stopForToolError(outcome.error);
           if (stop !== null) return stop;
           throw outcome.error;
         }
-        operationIndex += batch.calls.length;
+        operationIndex += outcomes.length;
+        // A policy denial is already a complete model-visible result. Do not
+        // execute the rest of a speculative batch. Recompile once so the
+        // provider can report the denial or answer without that tool.
+        if (policyDenied) break;
       }
-      if (operationIndex !== toolCalls.length) {
+      if (operationIndex !== toolCalls.length && !policyDenied) {
         return {
           kind: "policy_denied",
           message: "tool batch planning lost calls",
@@ -584,6 +639,7 @@ export class CodingTurnEngine {
       const settlementRecord = settlement ?? null;
       return {
         failed: false,
+        denied: settlementRecord?.status === "denied" || settlementRecord?.errorClass === "policy_denied",
         error: undefined,
         observation: buildOperationObservation({
           taskId: this.dependencies.taskId,
@@ -612,6 +668,7 @@ export class CodingTurnEngine {
       const metadata = this.dependencies.operationContext?.(input);
       return {
         failed: true,
+        denied: classified.kind === "policy_denied",
         error,
         observation: buildOperationObservation({
           taskId: this.dependencies.taskId,
@@ -643,6 +700,9 @@ export class CodingTurnEngine {
   }
 
   private operationMutatesWorkspace(call: ProviderToolCallChunk): boolean {
+    if (this.dependencies.mutatesWorkspaceOf !== undefined) {
+      return this.dependencies.mutatesWorkspaceOf(call);
+    }
     const metadata = this.dependencies.effectMetadataOf?.(call);
     return (metadata?.sideEffectClass ?? this.dependencies.sideEffectClassOf(call.toolName)) !== "read";
   }

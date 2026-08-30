@@ -98,6 +98,8 @@ export interface ProviderAccountMetadata {
   readonly plan_type?: string;
   readonly email?: string;
   readonly provider_metadata?: Readonly<Record<string, unknown>>;
+  /** Non-secret provenance for an account Terminus synthesized locally. */
+  readonly connection_origin?: "installed_opencode";
 }
 
 export interface ProviderAccountWire {
@@ -156,6 +158,9 @@ export function parseProviderAccountMetadata(json: string): ProviderAccountMetad
     ...(typeof parsed.plan_type === "string" ? { plan_type: parsed.plan_type } : {}),
     ...(typeof parsed.email === "string" ? { email: parsed.email } : {}),
     ...(providerMetadata === undefined ? {} : { provider_metadata: providerMetadata }),
+    ...(parsed.connection_origin === "installed_opencode"
+      ? { connection_origin: parsed.connection_origin }
+      : {}),
   };
 }
 
@@ -214,6 +219,16 @@ export function providerAccountCapabilityScope(
     networkDestinations: [`${account.host}:443`],
     secretCapabilities: account.credentialUri === "" ? [] : [account.credentialUri],
   };
+}
+
+/** Whether this account may receive workspace-classified context. */
+export function providerAccountWorkspaceAccess(
+  account: Pick<ProviderAccountRecord, "source" | "metadataJson">,
+  configuredGatewayTermsAdmitted: boolean,
+): boolean {
+  if (account.source !== ZEN_SOURCE) return true;
+  const metadata = parseProviderAccountMetadata(account.metadataJson);
+  return metadata.connection_origin === "installed_opencode" || configuredGatewayTermsAdmitted;
 }
 
 // ────────────────────────── uuid v7 ──────────────────────────────────────────
@@ -647,6 +662,15 @@ const ZEN_BASE_URLS: Readonly<Record<string, string>> = {
   go: "https://opencode.ai/zen/go/v1",
 };
 
+/** Fresh-install projection for the anonymous models OpenCode ships enabled. */
+const ANONYMOUS_ZEN_CONFIGURATION: GatewayConfigurationSnapshot = {
+  deployment: "zen",
+  protocol: "chat_completions",
+  credentialConfigured: false,
+  freeModel: true,
+  secretUri: "",
+};
+
 /**
  * The legacy gateway row as an account.
  *
@@ -726,6 +750,21 @@ export interface ProviderAccountDiscoveryDependencies {
     readonly fingerprint: string;
   }) => Promise<{ readonly capabilityUri: string; readonly stored: boolean }>;
   readonly listAccounts: () => Promise<readonly ProviderAccountRecord[]>;
+  /**
+   * Whether the credential a row already points at still resolves in the
+   * kernel's *active* credential store.
+   *
+   * A `credentialUri` recorded in the database is not evidence the bytes are
+   * still there: the operator can switch the kernel's secret backend
+   * (`TERMINUS_SECRETS_BACKEND`), or the OS keychain entry can be removed out
+   * from under us. Without this probe such a row is permanently broken —
+   * discovery sees an unrotated fingerprint and a non-empty URI, decides no
+   * import is needed, and every turn then fails at grant-mint time.
+   *
+   * Metadata only; no secret bytes cross this boundary. Optional so callers
+   * that cannot probe keep the previous behaviour.
+   */
+  readonly credentialResolves?: (credentialUri: string) => Promise<boolean>;
   /** Creates the row, or updates the existing row for the same source. */
   readonly upsertAccount: (input: ProviderAccountUpsert) => Promise<ProviderAccountRecord>;
   readonly setDefaultAccount: (id: string) => Promise<void>;
@@ -755,9 +794,10 @@ export interface ProviderAccountDiscoveryResult {
  * keyring, nothing is sent anywhere the user's own CLI would not already send
  * it, and Settings offers one-click Disconnect.
  *
- * Order matters. The gateway row is projected first so the default-selection
- * step at the end can see it, and so a machine with no local stores still ends
- * up with a usable account.
+ * Order matters. A configured gateway is projected before credential discovery
+ * so a temporarily unavailable kernel cannot hide it. After discovery, an
+ * installed OpenCode with no legacy gateway row gets the anonymous Zen account
+ * OpenCode itself exposes by default. The CLI is never launched or imported.
  */
 export async function discoverAndConnectLocalAccounts(
   dependencies: ProviderAccountDiscoveryDependencies,
@@ -806,6 +846,25 @@ export async function discoverAndConnectLocalAccounts(
   const { catalog, offline } = await dependencies.fetchCatalog();
   const warnings = [...discovery.warnings];
 
+  // A fresh Terminus install has no legacy gateway row. Installation discovery
+  // is sufficient for the credential-free Zen surface: model discovery still
+  // goes through Terminus's kernel connector and admits only catalogued free
+  // models. Without this projection, detecting OpenCode changed no runnable
+  // state and the desktop incorrectly asked the user to log in.
+  if (gatewayRow === null && discovery.opencodeInstalled && !existing.has(ZEN_SOURCE)) {
+    const mapping = mapGatewayConfiguration(ANONYMOUS_ZEN_CONFIGURATION);
+    const upserted = await dependencies.upsertAccount({
+      id: newAccountId(),
+      ...mappingColumns(mapping),
+      credentialUri: "",
+      fingerprint: "",
+      metadataJson: JSON.stringify({ connection_origin: "installed_opencode" }),
+      discoveredAt: now(),
+    });
+    existing.set(ZEN_SOURCE, upserted);
+    imported.push(upserted.id);
+  }
+
   for (const credential of discovery.credentials) {
     if (credential.source === ZEN_SOURCE) continue;
     const mapping = mapLocalCredential({
@@ -821,7 +880,17 @@ export async function discoverAndConnectLocalAccounts(
     // secret is not copied into the keyring: nothing would ever read it.
     const routable = mapping.status === "connected" || mapping.status === "expired";
     const rotated = current !== null && current.fingerprint !== credential.fingerprint;
-    const needsImport = routable && (current === null || rotated || current.credentialUri === "");
+    // A row that already names a credential URI is only trusted if the kernel
+    // can still resolve it. Switching the kernel's secret backend, or losing
+    // the keychain entry, otherwise leaves the account broken forever: the
+    // fingerprint has not rotated, so nothing would ever re-import it.
+    const stale = routable
+      && !rotated
+      && current !== null
+      && current.credentialUri !== ""
+      && !(await credentialStillResolves(dependencies, current.credentialUri, warn));
+    const needsImport = routable
+      && (current === null || rotated || current.credentialUri === "" || stale);
 
     let status = mapping.status;
     let statusDetail = mapping.statusDetail;
@@ -890,6 +959,28 @@ export async function discoverAndConnectLocalAccounts(
     opencodeInstalled: discovery.opencodeInstalled,
     lastRunAt: now().toISOString(),
   };
+}
+
+/**
+ * Ask the kernel whether `credentialUri` still resolves.
+ *
+ * Fails *open*: when no probe is wired, or the probe itself throws (kernel
+ * restarting, transport hiccup), the credential is assumed present. Treating a
+ * transport failure as a missing credential would re-import on every run and
+ * turn a blip into repeated keychain writes.
+ */
+async function credentialStillResolves(
+  dependencies: ProviderAccountDiscoveryDependencies,
+  credentialUri: string,
+  warn: (message: string) => void,
+): Promise<boolean> {
+  if (dependencies.credentialResolves === undefined) return true;
+  try {
+    return await dependencies.credentialResolves(credentialUri);
+  } catch (error: unknown) {
+    warn(`credential resolution probe failed for ${credentialUri}: ${errorMessage(error)}`);
+    return true;
+  }
 }
 
 /**

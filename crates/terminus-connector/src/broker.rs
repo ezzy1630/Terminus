@@ -12,6 +12,7 @@ use crate::error::ConnectorError;
 use crate::operation::path_matches_class;
 use crate::operation::CanonicalOperation;
 use crate::receipt::{ConnectorReceipt, ConnectorResponse, Outcome};
+use crate::stream::{until_cancelled, CancelToken, ResponseHead, StreamingRedactor};
 use reqwest::header::{HeaderName, HeaderValue, ACCEPT, USER_AGENT};
 use sha2::{Digest as ShaDigest, Sha256};
 use std::collections::HashMap;
@@ -39,6 +40,20 @@ pub enum AuthStyle {
 /// Async-aware sink for incremental response bodies. Boxing keeps the
 /// object-safe signature simple; the hot path (no sink) never allocates.
 pub trait ChunkSink: Send {
+    /// Delivered exactly once, before the first body byte, with the status
+    /// code, content type, and allowlisted response headers. A consumer can
+    /// classify the response (rate limits, `x-codex-turn-state`, sticky
+    /// routing) without waiting for the terminal receipt. The default
+    /// implementation ignores the head.
+    fn on_head(
+        &mut self,
+        head: crate::stream::ResponseHead,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ConnectorError>> + Send + '_>>
+    {
+        let _ = head;
+        Box::pin(std::future::ready(Ok(())))
+    }
+
     fn on_chunk(
         &mut self,
         bytes: &[u8],
@@ -48,8 +63,15 @@ pub trait ChunkSink: Send {
 /// Concrete, lifetime-carrying sink wrapper used on the dispatch path so
 /// borrowed sinks flow through nested futures without trait-object lifetime
 /// propagation.
+///
+/// It also owns the incremental credential redaction: bytes handed to
+/// `send` are scrubbed here, chunk boundary by chunk boundary, so a
+/// credentialed response streams instead of being buffered whole so it can
+/// be scrubbed once at the end.
 pub struct DispatchSink<'a> {
     inner: Option<&'a mut dyn ChunkSink>,
+    redactor: StreamingRedactor,
+    cancel: CancelToken,
 }
 
 impl std::fmt::Debug for DispatchSink<'_> {
@@ -60,10 +82,56 @@ impl std::fmt::Debug for DispatchSink<'_> {
     }
 }
 
-impl DispatchSink<'_> {
-    pub async fn send(&mut self, bytes: &[u8]) -> Result<(), ConnectorError> {
+impl<'a> DispatchSink<'a> {
+    fn new(
+        inner: Option<&'a mut dyn ChunkSink>,
+        literals: &[(String, String)],
+        cancel: CancelToken,
+    ) -> Self {
+        Self {
+            inner,
+            redactor: StreamingRedactor::new(literals),
+            cancel,
+        }
+    }
+
+    /// Forward the response head and decide whether emissions align to SSE
+    /// event boundaries.
+    pub(crate) async fn head(&mut self, head: ResponseHead) -> Result<(), ConnectorError> {
+        self.redactor.align_events(head.is_event_stream());
         match self.inner.as_deref_mut() {
-            Some(sink) => sink.on_chunk(bytes).await,
+            Some(sink) => sink.on_head(head).await,
+            None => Ok(()),
+        }
+    }
+
+    pub async fn send(&mut self, bytes: &[u8]) -> Result<(), ConnectorError> {
+        if self.inner.is_none() {
+            return Ok(());
+        }
+        let scrubbed = self.redactor.push(bytes);
+        self.emit(scrubbed).await
+    }
+
+    /// Release the carry buffer at end of stream. Anything still withheld
+    /// for the straddling-secret window is redacted and emitted here.
+    pub(crate) async fn finish(&mut self) -> Result<(), ConnectorError> {
+        if self.inner.is_none() {
+            return Ok(());
+        }
+        let scrubbed = self.redactor.flush();
+        self.emit(scrubbed).await
+    }
+
+    async fn emit(&mut self, scrubbed: Vec<u8>) -> Result<(), ConnectorError> {
+        if scrubbed.is_empty() {
+            return Ok(());
+        }
+        if self.cancel.is_cancelled() {
+            return Err(ConnectorError::Cancelled);
+        }
+        match self.inner.as_deref_mut() {
+            Some(sink) => sink.on_chunk(&scrubbed).await,
             None => Ok(()),
         }
     }
@@ -230,7 +298,10 @@ const MAX_REQUEST_HEADER_VALUE_BYTES: usize = 4096;
 /// Receipt response-header bounds. Anything larger is dropped and audited
 /// rather than truncated.
 const MAX_RESPONSE_HEADERS: usize = 32;
-const MAX_RESPONSE_HEADER_VALUE_BYTES: usize = 1024;
+/// Matches the request-side bound. Opaque routing tokens such as
+/// `x-codex-turn-state` are dropped rather than truncated when oversized, so
+/// the bound has to be generous enough that a legitimate value survives.
+const MAX_RESPONSE_HEADER_VALUE_BYTES: usize = 4096;
 
 /// The L7 connector broker.
 pub struct ConnectorBroker {
@@ -443,20 +514,26 @@ impl ConnectorBroker {
         op: &CanonicalOperation,
         grant: &ConnectorGrant,
     ) -> Result<ConnectorResponse, ConnectorError> {
-        self.execute_with_sink(op, grant, None::<&mut dyn ChunkSink>)
+        self.execute_with_sink(op, grant, None::<&mut dyn ChunkSink>, &CancelToken::new())
             .await
     }
 
     /// Incremental dispatch: response body chunks reach the sink as they
-    /// arrive; authorization, one-time consumption, bounded capture, and the
-    /// returned receipt are identical to [`Self::execute`].
+    /// arrive — already credential-scrubbed, with a carry buffer spanning
+    /// chunk boundaries — while authorization, one-time consumption, bounded
+    /// capture, and the returned receipt stay identical to [`Self::execute`].
+    ///
+    /// `cancel` tears the in-flight request down: the HTTP response is
+    /// dropped, the connection closes, and the call returns
+    /// [`ConnectorError::Cancelled`].
     pub async fn execute_streaming<S: ChunkSink>(
         &self,
         op: &CanonicalOperation,
         grant: &ConnectorGrant,
         sink: &mut S,
+        cancel: &CancelToken,
     ) -> Result<ConnectorResponse, ConnectorError> {
-        self.execute_with_sink(op, grant, Some(sink)).await
+        self.execute_with_sink(op, grant, Some(sink), cancel).await
     }
 
     async fn execute_with_sink(
@@ -464,7 +541,13 @@ impl ConnectorBroker {
         op: &CanonicalOperation,
         grant: &ConnectorGrant,
         sink: Option<&mut dyn ChunkSink>,
+        cancel: &CancelToken,
     ) -> Result<ConnectorResponse, ConnectorError> {
+        // A token that is already cancelled must not consume the grant or
+        // touch the wire: nothing has happened yet, so nothing is uncertain.
+        if cancel.is_cancelled() {
+            return Err(ConnectorError::Cancelled);
+        }
         let claims = &grant.claims;
         let binding = &claims.binding;
 
@@ -537,9 +620,16 @@ impl ConnectorBroker {
         let credential: Option<(String, String)> = if matches!(descriptor.auth, AuthStyle::None) {
             None
         } else {
+            // `request_async`, never `request`: the OS keychain read behind
+            // this is synchronous host work that can park for as long as a
+            // SecurityAgent approval prompt is on screen. Resolving it on a
+            // tokio worker thread stalls every other task on the runtime and
+            // surfaces to the control plane as an unexplained
+            // `DEADLINE_EXCEEDED`.
             let handle = self
                 .secret_broker
-                .request(&claims.secret_uri, &claims.workload.workload_id)?;
+                .request_async(&claims.secret_uri, &claims.workload.workload_id)
+                .await?;
             if handle.digest() != claims.credential_digest {
                 return Err(terminus_secrets::SecretError::InvalidGrant(
                     "credential rotated since grant issuance; mint a fresh grant".into(),
@@ -588,7 +678,19 @@ impl ConnectorBroker {
         )?;
 
         // -- 7. Dispatch the exact HTTP/1.1 request ------------------------
-        let dispatch_sink = DispatchSink { inner: sink };
+        // Response scrubbing: echoed credential material never escapes. The
+        // literal set is fixed BEFORE dispatch so the streaming sink can
+        // scrub incrementally; the buffered path applies the same set to the
+        // captured body below, and the two results are byte-identical.
+        let mut literals: Vec<(String, String)> = Vec::new();
+        if !header_value.is_empty() {
+            literals.push(("connector-credential".to_string(), header_value.clone()));
+            if let Some(bare) = header_value.strip_prefix("Bearer ") {
+                literals.push(("connector-credential-bare".to_string(), bare.to_string()));
+            }
+        }
+        let streaming = sink.is_some();
+        let dispatch_sink = DispatchSink::new(sink, &literals, cancel.clone());
         let dispatch = tokio::time::timeout(timeouts.total, async {
             let ctx = DispatchContext {
                 op,
@@ -598,6 +700,7 @@ impl ConnectorBroker {
                 timeouts,
                 static_headers: &descriptor.static_headers,
                 response_header_allowlist: &descriptor.response_headers,
+                cancel,
             };
             if op.scheme.eq_ignore_ascii_case("https") {
                 dispatch_https(ctx, &header_name, &header_value, dispatch_sink).await
@@ -607,13 +710,9 @@ impl ConnectorBroker {
         })
         .await;
 
-        // Response scrubbing: echoed credential material never escapes.
         let mut redactor = Redactor::new();
-        if !header_value.is_empty() {
-            redactor.add_literal("connector-credential", &header_value);
-            if let Some(bare) = header_value.strip_prefix("Bearer ") {
-                redactor.add_literal("connector-credential-bare", bare);
-            }
+        for (id, literal) in &literals {
+            redactor.add_literal(id.clone(), literal.clone());
         }
 
         let (status_code, response_bytes, content_type, response_headers, wire_error) =
@@ -670,8 +769,12 @@ impl ConnectorBroker {
         };
 
         if let Some(e) = wire_error {
+            // Either the dispatch loop observed the token, or it lost a
+            // race with it between grant consumption and the first await.
+            let cancelled = matches!(e, ConnectorError::Cancelled) || cancel.is_cancelled();
             let message = match receipt.outcome {
                 Outcome::NotDispatched => "connector dispatch not dispatched",
+                _ if cancelled => "connector dispatch cancelled",
                 _ => "connector dispatch uncertain",
             };
             tracing::warn!(
@@ -684,9 +787,16 @@ impl ConnectorBroker {
                 request_bytes = receipt.request_bytes,
                 response_bytes = receipt.response_bytes,
                 outcome = ?receipt.outcome,
+                streamed = streaming,
                 consumed_at = consumed.consumed_at_unix,
                 "{message}: {e}"
             );
+            // Cancellation is the caller's own decision, not an upstream
+            // failure: surface it distinctly so the transport can answer
+            // CANCELLED instead of an ambiguous unsettled receipt.
+            if cancelled {
+                return Err(ConnectorError::Cancelled);
+            }
         } else {
             tracing::info!(
                 target: "terminus_connector_audit",
@@ -806,9 +916,25 @@ fn authorize_host(
     Ok(())
 }
 
+/// Response header names that are NEVER surfaced, whatever a descriptor
+/// lists. Credential and session material must not cross the boundary even
+/// by a mis-specified allowlist.
+const RESPONSE_HEADER_DENYLIST: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "set-cookie",
+    "set-cookie2",
+    "www-authenticate",
+    "proxy-authenticate",
+];
+
 /// Does a response header name match an allowlist entry? Entries are exact
-/// lowercase names or a trailing-`*` prefix (`x-codex-*`).
+/// lowercase names or a trailing-`*` prefix (`x-codex-*`). The denylist wins
+/// over every allowlist entry, including a wildcard.
 fn response_header_admitted(name: &str, allowlist: &[String]) -> bool {
+    if RESPONSE_HEADER_DENYLIST.contains(&name) {
+        return false;
+    }
     allowlist
         .iter()
         .any(|pattern| match pattern.strip_suffix('*') {
@@ -876,6 +1002,10 @@ struct DispatchContext<'a> {
     timeouts: ConnectorTimeouts,
     static_headers: &'a [(String, String)],
     response_header_allowlist: &'a [String],
+    /// Torn down by the caller: every await in the dispatch loop races it,
+    /// so cancelling drops the response and closes the connection instead
+    /// of letting an unread completion run to the total-duration bound.
+    cancel: &'a CancelToken,
 }
 
 /// Bound one await by the connector's idle (gap) timeout when configured.
@@ -913,7 +1043,13 @@ async fn dispatch_https(
         timeouts,
         static_headers,
         response_header_allowlist,
+        cancel,
     } = ctx;
+    if cancel.is_cancelled() {
+        return Err(ConnectorError::RequestNotDispatched(
+            "cancelled before dispatch".to_string(),
+        ));
+    }
     // The reqwest-level timeout stays the TOTAL bound. Streaming responses
     // are additionally bounded per gap by `within_idle` below, so a silent
     // upstream cannot hold the socket for the whole total budget.
@@ -955,12 +1091,15 @@ async fn dispatch_https(
     let request_bytes = serialized_request_bytes(&request, op.body.len())
         .map_err(|error| ConnectorError::RequestNotDispatched(error.to_string()))?;
     reserve_request_exact(egress, request_bytes)?;
-    let mut response = within_idle(timeouts, "waiting for the response head", async {
-        client
-            .execute(request)
-            .await
-            .map_err(|error| ConnectorError::Protocol(format!("HTTPS dispatch failed: {error}")))
-    })
+    let mut response = within_idle(
+        timeouts,
+        "waiting for the response head",
+        until_cancelled(cancel, async {
+            client.execute(request).await.map_err(|error| {
+                ConnectorError::Protocol(format!("HTTPS dispatch failed: {error}"))
+            })
+        }),
+    )
     .await?;
     let status = response.status().as_u16();
     let content_type = response
@@ -969,13 +1108,29 @@ async fn dispatch_https(
         .and_then(|value| value.to_str().ok())
         .map(ToString::to_string);
     let response_headers = filter_response_headers(response.headers(), response_header_allowlist);
+    // Metadata first: the consumer classifies status and rate-limit/routing
+    // headers before a single body byte, instead of at the terminal receipt.
+    sink.head(ResponseHead {
+        status_code: status,
+        content_type: content_type.clone(),
+        headers: response_headers.clone(),
+    })
+    .await?;
     let mut body = Vec::new();
     loop {
-        let chunk = within_idle(timeouts, "waiting for the next response chunk", async {
-            response.chunk().await.map_err(|error| {
-                ConnectorError::Protocol(format!("HTTPS response failed: {error}"))
-            })
-        })
+        // The idle bound is per CHUNK and covers only the wait for upstream
+        // bytes; the sink send below is deliberately outside it so a slow
+        // consumer applies TCP backpressure instead of tripping the gap
+        // timeout. The total bound still caps the whole exchange.
+        let chunk = within_idle(
+            timeouts,
+            "waiting for the next response chunk",
+            until_cancelled(cancel, async {
+                response.chunk().await.map_err(|error| {
+                    ConnectorError::Protocol(format!("HTTPS response failed: {error}"))
+                })
+            }),
+        )
         .await?;
         let Some(chunk) = chunk else { break };
         let next = body.len().saturating_add(chunk.len());
@@ -986,9 +1141,10 @@ async fn dispatch_https(
             });
         }
         reserve_exact(egress, chunk.len())?;
-        sink.send(&chunk).await?;
+        until_cancelled(cancel, sink.send(&chunk)).await?;
         body.extend_from_slice(&chunk);
     }
+    until_cancelled(cancel, sink.finish()).await?;
     Ok(DispatchOutcome {
         status_code: status,
         body,
@@ -1116,7 +1272,13 @@ async fn dispatch_http(
         timeouts,
         static_headers,
         response_header_allowlist,
+        cancel,
     } = ctx;
+    if cancel.is_cancelled() {
+        return Err(ConnectorError::RequestNotDispatched(
+            "cancelled before dispatch".to_string(),
+        ));
+    }
     // Connect to a kernel-authorized numeric address only.
     let mut remote = None;
     for address in addresses {
@@ -1172,10 +1334,17 @@ async fn dispatch_http(
     let mut buf = [0u8; 8192];
     let mut emitted = 0usize;
     let mut body_started = false;
+    let mut head_meta: Option<ParsedHead> = None;
     loop {
-        let n = within_idle(timeouts, "waiting for the next response chunk", async {
-            stream.read(&mut buf).await.map_err(ConnectorError::from)
-        })
+        // Per-chunk gap bound, raced against cancellation. The sink send is
+        // outside it so consumer backpressure never counts as an idle stall.
+        let n = within_idle(
+            timeouts,
+            "waiting for the next response chunk",
+            until_cancelled(cancel, async {
+                stream.read(&mut buf).await.map_err(ConnectorError::from)
+            }),
+        )
         .await?;
         if n == 0 {
             break;
@@ -1185,11 +1354,20 @@ async fn dispatch_http(
         match find_double_crlf(&raw) {
             Some(split) if !body_started => {
                 body_started = true;
-                sink.send(&raw[split + 4..]).await?;
+                let meta = parse_head(&raw[..split], response_header_allowlist)?;
+                sink.head(ResponseHead {
+                    status_code: meta.0,
+                    content_type: meta.1.clone(),
+                    headers: meta.2.clone(),
+                })
+                .await?;
+                head_meta = Some(meta);
+                until_cancelled(cancel, sink.send(&raw[split + 4..])).await?;
                 emitted = raw.len();
             }
             _ if body_started => {
-                sink.send(&raw[emitted..]).await?;
+                let pending = raw[emitted..].to_vec();
+                until_cancelled(cancel, sink.send(&pending)).await?;
                 emitted = raw.len();
             }
             _ => {}
@@ -1201,25 +1379,49 @@ async fn dispatch_http(
             });
         }
     }
+    until_cancelled(cancel, sink.finish()).await?;
 
     let split = find_double_crlf(&raw)
         .ok_or_else(|| ConnectorError::Protocol("malformed HTTP response head".into()))?;
-    let head = String::from_utf8_lossy(&raw[..split]).to_string();
     let body = raw[split + 4..].to_vec();
+    let (status_code, content_type, response_headers) = match head_meta {
+        Some(meta) => meta,
+        None => parse_head(&raw[..split], response_header_allowlist)?,
+    };
+
+    Ok(DispatchOutcome {
+        status_code,
+        body,
+        content_type,
+        response_headers,
+    })
+}
+
+/// Status code, content type, and the allowlisted response headers parsed
+/// out of a plaintext response head.
+type ParsedHead = (u16, Option<String>, Vec<(String, String)>);
+
+/// Parse the plaintext response head into status, content type, and the
+/// allowlisted response headers.
+fn parse_head(head_bytes: &[u8], allowlist: &[String]) -> Result<ParsedHead, ConnectorError> {
+    let head = String::from_utf8_lossy(head_bytes).to_string();
     let status_code = head
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| ConnectorError::Protocol("missing HTTP status line".into()))?;
-    let response_headers = filter_head_response_headers(&head, response_header_allowlist);
-
-    Ok(DispatchOutcome {
+    let content_type = head.lines().skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("content-type")
+            .then(|| value.trim().to_string())
+    });
+    Ok((
         status_code,
-        body,
-        content_type: None,
-        response_headers,
-    })
+        content_type,
+        filter_head_response_headers(&head, allowlist),
+    ))
 }
 
 /// Response-header projection for the plaintext path, which parses the head
@@ -1287,5 +1489,63 @@ mod tests {
         let expected_added =
             "accept: */*\r\n".len() + format!("user-agent: {CONNECTOR_USER_AGENT}\r\n").len();
         assert_eq!(with_defaults - without_defaults, expected_added);
+    }
+
+    fn descriptor_admitting(headers: &[&str]) -> ConnectorDescriptor {
+        ConnectorDescriptor::new(AuthStyle::Bearer)
+            .with_allowed_request_headers(headers.iter().copied())
+    }
+
+    #[test]
+    fn descriptor_request_headers_are_matched_case_insensitively() {
+        // The provider feature-flag headers arrive from the renderers in
+        // their documented casing (`anthropic-beta`, `OpenAI-Beta`); the
+        // allowlist stores lowercase and the check normalizes, so both spell
+        // the same admitted name.
+        let descriptor = descriptor_admitting(&["anthropic-beta", "openai-beta"]);
+        for name in [
+            "anthropic-beta",
+            "Anthropic-Beta",
+            "ANTHROPIC-BETA",
+            "OpenAI-Beta",
+            "openai-beta",
+        ] {
+            let outcome = validate_headers(&[(name.to_string(), "value".to_string())], &descriptor);
+            assert!(outcome.is_ok(), "{name} must be admitted: {outcome:?}");
+        }
+    }
+
+    #[test]
+    fn request_headers_outside_the_descriptor_allowlist_are_rejected() {
+        let descriptor = descriptor_admitting(&["anthropic-beta", "openai-beta"]);
+        for name in [
+            // The Codex minimum-version gate: admitting it invites a hard
+            // 400 on every backend rollout.
+            "version",
+            "x-oai-attestation",
+            "x-codex-routing-hint",
+            "x-openai-internal-codex-responses-lite",
+            "authorization",
+            "cookie",
+        ] {
+            let error = validate_headers(&[(name.to_string(), "v".to_string())], &descriptor)
+                .expect_err("{name} must not be admitted");
+            assert!(
+                format!("{error}").contains("not admitted"),
+                "{name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn globally_admitted_headers_need_no_descriptor_entry() {
+        let descriptor = ConnectorDescriptor::new(AuthStyle::None);
+        for name in ["Accept", "content-type", "Anthropic-Version"] {
+            let outcome = validate_headers(&[(name.to_string(), "v".to_string())], &descriptor);
+            assert!(
+                outcome.is_ok(),
+                "{name} must be globally admitted: {outcome:?}"
+            );
+        }
     }
 }

@@ -401,9 +401,21 @@ function modelWire(model: GatewayModel): Record<string, unknown> {
     image_input: model.imageInput,
     input_micros_per_million: model.inputMicrosPerMillion,
     output_micros_per_million: model.outputMicrosPerMillion,
+    // Cache reads are billed at a fraction of fresh input; a consumer without
+    // this number has to assume they cost full price.
+    cached_input_micros_per_million: model.cachedInputMicrosPerMillion,
     // USD micros per million tokens, under the names the composer reads.
     input_cost_micros: model.inputMicrosPerMillion,
     output_cost_micros: model.outputMicrosPerMillion,
+    // The gateway is metered per token, so the rates above are the price.
+    // Stated the same way the account inventory states it, so one consumer
+    // reads one shape.
+    pricing: {
+      input_micros_per_million: model.inputMicrosPerMillion,
+      cached_input_micros_per_million: model.cachedInputMicrosPerMillion,
+      output_micros_per_million: model.outputMicrosPerMillion,
+    },
+    pricing_source: "catalog",
     // The gateway reports whether a model reasons, not which budgets it
     // accepts, so there are no levels to advertise here.
     reasoning_efforts: [],

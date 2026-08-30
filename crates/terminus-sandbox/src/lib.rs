@@ -22,8 +22,10 @@ pub use error::SandboxError;
 pub use manager::SandboxManager;
 pub use probe::{platform_matrix, run_probes, Platform, ProbeKind, ProbeResult, ProbeVerdict};
 pub use profile::{
-    FilesystemAccess, FilesystemRule, NetworkAccess, ProcessAccess, ResourceLimits, SandboxProfile,
-    SecretsAccess,
+    resolve_exec_timeout_ms, FilesystemAccess, FilesystemRule, NetworkAccess, ProcessAccess,
+    ResourceLimits, SandboxProfile, SecretsAccess, DEFAULT_WALL_CLOCK_MS,
+    DENIED_WORKSPACE_OVERLAYS, MAX_BACKGROUND_WALL_CLOCK_MS, MAX_FOREGROUND_WALL_CLOCK_MS,
+    PROTECTED_GIT_OVERLAYS, SCRATCH_DIR_PREFIX,
 };
 pub use report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
 pub use tier::{select_secure, RiskTier, SecureSelection};

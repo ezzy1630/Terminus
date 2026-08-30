@@ -67,19 +67,29 @@ try {
     const inputSources = inputEpisode === undefined
       ? null
       : object(JSON.parse(inputEpisode.sourceVersionsJson) as unknown, `episode sources ${turnId}`);
-    const providerAttempt = turn?.providerAttempts[0];
-    const modelEpisode = turn?.episodes.find((episode) =>
-      episode.sequence === 2 && episode.kind === "model_message"
-    );
-    const providerResponseHash = typeof providerAttempt?.responseArtifact === "string"
-      ? `sha256:${providerAttempt.responseArtifact.slice("artifact://sha256/".length)}`
+    const providerAttempts = turn?.providerAttempts ?? [];
+    const providerAttempt = providerAttempts.at(-1);
+    const modelEpisodes = turn?.episodes.filter((episode) => episode.kind === "model_message") ?? [];
+    const modelEpisode = modelEpisodes.at(-1);
+    const modelContentHash = typeof modelEpisode?.contentArtifact === "string"
+      ? `sha256:${modelEpisode.contentArtifact.slice("artifact://sha256/".length)}`
       : null;
     const modelSources = modelEpisode === undefined
       ? null
       : object(JSON.parse(modelEpisode.sourceVersionsJson) as unknown, `model episode sources ${turnId}`);
-    const usage = providerAttempt?.usageJson === null || providerAttempt?.usageJson === undefined
-      ? null
-      : object(JSON.parse(providerAttempt.usageJson) as unknown, `provider usage ${turnId}`);
+    const providerAttemptsValid = providerAttempts.length > 0
+      && providerAttempts.every((attempt, index) => {
+        const usage = attempt.usageJson === null
+          ? null
+          : object(JSON.parse(attempt.usageJson) as unknown, `provider usage ${turnId}/${index + 1}`);
+        return attempt.attemptNumber === index + 1
+          && attempt.status === "completed"
+          && typeof attempt.responseArtifact === "string"
+          && attempt.responseArtifact.startsWith("artifact://sha256/")
+          && attempt.completedAt !== null
+          && usage?.inputTokens === "17"
+          && usage.outputTokens === "9";
+      });
     if (
       !turn
       || typeof turn.initiatingInputArtifact !== "string"
@@ -93,18 +103,14 @@ try {
       || !Array.isArray(startedArtifactRefs)
       || !startedArtifactRefs.includes(turn.initiatingInputArtifact)
       || inputSources?.input !== inputHash
-      || turn.providerAttempts.length !== 1
-      || providerAttempt?.status !== "completed"
-      || providerAttempt.responseArtifact === null
-      || !providerAttempt.responseArtifact.startsWith("artifact://sha256/")
-      || providerAttempt.completedAt === null
+      || !providerAttemptsValid
+      || !providerAttempt
       || !modelEpisode
+      || modelEpisodes.length !== 1
       || modelEpisode.contentArtifact === null
       || !modelEpisode.contentArtifact.startsWith("artifact://sha256/")
       || modelSources?.providerAttemptId !== providerAttempt.id
-      || typeof modelSources?.response !== "string"
-      || usage?.inputTokens !== "17"
-      || usage.outputTokens !== "9"
+      || modelSources?.response !== modelContentHash
     ) {
       throw new Error(`turn admission was not crash-atomic for ${turnId}: ${JSON.stringify({
         turn,

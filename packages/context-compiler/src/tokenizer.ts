@@ -193,14 +193,61 @@ function byteLength(text: string): number {
 }
 
 /**
+ * Bytes per token for prose and code, and for JSON-structured payloads.
+ *
+ * Calibrated 2026-08-29 against the 34 live provider attempts in this
+ * checkout's `.terminus-dev/control.db` (big-pickle, nemotron-3-ultra,
+ * deepseek-v4-flash) by comparing each rendered request body against the
+ * provider-reported `inputTokens`. The prior constant — 4 bytes/token over
+ * message text only, with no message envelope and no tool-schema term —
+ * under-predicted by a mean of 46.1% (MAPE 46.1%). These constants predict
+ * with a mean error of +0.6% and a MAPE of 6.3% over the same fixtures.
+ *
+ * JSON is denser than prose per byte because punctuation, quotes and short
+ * keys each cost their own token; a tool result is roughly 3.0 bytes/token
+ * where English and source code are roughly 3.6.
+ */
+export const PROSE_BYTES_PER_TOKEN = 3.6;
+export const STRUCTURED_BYTES_PER_TOKEN = 3.0;
+/**
+ * Fraction of JSON structural characters above which a payload is treated as
+ * structured. Real prose sits near 0.01–0.04; a JSON envelope sits above 0.10.
+ */
+export const STRUCTURED_DENSITY_THRESHOLD = 0.08;
+/**
+ * Per-message chat-template overhead (role token, separators, priming).
+ * Four tokens is the value that minimises error across the fixtures and
+ * matches OpenAI's documented per-message cost for the chat formats.
+ */
+export const MESSAGE_ENVELOPE_TOKENS = 4;
+/** Per-tool wrapper cost on top of the serialized schema. */
+const TOOL_SCHEMA_ENVELOPE_TOKENS = 2;
+
+const STRUCTURAL_CHARACTERS = new Set(["{", "}", "[", "]", "\"", ",", ":"]);
+
+/** Fraction of JSON structural characters in a payload. */
+export function structuralDensity(text: string): number {
+  if (text.length === 0) return 0;
+  let structural = 0;
+  for (const character of text) {
+    if (STRUCTURAL_CHARACTERS.has(character)) structural += 1;
+  }
+  return structural / text.length;
+}
+
+/**
  * The fallback is intentionally generic. It is a bounded planning signal,
  * never a provider-token claim, and remains degraded until observations or a
- * verified binding establish calibration.
+ * verified binding establish calibration — but it is now calibrated against
+ * real provider usage rather than a round number, because a 46%-low estimate
+ * silently over-fills every context window it plans.
  */
 function explicitFallbackTextTokens(text: string): number {
   if (text.length === 0) return 0;
-  const fallbackBytesPerToken = 4;
-  return Math.max(1, Math.ceil(byteLength(text) / fallbackBytesPerToken));
+  const bytesPerToken = structuralDensity(text) > STRUCTURED_DENSITY_THRESHOLD
+    ? STRUCTURED_BYTES_PER_TOKEN
+    : PROSE_BYTES_PER_TOKEN;
+  return Math.max(1, Math.ceil(byteLength(text) / bytesPerToken));
 }
 
 function calibrationErrorPercentage(predicted: number, observed: number): number {
@@ -373,13 +420,16 @@ export class CalibratedModelTokenizer implements TokenEstimator {
       };
     }
     const text = this.estimateText(fragment.textContent ?? "");
+    // Every fragment becomes one provider message; the chat template charges
+    // for the role header and separators whether or not the body is empty.
+    const templateTokens = MESSAGE_ENVELOPE_TOKENS;
     return {
       textTokens: text.tokens,
-      templateTokens: 0,
+      templateTokens,
       toolSchemaTokens: 0,
       imageTokens: 0,
       envelopeTokens: 0,
-      totalTokens: text.tokens,
+      totalTokens: text.tokens + templateTokens,
       calibration: this.calibration,
       source: text.source,
     };
@@ -394,12 +444,22 @@ export class CalibratedModelTokenizer implements TokenEstimator {
       return this.estimateFromRaw(tokens, "verified_binding");
     }
     if (tools.length === 0) return this.estimateFromRaw(0, "explicit_fallback");
-    const payload = tools.map((tool) => JSON.stringify({
-      id: tool.id,
-      summary: tool.summary,
-      inputSchema: tool.inputSchema,
-    })).join("\n");
-    return this.estimateText(payload);
+    // Approximate the bytes the provider actually tokenizes. Every dialect
+    // wraps the schema in a name/description/parameters envelope; estimating
+    // the bare `{id, summary, inputSchema}` triple under-counted by ~6%.
+    const payload = JSON.stringify(tools.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.id,
+        description: tool.summary,
+        parameters: tool.inputSchema,
+      },
+    })));
+    const body = this.estimateText(payload);
+    return {
+      ...body,
+      tokens: body.tokens + TOOL_SCHEMA_ENVELOPE_TOKENS * tools.length,
+    };
   }
 
   estimateEnvelope(maxTokens: number): TokenEstimate {
@@ -554,14 +614,115 @@ export function reconcileUsage(
 }
 
 /**
+ * Estimate the cost of rendering `text` as one provider message, including
+ * the chat-template envelope. Fragment constructors use this so that a
+ * fragment's recorded `estimatedTokens` matches what `estimateFragment`
+ * would compute for it.
+ */
+export function estimateMessageTokens(tokenizer: ModelTokenizer, text: string): number {
+  return tokenizer.estimateTextTokens(text) + MESSAGE_ENVELOPE_TOKENS;
+}
+
+// ─────────────────── Process-level calibration feedback ─────────────────────
+
+/**
+ * Calibration learned so far, keyed by provider and model, for the life of
+ * this process.
+ *
+ * `resolveTokenizer` mints a *new* estimator on every call — several per
+ * compile — so a calibration held only on the instance is discarded before it
+ * can ever be read back, and `observeUsage` had no call sites at all. Both
+ * halves are needed for the loop to close: somewhere to put a sample, and a
+ * seed for the next estimator that asks. Persisting it is deliberately out of
+ * scope: a scale learned from one model's traffic is not portable, and the
+ * ledger re-converges within a handful of turns.
+ */
+const PROCESS_CALIBRATION = new Map<string, TokenCalibrationSeed>();
+
+function calibrationKey(providerId: string, modelKey: ModelKey): string {
+  return `${providerId}\u0000${String(modelKey)}`;
+}
+
+/** The seed a fresh estimator for this provider/model should start from. */
+export function processCalibrationSeed(
+  providerId: string,
+  modelKey: ModelKey,
+): TokenCalibrationSeed | undefined {
+  return PROCESS_CALIBRATION.get(calibrationKey(providerId, modelKey));
+}
+
+/** Forget everything learned. Tests only; there is no runtime reset path. */
+export function resetProcessCalibration(): void {
+  PROCESS_CALIBRATION.clear();
+}
+
+/**
+ * The prompt size the provider actually charged for, normalised across the
+ * two conventions in use.
+ *
+ * OpenAI reports `input_tokens` as the *total* prompt with `cached_tokens` as
+ * a subset of it. Anthropic reports `input_tokens` as the uncached remainder
+ * only, with cache reads and writes counted separately. Feeding the raw field
+ * to the estimator would teach it that a well-cached Anthropic turn's prompt
+ * is a tenth of its real size, so the scale would collapse turn after turn.
+ */
+export function promptTokensFromUsage(providerId: string, usage: UsageRecord): number {
+  const input = Number(usage.inputTokens);
+  const cached = Number(usage.cachedInputTokens);
+  const written = Number(usage.cacheWriteTokens);
+  return providerId.toLowerCase().includes("anthropic")
+    ? input + cached + written
+    : Math.max(input, cached + written);
+}
+
+/**
+ * Feed one settled attempt back into the estimator and keep what it learned.
+ *
+ * Returns the reconciliation so the caller can report the error, or `null`
+ * when there is nothing to learn from (no prediction, or a provider that
+ * reported no authoritative usage).
+ */
+export function observeAttemptUsage(input: {
+  readonly providerId: string;
+  readonly modelKey: ModelKey;
+  readonly manifestId: string;
+  readonly predictedPromptTokens: number;
+  readonly usage: UsageRecord;
+}): ReconciledUsage | null {
+  if (!Number.isFinite(input.predictedPromptTokens) || input.predictedPromptTokens <= 0) return null;
+  const observed = promptTokensFromUsage(input.providerId, input.usage);
+  if (!Number.isFinite(observed) || observed <= 0) return null;
+  const estimator = resolveTokenizer(input.providerId, input.modelKey);
+  const reconciled = estimator.observeUsage(
+    input.manifestId,
+    input.predictedPromptTokens,
+    { ...input.usage, inputTokens: BigInt(Math.round(observed)) as UsageRecord["inputTokens"] },
+    { usageAvailable: true },
+  );
+  const learned = estimator.calibration;
+  PROCESS_CALIBRATION.set(calibrationKey(input.providerId, input.modelKey), {
+    sampleCount: learned.sampleCount,
+    scale: learned.scale,
+    meanAbsolutePercentageError: learned.meanAbsolutePercentageError,
+    maximumAbsolutePercentageError: learned.maximumAbsolutePercentageError,
+  });
+  return reconciled;
+}
+
+/**
  * Resolve a tokenizer without pretending that provider SDKs are bundled here.
- * With no injected binding, the returned estimator is explicitly degraded.
+ * With no injected binding, the returned estimator is explicitly degraded —
+ * until this process has observed enough real usage to calibrate it, which
+ * {@link observeAttemptUsage} records and this function seeds from.
  */
 export function resolveTokenizer(
   providerId: string,
   modelKey: ModelKey,
-  options: TokenizerOptions = {},
+  rawOptions: TokenizerOptions = {},
 ): TokenEstimator {
+  const options: TokenizerOptions = rawOptions.calibration !== undefined
+    ? rawOptions
+    : { ...rawOptions, calibration: processCalibrationSeed(providerId, modelKey) };
   const provider = providerId.toLowerCase();
   if (provider.includes("anthropic") || String(modelKey).toLowerCase().includes("claude")) {
     return new AnthropicTokenizer(modelKey, options);

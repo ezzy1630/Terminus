@@ -14,6 +14,18 @@ pub enum SecretError {
     InvalidUri(String),
     #[error("provider unavailable: {0}")]
     ProviderUnavailable(String),
+    /// The credential store did not answer inside
+    /// [`crate::SECRET_RESOLVE_TIMEOUT`]. On macOS this is almost always a
+    /// SecurityAgent prompt waiting off-screen because the calling binary's
+    /// code identity is not on the keychain item's ACL — which is the normal
+    /// state of an ad-hoc-signed dev build after a rebuild. The message is
+    /// the whole remedy, so it is written to be readable in a gRPC status.
+    #[error(
+        "secret resolution for {uri} did not complete within {timeout_secs}s: an OS keychain \
+         access prompt is probably waiting for approval (approve it for this binary, or run the \
+         dev kernel with TERMINUS_SECRETS_BACKEND=file)"
+    )]
+    ResolveTimeout { uri: String, timeout_secs: u64 },
     #[error("invalid connector grant: {0}")]
     InvalidGrant(String),
     #[error("grant binding mismatch: {0}")]

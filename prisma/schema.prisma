@@ -209,6 +209,9 @@ model Turn {
   // Which connected provider account produced this turn. Null means the turn
   // ran on the legacy direct/gateway/local chain.
   selectedProviderAccountId String? @map("selected_provider_account_id")
+  // Caller-supplied per-turn budget (max_steps / max_tokens / max_cost_micros).
+  // Null means "use the task contract's budget unchanged".
+  requestedBudgetJson       String? @map("requested_budget_json")
 
   thread           Thread            @relation(fields: [threadId], references: [id])
   task             Task?             @relation(fields: [taskId], references: [id])
@@ -258,6 +261,11 @@ model ProviderAttempt {
   continuationId          String?   @map("continuation_id")
   responseArtifact       String?   @map("response_artifact")
   nativeContinuationJson String?   @map("native_continuation_json")
+  reasoningReplayJson    String?   @map("reasoning_replay_json")
+  // The provider's own terminal reason for this attempt (stop|tool_use|
+  // length|error|cancelled|refusal). Already carried by `settleResponse`; it
+  // was previously only emitted onto the event log and never stored.
+  finishReason           String?   @map("finish_reason")
   status                 String
   usageJson              String?   @map("usage_json")
   costMicros             Int?      @map("cost_micros")

@@ -15,13 +15,13 @@ A declared test is not a passing run. Executed-test evidence lives in CI
 | Client apps | 4 | directories in apps/ |
 | External harness adapters | 1 | directories in adapters/ |
 | Mini-services | 2 | directories in mini-services/ |
-| Declared Rust tests | 491 | `#[test]` + `#[tokio::test]` occurrences in crates/** (excl. generated) |
-| TypeScript test files | 166 | `*.test.{ts,tsx}` in packages/ + apps/ |
-| Declared TypeScript test blocks | 1486 | `test(/it(` occurrences in those files |
-| Declared Python tests | 282 | `def test_*` in python/** |
+| Declared Rust tests | 589 | `#[test]` + `#[tokio::test]` occurrences in crates/** (excl. generated) |
+| TypeScript test files | 170 | `*.test.{ts,tsx}` in packages/ + apps/ |
+| Declared TypeScript test blocks | 1615 | `test(/it(` occurrences in those files |
+| Declared Python tests | 442 | `def test_*` in python/** |
 | ADRs | 52 | docs/decisions/ADR-*.md |
 | Runbooks | 15 | docs/runbooks/*.md |
-| SQLite migrations | 25 | migrations/sqlite/*.sql |
+| SQLite migrations | 28 | migrations/sqlite/*.sql |
 
 Maturity classification of every component: see the
 [component maturity registry](component-maturity.md) (`maturity.yaml`).

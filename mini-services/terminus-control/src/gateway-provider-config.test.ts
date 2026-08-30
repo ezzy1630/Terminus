@@ -76,6 +76,35 @@ describe("gateway provider configuration", () => {
     })).toThrow("has no admitted discovery record");
   });
 
+  test("the gateway's large-window models keep their window", () => {
+    const discovered = {
+      id: "gpt-5-nano",
+      name: "GPT-5 Nano",
+      deployment: "zen" as const,
+      providerId: "open_code_zen" as const,
+      baseUrl: "https://opencode.ai/zen/v1",
+      protocol: "chat_completions" as const,
+      free: true,
+      toolCalling: true,
+      structuredOutput: true,
+      imageInput: false,
+      reasoning: false,
+      contextTokens: 262_144,
+      outputTokens: 64_000,
+      inputMicrosPerMillion: 0,
+      cachedInputMicrosPerMillion: 0,
+      outputMicrosPerMillion: 0,
+      observedAt: "2026-08-24T00:01:00.000Z",
+    };
+    const model = configuredGatewayModel(row, "2026-08-24T00:02:00.000Z" as Rfc3339Timestamp, discovered);
+    const snapshot = configuredGatewayProviderSnapshot(model, row.revision, row.workspaceAccess);
+    expect(snapshot.context.advertisedTokens).toBe(262_144);
+    // Capped at the 200k default ceiling for an unknown family, not thrown
+    // away down to the old blanket 32,768.
+    expect(snapshot.context.testedSafeTokens).toBe(200_000);
+    expect(snapshot.context.maxOutputTokens).toBe(64_000);
+  });
+
   test("permits only an admitted free Zen model to use an anonymous binding", () => {
     const anonymousRow = { ...row, credentialConfigured: false, model: "gpt-5-nano" };
     const discovered = {

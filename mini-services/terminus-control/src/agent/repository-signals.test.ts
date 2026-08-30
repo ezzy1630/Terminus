@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  REPOSITORY_MAP_TOKEN_BUDGET,
   discoverNativeTestRecipes,
   discoverVerificationRunners,
+  selectTaskScopedRepositoryMap,
   type RepositoryFileObservation,
 } from "./repository-signals.js";
 
@@ -117,6 +119,28 @@ describe("H3 verification runner discovery", () => {
       .toBe("go test ./...");
   });
 
+  test("plain pytest layouts are detected without a pyproject", () => {
+    // The internal eval fixture: `pytest.ini` + tests, no manifest at all. The
+    // planner reported "no test runner detected" and the completion gate
+    // could not run while the task said `pytest -q`.
+    expect(discoverVerificationRunners([observation("pytest.ini", "[pytest]\ntestpaths = .\n")]).unit_test?.command)
+      .toBe("python -m pytest");
+    expect(discoverVerificationRunners([observation("conftest.py", "")]).test?.command).toBe("python -m pytest");
+    expect(discoverVerificationRunners([
+      observation("tox.ini", "[tox]\nenvlist = py\n\n[pytest]\naddopts = -q\n"),
+    ]).test?.command).toBe("python -m pytest");
+    expect(discoverVerificationRunners([
+      observation("setup.cfg", "[metadata]\nname = x\n\n[tool:pytest]\ntestpaths = tests\n"),
+      observation("uv.lock", ""),
+    ]).test?.command).toBe("uv run pytest");
+    // Shared configuration files without a pytest section are not a runner.
+    expect(discoverVerificationRunners([observation("tox.ini", "[tox]\nenvlist = py\n")])).toEqual({});
+    expect(discoverVerificationRunners([observation("setup.cfg", "[metadata]\nname = x\n")])).toEqual({});
+    // And the native recipe discovery sees the same pytest recipe.
+    const discovery = discoverNativeTestRecipes([observation("pytest.ini", "[pytest]\n")]);
+    expect(discovery.nativeTestCommands).toEqual(["python -m pytest"]);
+  });
+
   test("a repository with no runner yields an empty catalog", () => {
     expect(discoverVerificationRunners([])).toEqual({});
     expect(discoverVerificationRunners([observation("package.json", "{}")])).toEqual({});
@@ -129,5 +153,59 @@ describe("H3 verification runner discovery", () => {
     ]);
     expect(catalog.test?.command).toBe("make test");
     expect(Object.values(catalog).every((runner) => !runner.command.includes("deploy"))).toBe(true);
+  });
+});
+
+describe("task-scoped repository map", () => {
+  const entry = (path: string, symbols: readonly string[] = []) => ({ path, symbols });
+
+  test("files the contract may write come first, then readable ones, then the rest", () => {
+    const selection = selectTaskScopedRepositoryMap(
+      [
+        entry("zzz/other.ts"),
+        entry("docs/readme.md"),
+        entry("packages/app/src/main.ts"),
+        entry("packages/lib/util.ts"),
+      ],
+      { writePaths: ["packages/app/**"], readPaths: ["packages/**"] },
+    );
+    expect(selection.entries.map((item) => item.path)).toEqual([
+      "packages/app/src/main.ts",
+      "packages/lib/util.ts",
+      "zzz/other.ts",
+      "docs/readme.md",
+    ]);
+    expect(selection.omittedEntries).toBe(0);
+  });
+
+  test("caps the fragment at the token budget instead of the first 200 files", () => {
+    // ~60 bytes a line × 400 lines ≈ 24k bytes ≈ 6.6k tokens unbounded.
+    const entries = Array.from({ length: 400 }, (_unused, index) =>
+      entry(`packages/app/src/module-${String(index).padStart(4, "0")}.ts`, ["alpha", "beta"]));
+    const selection = selectTaskScopedRepositoryMap(entries, { writePaths: ["packages/**"] });
+    const bytes = selection.entries
+      .map((item) => `${item.path}: ${item.symbols.join(", ")}`.length + 1)
+      .reduce((sum, value) => sum + value, 0);
+    expect(bytes / 3.6).toBeLessThanOrEqual(REPOSITORY_MAP_TOKEN_BUDGET);
+    expect(selection.entries.length).toBeLessThan(entries.length);
+    expect(selection.omittedEntries).toBe(entries.length - selection.entries.length);
+  });
+
+  test("a `**` scope degrades to index order, never to an empty map", () => {
+    const entries = [entry("a.ts"), entry("b.ts"), entry("c.ts")];
+    const selection = selectTaskScopedRepositoryMap(entries, {
+      readPaths: ["**"],
+      writePaths: ["**"],
+    });
+    expect(selection.entries.map((item) => item.path)).toEqual(["a.ts", "b.ts", "c.ts"]);
+  });
+
+  test("one oversized entry still yields a non-empty map", () => {
+    const selection = selectTaskScopedRepositoryMap(
+      [entry("huge.ts", [".".repeat(REPOSITORY_MAP_TOKEN_BUDGET * 8)]), entry("small.ts")],
+      { tokenBudget: 10 },
+    );
+    expect(selection.entries.map((item) => item.path)).toEqual(["huge.ts"]);
+    expect(selection.omittedEntries).toBe(1);
   });
 });

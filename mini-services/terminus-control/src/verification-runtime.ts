@@ -43,6 +43,7 @@ import {
   type VerificationPlanMode,
 } from "@terminus/verification";
 import type { KernelUdsClients } from "./kernel-uds.js";
+import { kernelPublicEnv } from "./agent-tools.js";
 import {
   REPOSITORY_SIGNAL_PATHS,
   type VerificationRunnerCatalog,
@@ -109,9 +110,16 @@ export function createKernelPredicateRunner(
    * empty catalog every derived predicate reports `skipped`, never `fail`.
    */
   runnerCatalog: () => VerificationRunnerCatalog = () => ({}),
+  /**
+   * Host path of the workspace, so the repository's own tool directories
+   * (`.venv/bin`, `node_modules/.bin`) resolve exactly as they do for the
+   * agent's `exec`. Without it `python -m pytest` ran the host interpreter,
+   * which has no pytest, and every derived check failed for the wrong reason.
+   */
+  workspaceRoot: string | null = null,
 ): PredicateCommandRunner {
   return {
-    run: (request) => runKernelPredicate(clients, baseContext, workspaceId, request, runnerCatalog()),
+    run: (request) => runKernelPredicate(clients, baseContext, workspaceId, request, runnerCatalog(), workspaceRoot),
   };
 }
 
@@ -121,10 +129,16 @@ export async function resolveKernelEnvironmentDigest(
 ): Promise<string> {
   if (signal?.aborted) throw new Error("environment digest resolution aborted");
   const info = await clients.info.GetInfo({});
+  // `instanceId` is deliberately excluded. It changes on every kernel
+  // restart, and a plan is bound to the digest, so including it meant any
+  // restart while a task was VERIFYING permanently poisoned that task's
+  // verification plan ("stale source or environment binding") with no way
+  // back. What the digest must describe is the *environment* — the protocol,
+  // the build, and the capabilities available — not which process instance
+  // happened to answer.
   const descriptor = JSON.stringify({
     protocolVersion: info.protocolVersion,
     buildRevision: info.buildRevision,
-    instanceId: info.instanceId,
     supportedBackends: [...info.supportedBackends].sort(),
     supportedServices: [...info.supportedServices].sort(),
   });
@@ -139,11 +153,46 @@ export async function resolveWorkspaceRevision(
 ): Promise<string> {
   const outcome = await runKernelCommand(clients, baseContext, workspaceId, "git", ["rev-parse", "HEAD"], signal ?? null);
   const revision = outcome.stdout.trim();
-  if (outcome.exitCode !== 0 || !/^[0-9a-f]{40,64}$/i.test(revision)) {
-    throw new Error(`workspace revision could not be established from git: ${outcome.stderr.trim()}`);
+  if (outcome.exitCode === 0 && /^[0-9a-f]{40,64}$/i.test(revision)) {
+    return `git:${revision}`;
   }
-  return `git:${revision}`;
+  const stderr = outcome.stderr.trim();
+  if (!isNotAGitWorkspace(stderr)) {
+    throw new Error(`workspace revision could not be established from git: ${stderr}`);
+  }
+  // A workspace with no repository (a freshly materialised fixture, a bare
+  // directory a user opened) still needs a revision the verification plan
+  // can bind to and re-check. A content hash over the tree is the honest
+  // equivalent of a commit id: it changes exactly when the sources change.
+  const tree = await runKernelCommand(
+    clients,
+    baseContext,
+    workspaceId,
+    "sh",
+    ["-c", WORKSPACE_TREE_HASH_SCRIPT],
+    signal ?? null,
+  );
+  const treeHash = tree.stdout.trim().split(/\s+/)[0] ?? "";
+  if (tree.exitCode !== 0 || !/^[0-9a-f]{64}$/i.test(treeHash)) {
+    throw new Error(
+      `workspace revision could not be established: not a git repository, and the tree hash failed: ${tree.stderr.trim()}`,
+    );
+  }
+  return `tree:${treeHash}`;
 }
+
+/** `git rev-parse` failure text that means "no repository here", not "git broke". */
+export function isNotAGitWorkspace(stderr: string): boolean {
+  return /not a git repository|no such file or directory.*\.git|must be run in a work tree/i.test(stderr);
+}
+
+/**
+ * Content hash of every regular file in the workspace (excluding a `.git`
+ * directory, should one appear later), with deterministic ordering. Runs
+ * inside the sandbox with the caller's PATH, which always carries /usr/bin.
+ */
+export const WORKSPACE_TREE_HASH_SCRIPT =
+  'find . -type f -not -path "./.git/*" -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256';
 
 async function runKernelPredicate(
   clients: KernelUdsClients,
@@ -151,6 +200,7 @@ async function runKernelPredicate(
   workspaceId: string,
   request: Parameters<PredicateCommandRunner["run"]>[0],
   catalog: VerificationRunnerCatalog,
+  workspaceRoot: string | null = null,
 ): Promise<PredicateCommandOutcome> {
   if (request.signal?.aborted) {
     throw new Error("verification predicate aborted before kernel start");
@@ -178,6 +228,7 @@ async function runKernelPredicate(
     resolution.args,
     request.signal,
     request.timeoutMs,
+    workspaceRoot,
   );
   return {
     ...outcome,
@@ -320,6 +371,7 @@ async function runKernelCommand(
   args: readonly string[],
   signal: AbortSignal | null,
   timeoutMs: number = DEFAULT_PREDICATE_TIMEOUT_MS,
+  workspaceRoot: string | null = null,
 ): Promise<KernelCommandOutcome> {
   if (signal?.aborted) throw new Error("verification command aborted before kernel start");
   const context: RequestContext = {
@@ -350,10 +402,12 @@ async function runKernelCommand(
       program,
       args: [...args],
       cwd: { workspaceId, relativePath: "." },
-      publicEnv: {
-        ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
-        ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
-      },
+      // Exactly the environment the agent's own exec gets: the user's PATH
+      // and HOME so toolchains resolve, deterministic colourless output, and
+      // no secret-bearing variable. TMPDIR is not forwarded — the host's
+      // points outside the sandbox and is denied; the kernel supplies a
+      // writable one inside it.
+      publicEnv: kernelPublicEnv(process.env, { workspaceRoot }),
       secretCapabilityUris: [],
       // The node's persisted budget, not a fixed 30-minute ceiling.
       timeout: {
@@ -1321,6 +1375,12 @@ export function defaultCriteriaNodes(
     readonly riskClass?: "low" | "normal" | "high" | "critical" | undefined;
     readonly mode?: VerificationPlanMode | undefined;
     readonly signals?: VerificationDerivationSignals | undefined;
+    /**
+     * The task contract's wall-clock budget. Raises node timeouts above their
+     * class floor (600 s tests / 120 s parse+lint); it can never lower one,
+     * because a check that is guaranteed to time out is not a check.
+     */
+    readonly timeoutSeconds?: number | undefined;
   } = {},
 ): VerificationNode[] {
   const derivation = deriveVerificationNodes({
@@ -1329,6 +1389,7 @@ export function defaultCriteriaNodes(
     riskClass: options.riskClass ?? "normal",
     mode: options.mode ?? "admission",
     signals: options.signals ?? { changedFiles: ["."] },
+    ...(options.timeoutSeconds === undefined ? {} : { timeoutSeconds: options.timeoutSeconds }),
     idSource: uuid,
   });
   return [...derivation.nodes];

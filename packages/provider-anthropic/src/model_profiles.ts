@@ -30,6 +30,8 @@ interface AnthropicProfileInput {
   readonly id: string;
   readonly modelKey: string;
   readonly version: string;
+  readonly modelFamilyRef: string;
+  readonly advertisedContextTokens: number;
   readonly testedSafeContextTokens: number;
   readonly reasoningStrength: "none" | "high";
   readonly compactionStrategy:
@@ -81,7 +83,7 @@ function anthropicProfile(
     renderingProfileRef: rendering.id,
     modelKey: input.modelKey,
     version: input.version,
-    modelFamilyRef: "claude-3",
+    modelFamilyRef: input.modelFamilyRef,
     economics: {
       inputMicrosPerMillion: micros(input.inputMicrosPerMillion),
       cachedInputMicrosPerMillion: micros(input.cachedInputMicrosPerMillion),
@@ -100,7 +102,7 @@ function anthropicProfile(
       toolReliability: "high",
       structuredOutput: true,
       imageInput: true,
-      advertisedContextTokens: 200_000,
+      advertisedContextTokens: input.advertisedContextTokens,
       testedSafeContextTokens: input.testedSafeContextTokens,
       securityReasoning: input.securityReasoning,
       reasoningStrength: input.reasoningStrength,
@@ -110,56 +112,90 @@ function anthropicProfile(
   return defineProviderProfileBundle(model, rendering);
 }
 
-export const CLAUDE_3_7_SONNET_PROFILE_BUNDLE = anthropicProfile({
-  id: "profile-anthropic-claude-3-7-sonnet-20250219-v1",
-  modelKey: "claude-3-7-sonnet-20250219",
-  version: "2025-02-19-v1",
-  testedSafeContextTokens: 160_000,
-  reasoningStrength: "high",
-  compactionStrategy: "structured_claims_with_evidence",
-  cachingMinimumTokens: 1_024,
-  retryPromptTemplate:
-    "Format error in tool parameters. Output valid JSON matching the exact schema definition.",
-  knownFailureMitigations: [
-    "strip_markdown_json_fences",
-    "deduplicate_parallel_tool_calls",
-    "normalize_relative_file_paths",
-  ],
-  inputMicrosPerMillion: 3_000_000,
-  cachedInputMicrosPerMillion: 300_000,
-  outputMicrosPerMillion: 15_000_000,
-  p50Ms: 850,
-  p90Ms: 1_800,
-  p99Ms: 3_500,
-  ttftMs: 350,
+/**
+ * The Claude 5 family. One shape for all three tiers:
+ *
+ *   - 1M context as both default and maximum, with no long-context premium,
+ *     so the tested-safe window is the whole window;
+ *   - 128k max output;
+ *   - adaptive thinking with `output_config.effort` (`budget_tokens` is a 400);
+ *   - a 512-token prompt-cache minimum, down from 1,024 on Opus 4.8 — which
+ *     is why `cachingMinimumTokens` is not the old 1,024/2,048 here: a short
+ *     stable prefix that used to fall below the floor now caches.
+ *
+ * Latency percentiles are zero because none have been measured on this
+ * harness, and the router must not weigh a fabricated one.
+ */
+function claude5Profile(input: {
+  readonly slug: string;
+  readonly inputMicrosPerMillion: number;
+  readonly outputMicrosPerMillion: number;
+  readonly cachedInputMicrosPerMillion: number;
+  readonly codingQuality: "medium" | "high";
+}): ProviderProfileBundle<AnthropicRenderingProfile> {
+  return anthropicProfile({
+    id: `profile-anthropic-${input.slug}-v1`,
+    modelKey: input.slug,
+    version: "2026-07-24-v1",
+    modelFamilyRef: "claude-5",
+    advertisedContextTokens: 1_000_000,
+    testedSafeContextTokens: 1_000_000,
+    reasoningStrength: "high",
+    compactionStrategy: "structured_claims_with_evidence",
+    cachingMinimumTokens: 512,
+    retryPromptTemplate:
+      "The previous tool input did not match the schema. Re-emit the call with input that matches it exactly.",
+    knownFailureMitigations: [
+      "strip_markdown_json_fences",
+      "normalize_relative_file_paths",
+    ],
+    inputMicrosPerMillion: input.inputMicrosPerMillion,
+    cachedInputMicrosPerMillion: input.cachedInputMicrosPerMillion,
+    outputMicrosPerMillion: input.outputMicrosPerMillion,
+    p50Ms: 0,
+    p90Ms: 0,
+    p99Ms: 0,
+    ttftMs: 0,
+    codingQuality: input.codingQuality,
+    securityReasoning: "high",
+  });
+}
+
+/** `claude-opus-5` — complex agentic coding at half Fable 5's price. */
+export const CLAUDE_OPUS_5_PROFILE_BUNDLE = claude5Profile({
+  slug: "claude-opus-5",
+  inputMicrosPerMillion: 5_000_000,
+  cachedInputMicrosPerMillion: 500_000,
+  outputMicrosPerMillion: 25_000_000,
   codingQuality: "high",
-  securityReasoning: "high",
 });
 
-export const CLAUDE_3_5_HAIKU_PROFILE_BUNDLE = anthropicProfile({
-  id: "profile-anthropic-claude-3-5-haiku-20241022-v1",
-  modelKey: "claude-3-5-haiku-20241022",
-  version: "2024-10-22-v1",
-  testedSafeContextTokens: 128_000,
-  reasoningStrength: "none",
-  compactionStrategy: "rolling_summary",
-  cachingMinimumTokens: 2_048,
-  retryPromptTemplate: "Return strictly valid JSON according to schema.",
-  knownFailureMitigations: ["strip_markdown_json_fences"],
-  inputMicrosPerMillion: 800_000,
-  cachedInputMicrosPerMillion: 80_000,
-  outputMicrosPerMillion: 4_000_000,
-  p50Ms: 250,
-  p90Ms: 600,
-  p99Ms: 1_200,
-  ttftMs: 150,
-  codingQuality: "medium",
-  securityReasoning: "medium",
+/**
+ * `claude-fable-5` — the most capable tier. Requires 30-day retention (it is
+ * not available under zero data retention), so it is deliberately *not*
+ * admitted for `secret_adjacent` context here.
+ */
+export const CLAUDE_FABLE_5_PROFILE_BUNDLE = claude5Profile({
+  slug: "claude-fable-5",
+  inputMicrosPerMillion: 10_000_000,
+  cachedInputMicrosPerMillion: 1_000_000,
+  outputMicrosPerMillion: 50_000_000,
+  codingQuality: "high",
+});
+
+/** `claude-sonnet-5` — near-Opus coding quality at Sonnet-tier price. */
+export const CLAUDE_SONNET_5_PROFILE_BUNDLE = claude5Profile({
+  slug: "claude-sonnet-5",
+  inputMicrosPerMillion: 2_000_000,
+  cachedInputMicrosPerMillion: 200_000,
+  outputMicrosPerMillion: 10_000_000,
+  codingQuality: "high",
 });
 
 export const ANTHROPIC_PROFILE_BUNDLES = [
-  CLAUDE_3_7_SONNET_PROFILE_BUNDLE,
-  CLAUDE_3_5_HAIKU_PROFILE_BUNDLE,
+  CLAUDE_OPUS_5_PROFILE_BUNDLE,
+  CLAUDE_FABLE_5_PROFILE_BUNDLE,
+  CLAUDE_SONNET_5_PROFILE_BUNDLE,
 ] as const;
 
 export const ANTHROPIC_MODEL_PROFILES: readonly ModelProfile[] =

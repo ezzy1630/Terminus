@@ -16,6 +16,8 @@ export interface RetryOptions {
   readonly maxAttempts?: number;
   readonly baseDelayMs?: number;
   readonly maxDelayMs?: number;
+  /** Ceiling for an explicit provider hint. Defaults to {@link MAX_HINTED_DELAY_MS}. */
+  readonly maxHintedDelayMs?: number;
   /** Deterministic jitter source for tests. */
   readonly jitter?: () => number;
   readonly sleep?: (ms: number, signal?: AbortSignal | null | undefined) => Promise<void>;
@@ -26,6 +28,19 @@ export interface RetryOptions {
 export const DEFAULT_MAX_ATTEMPTS = 3;
 export const DEFAULT_BASE_DELAY_MS = 250;
 export const DEFAULT_MAX_DELAY_MS = 8_000;
+
+/**
+ * The ceiling for a delay the *provider* asked for, as opposed to one this
+ * module invented.
+ *
+ * Blind backoff is guesswork and 8 s is a reasonable guess. An explicit
+ * `Retry-After` is not a guess: it is the provider saying when the quota
+ * window reopens, and clamping a 60-second hint to 8 s just spends two more
+ * attempts being told the same thing and then fails the turn. Two minutes is
+ * long enough for every rate-limit window either vendor publishes and short
+ * enough that a turn cannot silently park for an afternoon.
+ */
+export const MAX_HINTED_DELAY_MS = 120_000;
 
 /**
  * Provider fault codes that are transient by contract. The gateway reports
@@ -40,6 +55,10 @@ const RETRYABLE_PROVIDER_CODES: ReadonlySet<string> = new Set([
   "rate_limit_error",
   "rate_limit_exceeded",
   "api_error",
+  // A stream that ended without its protocol terminal marker is an
+  // incomplete transport, not a model answer. Reissuing the same immutable
+  // request under the provider-attempt idempotency key is the recovery path.
+  "truncated_stream",
 ]);
 
 /**
@@ -117,12 +136,24 @@ export function statusFromProviderError(error: unknown): number | null {
 export function providerCodeFromError(error: unknown): string | null {
   if (error instanceof ProviderTransportError) return error.providerCode;
   if (!(error instanceof Error)) return null;
-  const match = /^([a-z][a-z0-9_]*): /.exec(error.message);
+  const match = /^([A-Za-z][A-Za-z0-9_]*): /.exec(error.message);
   return match === null ? null : match[1]!;
 }
 
+/**
+ * Provider outcomes that are terminal by contract.
+ *
+ * A refusal is a safety decision, not a transient fault: it arrives as an
+ * HTTP 200 with `stop_reason: "refusal"`, and on the rare path where it
+ * surfaces as an error it must not be retried — the same request will be
+ * refused again, at full input cost.
+ */
+const TERMINAL_PROVIDER_CODES: ReadonlySet<string> = new Set(["refusal"]);
+
 export function isRetryableProviderError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
+  const terminalCode = providerCodeFromError(error);
+  if (terminalCode !== null && TERMINAL_PROVIDER_CODES.has(terminalCode.toLowerCase())) return false;
   const status = statusFromProviderError(error);
   if (status !== null) {
     return status === 408 || status === 429 || (status >= 500 && status <= 599);
@@ -228,8 +259,10 @@ export async function withProviderRetry<T>(
       if (!isRetryableProviderError(error)) break;
       if (aborted()) throw new RetryAbortedError(error);
       const hinted = retryAfterMsFromError(error);
+      // An explicit hint is honoured up to two minutes; only the invented
+      // backoff is held to the short ceiling.
       const delay = hinted !== null
-        ? Math.min(hinted, options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS)
+        ? Math.min(hinted, options.maxHintedDelayMs ?? MAX_HINTED_DELAY_MS)
         : backoffDelayMs(attempt, options);
       await sleep(delay, signal);
       if (aborted()) throw new RetryAbortedError(error);

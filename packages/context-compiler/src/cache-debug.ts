@@ -74,21 +74,27 @@ export type CacheEpochDiagnosticCode =
  * Canonical stable-prefix order from SPEC §38.7. Lower numbers are emitted
  * before higher numbers; ordering is checked, not silently repaired, because
  * the hash must describe the bytes actually rendered.
+ *
+ * This mirrors `EMISSION_RANK` in the compiler. The task contract precedes
+ * the world state: the contract is per-task and belongs inside the cached
+ * prefix, while the world state is per-turn and must sit after the
+ * breakpoint. Transcript kinds share one rank because they interleave in
+ * episode-sequence order.
  */
 const STABLE_PREFIX_KIND_ORDER: Readonly<Record<ContextFragment["kind"], number>> = {
   authority: 0,
   tool_schema: 1,
   project_rule: 2,
-  world_state: 3,
-  task_contract: 4,
-  checkpoint: 5,
-  recent_episode: 6,
-  tool_result: 7,
-  code: 8,
-  test: 8,
-  documentation: 8,
-  memory: 8,
+  task_contract: 3,
+  memory: 4,
+  world_state: 5,
+  checkpoint: 6,
+  code: 7,
+  test: 7,
+  documentation: 7,
   user_attachment: 8,
+  recent_episode: 8,
+  tool_result: 8,
 };
 
 function orderingViolationAt(fragments: readonly ContextFragment[]): number | null {

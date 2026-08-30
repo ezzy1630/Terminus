@@ -61,13 +61,16 @@ pub async fn mint_grant(
     let grant = state
         .kernel
         .connectors
-        .mint_grant(
+        // Async variant: a synchronous credential resolve on this worker
+        // thread would park the whole runtime behind an OS keychain prompt.
+        .mint_grant_async(
             &req.envelope.request_context,
             &req.uri,
             req.binding,
             req.ttl_secs,
             req.use_limit,
         )
+        .await
         .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
     Ok(Json(GrantMintResponse {
         expires_at_unix: grant.claims.expires_at_unix,

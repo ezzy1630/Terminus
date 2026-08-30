@@ -129,15 +129,25 @@ fn filesystem_escape_probe(
     workspace_root: &Path,
 ) -> ProbeResult {
     let backend_id = backend.id();
-    // Attempt to escape the workspace by writing into the OS temp dir,
-    // which is OUTSIDE every workspace mapping.
-    let escape_target = std::env::temp_dir().join(format!(
+    // Attempt to escape by writing into the workspace's PARENT directory,
+    // which is outside every workspace mapping on every backend.
+    //
+    // The OS temp dir is deliberately NOT the target any more: the kernel
+    // now provisions a writable scratch directory under it (macOS) and the
+    // Linux backend mounts a tmpfs at `/tmp`, so a write there proves
+    // nothing about containment. The parent of the workspace is never
+    // mapped by any profile.
+    let escape_name = format!(
         "terminus-fs-escape-probe-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos()
-    ));
+    );
+    let escape_target = match workspace_root.parent() {
+        Some(parent) => parent.join(&escape_name),
+        None => Path::new("/").join(&escape_name),
+    };
     let script = format!(
         "printf x >> '{t}' 2>/dev/null && echo WROTE || echo BLOCKED",
         t = escape_target.display()

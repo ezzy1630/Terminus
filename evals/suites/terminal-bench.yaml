@@ -1,9 +1,9 @@
 suite:
   id: terminal-bench
-  version: 1
+  version: 2
   description: |
-    Terminal-Bench 2.0, executed through the pinned Harbor registry snapshot.
-    The canonical benchmark contains 89 containerized terminal tasks.
+    Terminal-Bench 2.0, executed through Harbor 0.22.0 against the pinned
+    official 89-task dataset.
   source: https://github.com/laude-institute/terminal-bench-2
   license: MIT
   task_count: 89
@@ -20,22 +20,33 @@ suite:
   cohorts:
     - terminal-bench-2.0
   notes: |
-    This manifest pins the Harbor registry and Terminal-Bench task repository.
+    The canonical dataset identity is terminal-bench/terminal-bench-2. Harbor
+    0.22.0's legacy registry exposes the same official dataset as
+    terminal-bench@2.0; its registry entry lists 89 tasks and pins every task
+    to commit 69671fbaac6d67a7ef0dfec016cc38a64ef7a77c of
+    laude-institute/terminal-bench-2. The Harbor v0.22.0 registry snapshot is
+    pinned to commit 41a50d62d7f35677cc34ba3a0c36f042a4fef68c.
+
     Terminal-Bench resolves container images per task, so no suite-wide image
     digest is declared. A live run must return the resolved image digest for
     the task before its result can be treated as benchmark evidence.
+
+    Terminus runs this suite through the agent shim at
+    `forge_evals.runners.harbor_agent:TerminusHarborAgent`, which Harbor loads
+    by import path and which drives a live Terminus turn per task.
   adapter:
     kind: harbor
-    dataset: terminal-bench
+    dataset: terminal-bench/terminal-bench-2
     dataset_version: "2.0"
     task_count: 89
     image_digest_policy: per_task_required
     harness:
       repository: https://github.com/harbor-framework/harbor.git
-      commit: 72f7dd0134162c5b7229f6a31286e05a49c0f8a4
+      commit: 41a50d62d7f35677cc34ba3a0c36f042a4fef68c
+      version: "0.22.0"
     registry:
       repository: https://github.com/harbor-framework/harbor.git
-      commit: 72f7dd0134162c5b7229f6a31286e05a49c0f8a4
+      commit: 41a50d62d7f35677cc34ba3a0c36f042a4fef68c
       path: registry.json
     task_source:
       repository: https://github.com/laude-institute/terminal-bench-2.git

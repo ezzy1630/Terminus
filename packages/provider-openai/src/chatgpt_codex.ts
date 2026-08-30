@@ -39,7 +39,19 @@ import type {
   RenderedProviderRequest,
   UsageRecord,
 } from "@terminus/provider-core";
-import { OpenAiRenderer, renderResponsesRequest, sanitizeResponsesBody } from "./index.js";
+import {
+  OpenAiRenderer,
+  ReasoningReplayLedger,
+  renderResponsesRequest,
+  sanitizeResponsesBody,
+  type OpenAiTextVerbosity,
+} from "./index.js";
+import { CodexTurnState } from "./codex_turn_state.js";
+export {
+  CODEX_MODELS_ETAG_HEADER,
+  CODEX_TURN_STATE_HEADER,
+  CodexTurnState,
+} from "./codex_turn_state.js";
 
 /** Fields the endpoint rejects outright. Deleted, never translated. */
 export const CHATGPT_CODEX_FORBIDDEN_BODY_FIELDS = [
@@ -48,6 +60,61 @@ export const CHATGPT_CODEX_FORBIDDEN_BODY_FIELDS = [
   "top_p",
   "previous_response_id",
 ] as const;
+
+/**
+ * Fields `api.openai.com` accepts that this endpoint has never been observed
+ * to accept.
+ *
+ * The measured Codex body is an enumeration, not a sample: every field in it
+ * was verified accepted, and this endpoint answers 400 for the whole request
+ * on one unknown key. `truncation` is a legitimate Responses parameter that
+ * simply does not appear in that enumeration, so it is stripped here and kept
+ * on the direct path.
+ */
+export const CHATGPT_CODEX_UNVERIFIED_BODY_FIELDS = ["truncation"] as const;
+
+export interface ChatGptCodexRequestIdentity {
+  /** `chatgpt-account-id`; absent when the credential carries no account claim. */
+  readonly accountId?: string | null | undefined;
+  /** Stable per Terminus session. */
+  readonly sessionId?: string | null | undefined;
+  /** Stable per Terminus thread; also sent as `x-client-request-id`. */
+  readonly threadId?: string | null | undefined;
+  readonly originator: string;
+  readonly userAgent: string;
+  readonly turnState?: CodexTurnState | null | undefined;
+}
+
+/**
+ * Non-credential request headers for `POST /backend-api/codex/responses`.
+ *
+ * The set is the measured Codex-identical subset minus pure telemetry, with
+ * two deliberate departures. `originator` and `user-agent` identify Terminus
+ * honestly rather than impersonating the Codex CLI. `version` is not sent at
+ * all: it names a Codex CLI release, and there is no honest value for it here.
+ *
+ * `thread-id` and `x-client-request-id` carry the same Terminus thread id, as
+ * the live capture shows the CLI doing; the backend uses the pair to group a
+ * conversation, and omitting them was why turn state never had anywhere to
+ * attach.
+ */
+export function chatGptCodexRequestHeaders(
+  identity: ChatGptCodexRequestIdentity,
+): Readonly<Record<string, string>> {
+  const nonEmpty = (value: string | null | undefined): string | null =>
+    typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+  const accountId = nonEmpty(identity.accountId);
+  const sessionId = nonEmpty(identity.sessionId);
+  const threadId = nonEmpty(identity.threadId);
+  return {
+    originator: identity.originator,
+    "user-agent": identity.userAgent,
+    ...(accountId === null ? {} : { "chatgpt-account-id": accountId }),
+    ...(sessionId === null ? {} : { "session-id": sessionId }),
+    ...(threadId === null ? {} : { "thread-id": threadId, "x-client-request-id": threadId }),
+    ...(identity.turnState?.requestHeaders() ?? {}),
+  };
+}
 
 /**
  * What the Codex model catalogue says about one slug. Everything here comes
@@ -69,6 +136,49 @@ export interface ChatGptCodexRenderOptions {
   /** Stable per-thread cache key. Not a credential and not user content. */
   readonly promptCacheKey?: string | null | undefined;
   readonly profile?: ChatGptCodexModelProfile | null | undefined;
+  /**
+   * `text.verbosity`. `low` by default — the desktop and the TUI render a
+   * transcript, and 5.6-class models are terse enough that the legacy
+   * "be brief" prompt text over-corrects.
+   */
+  readonly textVerbosity?: OpenAiTextVerbosity | undefined;
+  /** Terminus session id, for `client_metadata`. Falls back to the thread id. */
+  readonly sessionId?: string | null | undefined;
+  /** Terminus thread id, for `client_metadata`. Falls back to the cache key. */
+  readonly threadId?: string | null | undefined;
+  /** Per-turn store for encrypted reasoning items; replayed on later attempts. */
+  readonly reasoningReplay?: ReasoningReplayLedger | undefined;
+}
+
+/**
+ * `client_metadata`, verified accepted by the live endpoint on 2026-08-28.
+ *
+ * Two opaque correlation ids and nothing else. It is not an identity claim and
+ * carries no credential, no user content and no workspace path — Terminus
+ * still identifies itself honestly in the request headers.
+ */
+export interface ChatGptCodexClientMetadata {
+  readonly session_id?: string | undefined;
+  readonly thread_id?: string | undefined;
+}
+
+export function chatGptCodexClientMetadata(
+  options: ChatGptCodexRenderOptions,
+): ChatGptCodexClientMetadata | null {
+  const threadId = firstNonEmpty([options.threadId, options.promptCacheKey]);
+  const sessionId = firstNonEmpty([options.sessionId, threadId]);
+  if (sessionId === null && threadId === null) return null;
+  return {
+    ...(sessionId === null ? {} : { session_id: sessionId }),
+    ...(threadId === null ? {} : { thread_id: threadId }),
+  };
+}
+
+function firstNonEmpty(values: readonly (string | null | undefined)[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim() !== "") return value;
+  }
+  return null;
 }
 
 /**
@@ -120,6 +230,17 @@ export async function renderChatGptCodexRequest(
 ): Promise<RenderedProviderRequest> {
   const rendered = await renderResponsesRequest(input, {
     reasoningEffort: options.reasoningEffort ?? null,
+    ...(options.profile?.reasoningLevels === undefined
+      ? {}
+      : { reasoningLevels: options.profile.reasoningLevels }),
+    ...(options.textVerbosity === undefined ? {} : { textVerbosity: options.textVerbosity }),
+    ...(options.promptCacheKey === undefined || options.promptCacheKey === null
+      ? {}
+      : { promptCacheKey: options.promptCacheKey }),
+    ...(options.profile === undefined || options.profile === null
+      ? {}
+      : { parallelToolCalls: options.profile.supportsParallelToolCalls }),
+    ...(options.reasoningReplay === undefined ? {} : { reasoningReplay: options.reasoningReplay }),
   });
   return { ...rendered, body: chatGptCodexBody(rendered.body, options) };
 }
@@ -131,6 +252,7 @@ export function chatGptCodexBody(
 ): Readonly<Record<string, unknown>> {
   const body: Record<string, unknown> = { ...base };
   for (const field of CHATGPT_CODEX_FORBIDDEN_BODY_FIELDS) delete body[field];
+  for (const field of CHATGPT_CODEX_UNVERIFIED_BODY_FIELDS) delete body[field];
   body.store = false;
   body.stream = true;
   // Encrypted reasoning is how a stateless (`store: false`) caller keeps a
@@ -139,6 +261,12 @@ export function chatGptCodexBody(
   if (typeof options.promptCacheKey === "string" && options.promptCacheKey !== "") {
     body.prompt_cache_key = options.promptCacheKey;
   }
+  // Verified accepted; Codex sends `medium`. Terminus defaults to `low`
+  // because the desktop and the TUI render a transcript rather than an essay,
+  // and this is the lever for that — not prompt text.
+  if (!isRecord(body.text)) body.text = { verbosity: options.textVerbosity ?? "low" };
+  const clientMetadata = chatGptCodexClientMetadata(options);
+  if (clientMetadata !== null) body.client_metadata = clientMetadata;
   const level = chatGptCodexReasoningLevel(options.reasoningEffort, options.profile);
   if (level === null) {
     delete body.reasoning;
@@ -181,12 +309,22 @@ export class ChatGptCodexRenderer implements ProviderRenderer {
 
   private readonly openAi: OpenAiRenderer;
   private readonly options: ChatGptCodexRenderOptions;
+  /**
+   * One ledger per renderer, and the control plane builds one renderer per
+   * turn — exactly the scope over which a `store: false` reasoning chain has
+   * to survive. `projectResponse` fills it; `render` plays it back.
+   */
+  readonly reasoningReplay: ReasoningReplayLedger;
 
   constructor(providerId: string, options: ChatGptCodexRenderOptions = {}) {
     if (providerId.trim() === "") throw new Error("ChatGPT Codex renderer requires a provider id");
     this.providerId = providerId;
-    this.options = options;
-    this.openAi = new OpenAiRenderer({ reasoningEffort: options.reasoningEffort ?? null });
+    this.reasoningReplay = options.reasoningReplay ?? new ReasoningReplayLedger();
+    this.options = { ...options, reasoningReplay: this.reasoningReplay };
+    this.openAi = new OpenAiRenderer({
+      reasoningEffort: options.reasoningEffort ?? null,
+      reasoningReplay: this.reasoningReplay,
+    });
   }
 
   compatibility(input: RenderCompatibilityInput): CompatibilityResult {
@@ -233,4 +371,8 @@ export class ChatGptCodexRenderer implements ProviderRenderer {
       newContinuationId: null,
     };
   }
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

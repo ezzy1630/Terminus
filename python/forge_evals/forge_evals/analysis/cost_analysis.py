@@ -41,10 +41,12 @@ class CostReconciliation:
     harness: str
     suite: str
     task: str
-    provider_reported_usd: float
+    # Null when the provider never priced the turn — a subscription plan has
+    # no per-token rate, so there is nothing to reconcile the estimate against.
+    provider_reported_usd: float | None
     computed_usd: float
-    delta_usd: float
-    delta_pct: float
+    delta_usd: float | None
+    delta_pct: float | None
     flagged: bool
     reason: str = ""
 
@@ -115,6 +117,21 @@ def _reconcile_one(
 ) -> CostReconciliation:
     """Reconcile a single record."""
     cost: CostBreakdown = r.cost  # type: ignore[assignment]
+    if cost.provider_reported_usd is None:
+        # Nothing to compare: an estimate against an absent price is not an
+        # anomaly, and flagging it buried the real ones.
+        return CostReconciliation(
+            run_id=r.run_id,
+            harness=r.harness,
+            suite=r.suite,
+            task=r.task,
+            provider_reported_usd=None,
+            computed_usd=cost.computed_usd,
+            delta_usd=None,
+            delta_pct=None,
+            flagged=False,
+            reason=f"provider reported no cost ({cost.source})",
+        )
     delta = cost.provider_reported_usd - cost.computed_usd
     delta_pct = (delta / cost.computed_usd * 100) if cost.computed_usd > 0 else 0.0
     flagged = abs(delta) > abs_tol and abs(delta_pct) > rel_tol
@@ -157,7 +174,9 @@ def find_anomalies(
     )
     out: list[CostAnomaly] = []
     for rec in reconciliations:
-        if not rec.flagged:
+        # An unflagged run has no anomaly, and only a reconciled run can be
+        # flagged, so both deltas are present from here on.
+        if not rec.flagged or rec.delta_usd is None or rec.delta_pct is None:
             continue
         abs_pct = abs(rec.delta_pct)
         if abs_pct > 50:
@@ -177,7 +196,7 @@ def find_anomalies(
                 severity=severity,
                 reason=rec.reason,
                 evidence=[
-                    f"provider_reported={rec.provider_reported_usd:.6f}",
+                    f"provider_reported={rec.provider_reported_usd or 0.0:.6f}",
                     f"computed={rec.computed_usd:.6f}",
                 ],
             )
@@ -199,7 +218,7 @@ def summarize_cost_deltas(
         delta_pcts: list[float] = []
         flagged_count = 0
         for r in group:
-            if r.cost is None:
+            if r.cost is None or r.cost.provider_reported_usd is None:
                 continue
             delta = r.cost.provider_reported_usd - r.cost.computed_usd
             deltas.append(delta)

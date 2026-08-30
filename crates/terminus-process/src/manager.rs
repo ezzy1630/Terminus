@@ -48,6 +48,12 @@ impl Drop for SpawnLease {
     }
 }
 
+#[derive(Debug, Default)]
+struct SpawnControl {
+    lease: Option<SpawnLease>,
+    owner_task_id: Option<String>,
+}
+
 /// A running or recently-exited managed process.
 #[derive(Debug)]
 pub struct ManagedProcess {
@@ -58,6 +64,9 @@ pub struct ManagedProcess {
     pub pid: Option<u32>,
     pub process_start_time: Option<String>,
     pub process_executable: String,
+    /// Task that owns control of this process. Set by the effect boundary;
+    /// direct internal spawns without a task remain deliberately unowned.
+    pub owner_task_id: Option<String>,
     pub cancel_requested: bool,
     pub termination_receipt: Option<String>,
     pub allocate_pty: bool,
@@ -103,6 +112,23 @@ impl ProcessManager {
         &self,
         spawn: NormalizedSpawn,
     ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
+        self.spawn_owned(spawn, None).await
+    }
+
+    /// Spawn a process whose control operations are bound to one task.
+    pub async fn spawn_for_task(
+        &self,
+        spawn: NormalizedSpawn,
+        owner_task_id: String,
+    ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
+        self.spawn_owned(spawn, Some(owner_task_id)).await
+    }
+
+    async fn spawn_owned(
+        &self,
+        spawn: NormalizedSpawn,
+        owner_task_id: Option<String>,
+    ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
         let mut command = Command::new(&spawn.program);
         command.args(&spawn.args);
         command.env_clear();
@@ -118,7 +144,10 @@ impl ProcessManager {
             process_identity,
             spawn.working_dir,
             spawn.timeout_ms,
-            None,
+            SpawnControl {
+                owner_task_id,
+                ..SpawnControl::default()
+            },
         )
         .await
     }
@@ -135,6 +164,30 @@ impl ProcessManager {
         wrapper: std::path::PathBuf,
         wrapper_argv: Vec<String>,
         spawn: NormalizedSpawn,
+    ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
+        self.spawn_wrapped_owned(wrapper, wrapper_argv, spawn, None, None)
+            .await
+    }
+
+    /// Spawn a sandbox-wrapped process owned by one task.
+    pub async fn spawn_wrapped_for_task(
+        &self,
+        wrapper: std::path::PathBuf,
+        wrapper_argv: Vec<String>,
+        spawn: NormalizedSpawn,
+        owner_task_id: String,
+    ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
+        self.spawn_wrapped_owned(wrapper, wrapper_argv, spawn, None, Some(owner_task_id))
+            .await
+    }
+
+    async fn spawn_wrapped_owned(
+        &self,
+        wrapper: std::path::PathBuf,
+        wrapper_argv: Vec<String>,
+        spawn: NormalizedSpawn,
+        lease: Option<SpawnLease>,
+        owner_task_id: Option<String>,
     ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
         let mut command = Command::new(&wrapper);
         command.args(&wrapper_argv);
@@ -155,7 +208,10 @@ impl ProcessManager {
             process_identity,
             spawn.working_dir,
             spawn.timeout_ms,
-            None,
+            SpawnControl {
+                lease,
+                owner_task_id,
+            },
         )
         .await
     }
@@ -169,23 +225,25 @@ impl ProcessManager {
         spawn: NormalizedSpawn,
         lease: SpawnLease,
     ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
-        let mut command = Command::new(&wrapper);
-        command.args(&wrapper_argv);
-        command.env_clear();
-        command.envs(&spawn.env);
-        if let Some(cwd) = &spawn.working_dir {
-            command.current_dir(cwd);
-        }
-        let resolved_executable =
-            format!("{} (sandboxed via {})", spawn.program, wrapper.display());
-        let process_identity = command_identity(&wrapper.display().to_string(), &wrapper_argv);
-        self.spawn_command(
-            command,
-            resolved_executable,
-            process_identity,
-            spawn.working_dir,
-            spawn.timeout_ms,
+        self.spawn_wrapped_owned(wrapper, wrapper_argv, spawn, Some(lease), None)
+            .await
+    }
+
+    /// Spawn a sandbox-wrapped, lease-backed process owned by one task.
+    pub async fn spawn_wrapped_with_lease_for_task(
+        &self,
+        wrapper: std::path::PathBuf,
+        wrapper_argv: Vec<String>,
+        spawn: NormalizedSpawn,
+        lease: SpawnLease,
+        owner_task_id: String,
+    ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
+        self.spawn_wrapped_owned(
+            wrapper,
+            wrapper_argv,
+            spawn,
             Some(lease),
+            Some(owner_task_id),
         )
         .await
     }
@@ -200,8 +258,12 @@ impl ProcessManager {
         process_executable: String,
         working_directory: Option<std::path::PathBuf>,
         timeout_ms: u64,
-        lease: Option<SpawnLease>,
+        control: SpawnControl,
     ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
+        let SpawnControl {
+            lease,
+            owner_task_id,
+        } = control;
         let process_id = terminus_kernel_protocol::new_id();
         let job_id = terminus_kernel_protocol::new_id();
 
@@ -257,6 +319,7 @@ impl ProcessManager {
                 .as_ref()
                 .map(|snapshot| snapshot.start_time.clone()),
             process_executable: process_executable.clone(),
+            owner_task_id,
             cancel_requested: false,
             termination_receipt: None,
             allocate_pty: false,
@@ -461,6 +524,13 @@ impl ProcessManager {
             },
             rx,
         ))
+    }
+
+    /// Return the task bound to a live process-control handle.
+    pub async fn owner_task_id(&self, process_id: &str) -> Option<String> {
+        let managed = self.children.lock().await.get(process_id).cloned()?;
+        let owner_task_id = managed.lock().await.owner_task_id.clone();
+        owner_task_id
     }
 
     /// Gracefully stop a running process, escalating to a process-group kill
@@ -1598,12 +1668,12 @@ mod tests {
         let (_dir, store) = store();
         let mgr = ProcessManager::new(store);
         let spawn = NormalizedSpawn {
-            program: "sh".into(),
-            args: vec!["-c".into(), "sleep 30".into()],
+            program: "/bin/sleep".into(),
+            args: vec!["30".into()],
             env: std::collections::BTreeMap::new(),
             working_dir: None,
             timeout_ms: 0,
-            shell: true,
+            shell: false,
             allocate_pty: false,
         };
         let (outcome, _rx) = mgr.spawn(spawn).await.unwrap();
@@ -1620,6 +1690,32 @@ mod tests {
             wait_until(|| async { !mgr.is_running(&outcome.process_id).await }).await,
             "process never left the running state after cancel"
         );
+    }
+
+    #[tokio::test]
+    async fn task_owned_spawn_records_process_control_owner() {
+        let (_dir, store) = store();
+        let mgr = ProcessManager::new(store);
+        let spawn = NormalizedSpawn {
+            program: "/bin/sleep".into(),
+            args: vec!["30".into()],
+            env: std::collections::BTreeMap::new(),
+            working_dir: None,
+            timeout_ms: 0,
+            shell: false,
+            allocate_pty: false,
+        };
+        let (outcome, _rx) = mgr
+            .spawn_for_task(spawn, "task-owner".to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            mgr.owner_task_id(&outcome.process_id).await.as_deref(),
+            Some("task-owner")
+        );
+        mgr.cancel(&outcome.process_id, "test cleanup")
+            .await
+            .unwrap();
     }
 
     /// Poll `condition` until it holds or a bounded deadline passes.

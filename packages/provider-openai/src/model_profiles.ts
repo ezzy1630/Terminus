@@ -36,6 +36,7 @@ interface OpenAiProfileInput {
   readonly imageInput: boolean;
   readonly editDialect: "hash_anchored_diff" | "search_replace_blocks";
   readonly reasoningStrength: "none" | "high";
+  readonly codingQuality?: "low" | "medium" | "high" | undefined;
   readonly retryPromptTemplate: string;
   readonly knownFailureMitigations: readonly string[];
   readonly inputMicrosPerMillion: number;
@@ -95,7 +96,7 @@ function openAiProfile(
     },
     allowedConfidentiality: ["public", "workspace", "secret_adjacent"],
     capabilities: {
-      codingQuality: "high",
+      codingQuality: input.codingQuality ?? "high",
       toolReliability: "high",
       structuredOutput: true,
       imageInput: input.imageInput,
@@ -109,55 +110,85 @@ function openAiProfile(
   return defineProviderProfileBundle(model, rendering);
 }
 
-export const GPT_4O_PROFILE_BUNDLE = openAiProfile({
-  id: "profile-openai-gpt-4o-2024-11-20-v1",
-  modelKey: "gpt-4o-2024-11-20",
-  version: "2024-11-20-v1",
-  modelFamilyRef: "gpt-4o",
-  advertisedContextTokens: 128_000,
-  testedSafeContextTokens: 100_000,
-  imageInput: true,
-  editDialect: "search_replace_blocks",
-  reasoningStrength: "none",
-  retryPromptTemplate: "Fix invalid JSON parameters for function call.",
-  knownFailureMitigations: [
-    "strip_markdown_json_fences",
-    "normalize_newline_escapes",
-  ],
-  inputMicrosPerMillion: 2_500_000,
-  cachedInputMicrosPerMillion: 1_250_000,
-  outputMicrosPerMillion: 10_000_000,
-  p50Ms: 650,
-  p90Ms: 1_400,
-  p99Ms: 2_800,
-  ttftMs: 280,
+/**
+ * The GPT-5.6 family, GA 2026-07-09. Three tiers of one model, not three
+ * models: they share the window, the output cap, the effort ladder and the
+ * wire shape, and differ only in price and depth. There is no separate
+ * `-codex` SKU — Codex drives these same slugs.
+ *
+ * `testedSafeContextTokens` is 270,000 for all three, and that is a *pricing*
+ * ceiling rather than a capability one: past 272,000 input tokens the whole
+ * request is billed at 2x input / 1.5x output. `resolveTestedSafeContextTokens`
+ * in `@terminus/provider-core` is the same number for the runtime path.
+ *
+ * Latency percentiles are zero because none have been measured on this
+ * harness. A fabricated percentile is worse than an absent one: the router
+ * weighs this field.
+ */
+function gpt56Profile(input: {
+  readonly slug: string;
+  readonly inputMicrosPerMillion: number;
+  readonly cachedInputMicrosPerMillion: number;
+  readonly outputMicrosPerMillion: number;
+  readonly codingQuality: "medium" | "high";
+}): ProviderProfileBundle<OpenAiRenderingProfile> {
+  return openAiProfile({
+    id: `profile-openai-${input.slug}-v1`,
+    modelKey: input.slug,
+    version: "2026-07-09-v1",
+    modelFamilyRef: "gpt-5.6",
+    advertisedContextTokens: 1_050_000,
+    testedSafeContextTokens: 270_000,
+    imageInput: true,
+    // GPT-family models are measurably better with a grammar-constrained
+    // freeform patch than with a JSON-encoded diff.
+    editDialect: "hash_anchored_diff",
+    reasoningStrength: "high",
+    retryPromptTemplate:
+      "The previous function call arguments were not valid JSON. Re-emit the call with arguments that match the schema exactly.",
+    knownFailureMitigations: ["strip_markdown_json_fences"],
+    inputMicrosPerMillion: input.inputMicrosPerMillion,
+    cachedInputMicrosPerMillion: input.cachedInputMicrosPerMillion,
+    outputMicrosPerMillion: input.outputMicrosPerMillion,
+    codingQuality: input.codingQuality,
+    p50Ms: 0,
+    p90Ms: 0,
+    p99Ms: 0,
+    ttftMs: 0,
+  });
+}
+
+/** `gpt-5.6-sol` — the top tier; the `gpt-5.6` alias resolves here. */
+export const GPT_5_6_SOL_PROFILE_BUNDLE = gpt56Profile({
+  slug: "gpt-5.6-sol",
+  inputMicrosPerMillion: 4_000_000,
+  cachedInputMicrosPerMillion: 400_000,
+  outputMicrosPerMillion: 20_000_000,
+  codingQuality: "high",
 });
 
-export const O3_MINI_PROFILE_BUNDLE = openAiProfile({
-  id: "profile-openai-o3-mini-2025-01-31-v1",
-  modelKey: "o3-mini-2025-01-31",
-  version: "2025-01-31-v1",
-  modelFamilyRef: "o-series",
-  advertisedContextTokens: 200_000,
-  testedSafeContextTokens: 160_000,
-  imageInput: false,
-  editDialect: "hash_anchored_diff",
-  reasoningStrength: "high",
-  retryPromptTemplate:
-    "Reasoning model structured error. Fix function argument JSON.",
-  knownFailureMitigations: ["strip_markdown_json_fences"],
-  inputMicrosPerMillion: 1_100_000,
-  cachedInputMicrosPerMillion: 550_000,
-  outputMicrosPerMillion: 4_400_000,
-  p50Ms: 1_200,
-  p90Ms: 3_200,
-  p99Ms: 6_000,
-  ttftMs: 900,
+/** `gpt-5.6-terra` — the daily driver. */
+export const GPT_5_6_TERRA_PROFILE_BUNDLE = gpt56Profile({
+  slug: "gpt-5.6-terra",
+  inputMicrosPerMillion: 2_000_000,
+  cachedInputMicrosPerMillion: 200_000,
+  outputMicrosPerMillion: 12_000_000,
+  codingQuality: "high",
+});
+
+/** `gpt-5.6-luna` — scouts, summaries and eval labour. */
+export const GPT_5_6_LUNA_PROFILE_BUNDLE = gpt56Profile({
+  slug: "gpt-5.6-luna",
+  inputMicrosPerMillion: 200_000,
+  cachedInputMicrosPerMillion: 20_000,
+  outputMicrosPerMillion: 1_200_000,
+  codingQuality: "medium",
 });
 
 export const OPENAI_PROFILE_BUNDLES = [
-  GPT_4O_PROFILE_BUNDLE,
-  O3_MINI_PROFILE_BUNDLE,
+  GPT_5_6_SOL_PROFILE_BUNDLE,
+  GPT_5_6_TERRA_PROFILE_BUNDLE,
+  GPT_5_6_LUNA_PROFILE_BUNDLE,
 ] as const;
 
 export const OPENAI_MODEL_PROFILES: readonly ModelProfile[] =

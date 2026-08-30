@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join as joinPath } from "node:path";
 import { canonicalJson, computeContentHash } from "@terminus/context-ir";
 import type {
   ProviderToolCallChunk,
@@ -22,12 +24,49 @@ import {
   type RequestContext,
 } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import type { KernelUdsClients } from "./kernel-uds.js";
+import { classifyLoopError } from "./agent/loop-contracts.js";
 import type { OperationEffectMetadata } from "./agent/turn-budget.js";
+import {
+  resolveKernelRequestContext,
+  type KernelRequestContextSource,
+} from "./kernel-request-context.js";
 
-export const DEFAULT_MAX_TOOL_CYCLES = 64;
+/**
+ * Tool cycles are the *batches* of tool calls a turn may settle. The step
+ * budget (`HARD_MAX_STEPS`) bounds provider attempts; this bounds tool work
+ * inside them. Both were sized for a four-cycle prototype loop and starved a
+ * real coding task, so the default now matches the step ceiling.
+ */
+export const DEFAULT_MAX_TOOL_CYCLES = 200;
 export const MIN_TOOL_CYCLES = 1;
-export const MAX_TOOL_CYCLES_CEILING = 256;
-export const MAX_TOOL_MODEL_RESULT_BYTES = 32 * 1_024;
+export const MAX_TOOL_CYCLES_CEILING = 1_000;
+/**
+ * Ceiling on the JSON the model sees for one settled tool call. It has to
+ * hold the largest single payload any tool produces — a 64 KiB read page —
+ * with room for the envelope, or `persistSettledToolResult` strips the
+ * payload to an artifact reference the model has no tool to fetch.
+ */
+export const MAX_TOOL_MODEL_RESULT_BYTES = 128 * 1_024;
+/** Inline byte budget for one `read` page (the model-visible slice). */
+export const READ_PAGE_MAX_BYTES = 64 * 1_024;
+/**
+ * Bytes fetched from the kernel per read. The kernel has no line ranges yet
+ * (Phase 2), so deep pages are sliced control-side out of this window; it is
+ * sized to stay well under the gRPC 4 MiB receive limit.
+ */
+export const KERNEL_READ_FETCH_MAX_BYTES = 3 * 1_024 * 1_024;
+/** Combined stdout+stderr projection budget for one exec/grep/glob result. */
+export const EXEC_OUTPUT_MAX_BYTES = 30 * 1_024;
+/**
+ * Bytes each stream keeps before the shared budget is split proportionally.
+ * Without a floor a chatty stdout erases the stderr that explains the
+ * failure, which is the only part of a failed command that matters.
+ */
+export const EXEC_OUTPUT_STREAM_FLOOR_BYTES = 4 * 1_024;
+/** Foreground exec ceiling forwarded to the kernel, unclamped below it. */
+export const EXEC_FOREGROUND_MAX_TIMEOUT_MS = 600_000;
+/** Background job ceiling; awaited through exec_poll. */
+export const EXEC_BACKGROUND_MAX_TIMEOUT_MS = 1_800_000;
 
 /**
  * Resolve the per-turn tool-call budget (ADR-0039 §10). Operators tune it
@@ -63,13 +102,40 @@ const pathSchema = z.string().min(1).max(4_096).refine(
 );
 const sha256Schema = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 
-export const standaloneReadInputSchema = z.object({
+export const standaloneCapabilityInputSchema = z.object({
+  action: z.literal("activate_workspace"),
+}).strict();
+
+/**
+ * Accept the spellings every frontier model was trained on.
+ *
+ * `file_path`/`offset`/`limit` are Claude Code's read parameters and
+ * `limit_lines` is the Terminus name for the same bound; a `.strict()` schema
+ * that rejects them turns a correct call into an unrecoverable argument
+ * error. Aliases are folded onto the canonical field before validation, so
+ * exactly one spelling reaches the kernel and the operation hash.
+ */
+export function aliasReadArguments(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const call = { ...(value as Record<string, unknown>) };
+  const fold = (from: string, to: string): void => {
+    if (call[from] === undefined) return;
+    if (call[to] === undefined) call[to] = call[from];
+    delete call[from];
+  };
+  fold("file_path", "path");
+  fold("offset", "offset_line");
+  fold("limit_lines", "max_lines");
+  fold("limit", "max_lines");
+  return call;
+}
+
+export const standaloneReadInputSchema = z.preprocess(aliasReadArguments, z.object({
   path: pathSchema,
-  // Fetch bound stays below the 32 KiB model-result projection cap so
-  // content_utf8 is never stripped into an opaque artifact reference.
-  max_bytes: z.number().int().min(1).max(30 * 1_024).default(28 * 1_024),
+  /** Inline page budget; pages larger than this are trimmed line-wise. */
+  max_bytes: z.number().int().min(1).max(READ_PAGE_MAX_BYTES).default(READ_PAGE_MAX_BYTES),
   offset_line: z.number().int().min(1).default(1),
-  max_lines: z.number().int().min(1).max(4_000).default(2_000),
+  max_lines: z.number().int().min(1).max(50_000).default(2_000),
   /**
    * "numbered" renders each line as `<line>→ <content>` so the model can
    * cite stable locations. The patch tool strips the same gutter format
@@ -77,7 +143,24 @@ export const standaloneReadInputSchema = z.object({
    */
   render: z.enum(["numbered", "raw"]).default("numbered"),
   expected_sha256: sha256Schema.optional(),
-}).strict();
+}).strict());
+
+export const standaloneWriteInputSchema = z.preprocess(
+  (value: unknown) => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+    const call = { ...(value as Record<string, unknown>) };
+    if (call.file_path !== undefined && call.path === undefined) {
+      call.path = call.file_path;
+      delete call.file_path;
+    }
+    return call;
+  },
+  z.object({
+    path: pathSchema,
+    /** Whole new file body. An empty string writes an empty file. */
+    content: z.string().max(4 * 1_024 * 1_024),
+  }).strict(),
+);
 
 const standalonePatchEditSchema = z.object({
   expected_utf8: z.string().min(1).max(64 * 1_024),
@@ -140,7 +223,12 @@ export const standaloneExecInputSchema = z.preprocess(hoistArgvProgram, z.object
   args: z.array(z.string().max(16_384)).max(128).default([]),
   shell: standaloneShellInputSchema.optional(),
   cwd: pathSchema.default("."),
-  timeout_ms: z.number().int().min(100).max(600_000).default(120_000),
+  /**
+   * Forwarded to the kernel verbatim. Foreground commands may take the full
+   * 600 s; anything longer must be backgrounded and awaited with exec_poll,
+   * which is bounded at 30 minutes.
+   */
+  timeout_ms: z.number().int().min(100).max(EXEC_BACKGROUND_MAX_TIMEOUT_MS).default(120_000),
   expected_exit_codes: z.array(z.number().int().min(0).max(255)).min(1).max(16).default([0]),
   /**
    * Run under the kernel job supervisor and return immediately with a
@@ -151,6 +239,13 @@ export const standaloneExecInputSchema = z.preprocess(hoistArgvProgram, z.object
   // The message is written for the model, not the operator: this is the one
   // validation a weaker model trips constantly, and the turn survives only if
   // the correction is obvious from the error alone.
+  if (!value.background && value.timeout_ms > EXEC_FOREGROUND_MAX_TIMEOUT_MS) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["timeout_ms"],
+      message: `timeout_ms above ${EXEC_FOREGROUND_MAX_TIMEOUT_MS} ms is only allowed with background: true (poll it with exec_poll)`,
+    });
+  }
   const argv = value.program !== undefined;
   const shell = value.shell !== undefined;
   if (argv === shell) {
@@ -247,6 +342,8 @@ export const standaloneGlobInputSchema = z.object({
 }).strict();
 
 export type StandaloneReadInput = z.infer<typeof standaloneReadInputSchema>;
+export type StandaloneCapabilityInput = z.infer<typeof standaloneCapabilityInputSchema>;
+export type StandaloneWriteInput = z.infer<typeof standaloneWriteInputSchema>;
 export type StandalonePatchInput = z.infer<typeof standalonePatchInputSchema>;
 export type StandaloneExecInput = z.infer<typeof standaloneExecInputSchema>;
 export type StandaloneGrepInput = z.infer<typeof standaloneGrepInputSchema>;
@@ -299,6 +396,7 @@ function pathFieldFor(toolId: string): "path" | "cwd" | null {
   switch (toolId) {
     case "read":
     case "patch":
+    case "write":
     case "grep":
     case "glob":
       return "path";
@@ -337,8 +435,10 @@ export function relativizeStandaloneCallPaths(
 }
 
 export type ParsedStandaloneToolCall =
+  | { readonly providerCallId: string; readonly toolId: "capability"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneCapabilityInput }
   | { readonly providerCallId: string; readonly toolId: "read"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneReadInput }
   | { readonly providerCallId: string; readonly toolId: "patch"; readonly toolVersion: "standalone-v1"; readonly arguments: StandalonePatchInput }
+  | { readonly providerCallId: string; readonly toolId: "write"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneWriteInput }
   | { readonly providerCallId: string; readonly toolId: "exec"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneExecInput }
   | { readonly providerCallId: string; readonly toolId: "exec_poll"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneExecPollInput }
   | { readonly providerCallId: string; readonly toolId: "web_fetch"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneWebFetchInput }
@@ -378,18 +478,39 @@ const resultSchema: Readonly<Record<string, unknown>> = {
 
 export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
   {
+    id: "capability",
+    version: "standalone-v1",
+    summary: "Activate workspace context and coding tools for this turn. Call this only when answering the user's request requires inspecting, changing, or executing within the workspace. Otherwise answer directly without calling it.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["action"],
+      properties: {
+        action: { enum: ["activate_workspace"] },
+      },
+    },
+    resultSchema,
+    sideEffectClass: "capability",
+    requiredCapabilities: [],
+    trustLevel: "builtin",
+    maximumModelResultBytes: 4 * 1_024,
+    maximumArtifactBytes: 4 * 1_024,
+    defaultTimeoutMs: 1_000,
+    policyTags: ["control", "activation", "standalone"],
+  },
+  {
     id: "read",
     version: "standalone-v1",
-    summary: "Read a bounded, line-paged UTF-8 projection of one task-scoped workspace file. Returns the observed file hash (use it for patch) and total line count. Lines render as '<line>→ <content>'; patch strips this gutter automatically.",
+    summary: "Read a line-paged UTF-8 slice of one task-scoped workspace file. Paging is real: offset_line/max_lines (aliases: offset/limit) return exactly that range, plus lines_remaining and next_offset_line so you can continue. Returns the observed file hash (use it for patch) and total line count. Lines render as '<line>→ <content>'; patch strips this gutter automatically.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       required: ["path"],
       properties: {
-        path: { type: "string" },
-        max_bytes: { type: "integer", minimum: 1, maximum: 30 * 1_024, default: 28 * 1_024 },
-        offset_line: { type: "integer", minimum: 1, default: 1 },
-        max_lines: { type: "integer", minimum: 1, maximum: 4_000, default: 2_000 },
+        path: { type: "string", description: "Workspace-relative path to read." },
+        max_bytes: { type: "integer", minimum: 1, maximum: READ_PAGE_MAX_BYTES, default: READ_PAGE_MAX_BYTES, description: "Inline byte budget for this page." },
+        offset_line: { type: "integer", minimum: 1, default: 1, description: "1-based first line of the page." },
+        max_lines: { type: "integer", minimum: 1, maximum: 50_000, default: 2_000, description: "Lines to return from offset_line." },
         render: { enum: ["numbered", "raw"], default: "numbered" },
         expected_sha256: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
       },
@@ -443,14 +564,36 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
     policyTags: ["workspace", "write", "stale-write-protected", "standalone"],
   },
   {
+    id: "write",
+    version: "standalone-v1",
+    summary: "Write a whole file in the task write scope, creating it (and any missing parent directories) when it does not exist and replacing it verbatim when it does. Use this for new files; use patch for surgical edits to a file you have read.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["path", "content"],
+      properties: {
+        path: { type: "string", description: "Workspace-relative path to create or replace." },
+        content: { type: "string", maxLength: 4 * 1_024 * 1_024, description: "Complete new file body, written verbatim." },
+      },
+    },
+    resultSchema,
+    sideEffectClass: "workspace_write",
+    requiredCapabilities: ["workspace.patch"],
+    trustLevel: "builtin",
+    maximumModelResultBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+    maximumArtifactBytes: 16 * 1_024 * 1_024,
+    defaultTimeoutMs: 60_000,
+    policyTags: ["workspace", "write", "standalone"],
+  },
+  {
     id: "exec",
     version: "standalone-v1",
-    summary: "Run one bounded sandboxed command (no ambient env, no secrets). argv mode (program+args) or shell mode (dialect+script, pipes/redirections allowed). Default timeout 120s, max 600s. background:true returns a background_id immediately; await it with exec_poll.",
+    summary: "Run one sandboxed command (workspace-writable, no secrets in env). argv mode (program+args) or shell mode (dialect+script, pipes/redirections allowed). Default timeout 120s, max 600s foreground; background:true returns a background_id immediately (up to 30 min) — await it with exec_poll. A non-zero exit is a normal result, not an error: stdout, stderr, and exit_code always come back.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        program: { type: "string" },
+        program: { type: "string", description: "Executable name or path; argv mode." },
         args: { type: "array", maxItems: 128, items: { type: "string" }, default: [] },
         shell: {
           type: "object",
@@ -462,7 +605,7 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
           },
         },
         cwd: { type: "string", default: "." },
-        timeout_ms: { type: "integer", minimum: 100, maximum: 600_000, default: 120_000 },
+        timeout_ms: { type: "integer", minimum: 100, maximum: EXEC_BACKGROUND_MAX_TIMEOUT_MS, default: 120_000, description: "Forwarded to the kernel unclamped; above 600000 requires background: true." },
         expected_exit_codes: { type: "array", minItems: 1, maxItems: 16, items: { type: "integer", minimum: 0, maximum: 255 }, default: [0] },
         background: { type: "boolean", default: false },
       },
@@ -575,6 +718,7 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
 export const STANDALONE_ALWAYS_ON_TOOL_IDS = [
   "read",
   "patch",
+  "write",
   "exec",
   "exec_poll",
   "grep",
@@ -583,6 +727,15 @@ export const STANDALONE_ALWAYS_ON_TOOL_IDS = [
 
 /** Network access is discoverable and must be explicitly activated. */
 export const STANDALONE_DISCOVERABLE_TOOL_IDS = ["web_fetch"] as const;
+
+/** The only tool exposed before the model decides workspace access is needed. */
+export const STANDALONE_INITIAL_TOOL_IDS = ["capability"] as const;
+
+export function selectInitialStandaloneToolSchemas(toolsEnabled: boolean): readonly ProviderToolSchema[] {
+  if (!toolsEnabled) return [];
+  const initial = new Set<string>(STANDALONE_INITIAL_TOOL_IDS);
+  return STANDALONE_TOOL_SCHEMAS.filter((schema) => initial.has(schema.id));
+}
 
 function estimatedSchemaTokens(schema: ProviderToolSchema): number {
   return Math.ceil(new TextEncoder().encode(canonicalJson({
@@ -684,7 +837,11 @@ export function boundedToolName(toolName: string): string {
     : `${codePoints.slice(0, MAX_ECHOED_TOOL_NAME_CHARS - 1).join("")}…`;
 }
 
-const STANDALONE_TOOL_IDS_FOR_MODEL = [...STANDALONE_ALWAYS_ON_TOOL_IDS, ...STANDALONE_DISCOVERABLE_TOOL_IDS] as const;
+const STANDALONE_TOOL_IDS_FOR_MODEL = [
+  ...STANDALONE_INITIAL_TOOL_IDS,
+  ...STANDALONE_ALWAYS_ON_TOOL_IDS,
+  ...STANDALONE_DISCOVERABLE_TOOL_IDS,
+] as const;
 
 export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStandaloneToolCall {
   if (call.toolCallId.length === 0 || call.toolCallId.length > 255 || /[\0\r\n]/.test(call.toolCallId)) {
@@ -693,10 +850,14 @@ export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStan
     throw new Error("provider tool call id is invalid");
   }
   switch (call.toolName) {
+    case "capability":
+      return { providerCallId: call.toolCallId, toolId: "capability", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneCapabilityInputSchema) };
     case "read":
       return { providerCallId: call.toolCallId, toolId: "read", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneReadInputSchema) };
     case "patch":
       return { providerCallId: call.toolCallId, toolId: "patch", toolVersion: "standalone-v1", arguments: parseArguments(call, standalonePatchInputSchema) };
+    case "write":
+      return { providerCallId: call.toolCallId, toolId: "write", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneWriteInputSchema) };
     case "exec":
       return { providerCallId: call.toolCallId, toolId: "exec", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneExecInputSchema) };
     case "exec_poll":
@@ -761,33 +922,101 @@ export const READ_ONLY_SIDE_EFFECT_CLASSES: ReadonlySet<string> = new Set([
   "capability",
 ]);
 
+/**
+ * Side-effect classes whose repetition is the *point*.
+ *
+ * A process is not an idempotent mutation: `exec cargo test` after an edit is
+ * a different observation of a different workspace, and denying it as a
+ * duplicate breaks the only loop that matters — edit, test, edit. The kernel,
+ * the policy engine and the permission profile still see every call; only the
+ * replay gate is skipped.
+ */
+export const REPEATABLE_SIDE_EFFECT_CLASSES: ReadonlySet<string> = new Set(["process"]);
+
 /** True when the tool only observes state and must never be deduplicated. */
 export function isReadOnlyToolCall(call: ParsedStandaloneToolCall): boolean {
   return READ_ONLY_SIDE_EFFECT_CLASSES.has(toolEffectMetadata(call).sideEffectClass);
 }
 
+const READ_ONLY_EXEC_PROGRAMS = new Set([
+  "cat", "file", "find", "grep", "head", "ls", "pwd", "rg", "stat", "tail", "wc",
+]);
+const READ_ONLY_GIT_SUBCOMMANDS = new Set([
+  "branch", "diff", "log", "rev-parse", "show", "status",
+]);
+
 /**
- * The semantic-idempotency gate protects against replaying a *mutation*. Reads
- * are exempt (see {@link READ_ONLY_SIDE_EFFECT_CLASSES}).
+ * Whether a settled builtin call can have changed workspace bytes.
+ *
+ * Unknown processes and every shell script remain conservative mutations.
+ * A small argv-only observation set prevents read-only discovery from
+ * entering the change-verification pipeline merely because the model chose
+ * `exec` instead of a dedicated search tool.
  */
-export function semanticIdempotencyGateApplies(call: ParsedStandaloneToolCall): boolean {
-  return !isReadOnlyToolCall(call);
+export function mayChangeWorkspace(call: ParsedStandaloneToolCall): boolean {
+  if (call.toolId === "patch" || call.toolId === "write") return true;
+  if (call.toolId !== "exec") return false;
+  if (call.arguments.shell !== undefined) return true;
+  const program = (call.arguments.program ?? "").split("/").at(-1) ?? "";
+  if (READ_ONLY_EXEC_PROGRAMS.has(program)) return false;
+  if (program !== "git") return true;
+  const subcommand = call.arguments.args.find((argument) => !argument.startsWith("-"));
+  return subcommand === undefined || !READ_ONLY_GIT_SUBCOMMANDS.has(subcommand);
 }
 
 /**
- * The ledger key for the side effect row. Mutations key on the semantic
- * operation hash so a replay collides with the original effect. Observations
- * key on the hash *and* the tool call id so repeated identical reads each get
- * their own effect row instead of colliding on the unique index.
+ * The semantic-idempotency gate protects against replaying a *mutation*.
+ * Reads (see {@link READ_ONLY_SIDE_EFFECT_CLASSES}) and processes (see
+ * {@link REPEATABLE_SIDE_EFFECT_CLASSES}) are exempt.
+ */
+export function semanticIdempotencyGateApplies(call: ParsedStandaloneToolCall): boolean {
+  const sideEffectClass = toolEffectMetadata(call).sideEffectClass;
+  return !READ_ONLY_SIDE_EFFECT_CLASSES.has(sideEffectClass)
+    && !REPEATABLE_SIDE_EFFECT_CLASSES.has(sideEffectClass);
+}
+
+/**
+ * The ledger key for the side effect row. Gated mutations key on the semantic
+ * operation hash so a replay collides with the original effect. Everything
+ * exempt from the gate — observations and processes — keys on the hash *and*
+ * the tool call id, so a legitimate repeat gets its own effect row instead of
+ * colliding on the unique index.
  */
 export function effectLedgerIdempotencyKey(input: {
   readonly call: ParsedStandaloneToolCall;
   readonly operationHash: string;
   readonly toolCallId: string;
 }): string {
-  return isReadOnlyToolCall(input.call)
-    ? `${input.operationHash}:${input.toolCallId}`
-    : input.operationHash;
+  return semanticIdempotencyGateApplies(input.call)
+    ? input.operationHash
+    : `${input.operationHash}:${input.toolCallId}`;
+}
+
+/**
+ * Effect states that make a verbatim replay unsafe.
+ *
+ * STARTED and UNKNOWN may have reached the workspace; SETTLED did. Everything
+ * else — AUTHORIZED (never dispatched), FAILED, CANCELLED, DENIED — left the
+ * workspace untouched, so the identical call is a *retry*, not a duplicate.
+ * The gate used to match on row existence alone, and the row is created at
+ * AUTHORIZED and never removed, so a patch that failed on a stale hash was
+ * told "already applied … Do not retry" when it tried again correctly.
+ */
+export const REPLAY_BLOCKING_EFFECT_STATES: ReadonlySet<string> = new Set([
+  "STARTED",
+  "SETTLED",
+  "UNKNOWN",
+  "RECONCILING",
+  "MANUAL_REVIEW",
+]);
+
+/** Whether a prior effect row must block an identical call from dispatching. */
+export function replayIsBlockedBy(
+  priorEffect: { readonly state: string } | null | undefined,
+): boolean {
+  return priorEffect !== null
+    && priorEffect !== undefined
+    && REPLAY_BLOCKING_EFFECT_STATES.has(priorEffect.state);
 }
 
 /**
@@ -800,7 +1029,7 @@ export function duplicateOperationDenial(input: {
   readonly effectId: string;
   readonly effectState: string;
 }): string {
-  const target = input.call.toolId === "patch" || input.call.toolId === "read"
+  const target = input.call.toolId === "patch" || input.call.toolId === "read" || input.call.toolId === "write"
     ? ` to '${input.call.arguments.path}'`
     : "";
   return [
@@ -859,7 +1088,10 @@ export function projectModelVisibleResult(
   result: ToolResult<unknown>,
 ): Readonly<Record<string, unknown>> {
   const ok = MODEL_VISIBLE_RESULT_STATUSES.has(result.status);
-  const data = ok ? projectModelVisibleData(result) : null;
+  // Payload survives a non-success status. Dropping it deleted the stdout and
+  // stderr of every failing command, every failing test run and every
+  // no-match search — the exact bytes the model needs to fix the thing.
+  const data = projectModelVisibleData(result) ?? null;
   const projection: Record<string, unknown> = {
     status: result.status,
     summary: result.summary,
@@ -895,6 +1127,21 @@ export interface StandaloneToolEffectMetadata extends OperationEffectMetadata {
 
 export function toolEffectMetadata(call: ParsedStandaloneToolCall): StandaloneToolEffectMetadata {
   switch (call.toolId) {
+    case "capability":
+      return {
+        effectType: "READ_LOCAL",
+        resourceUri: "workspace://capabilities",
+        reversibility: "none",
+        sideEffectClass: "capability",
+        workspaceSnapshot: null,
+        externalNetwork: false,
+        processAffinity: null,
+        consistency: "live",
+        rateLimitGroup: null,
+        cacheable: false,
+        expectedLatencyMs: 1,
+        expectedOutputBytes: 1_024,
+      };
     case "read":
       return {
         effectType: "READ_LOCAL",
@@ -909,6 +1156,21 @@ export function toolEffectMetadata(call: ParsedStandaloneToolCall): StandaloneTo
         cacheable: true,
         expectedLatencyMs: 30_000,
         expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+      };
+    case "write":
+      return {
+        effectType: "WRITE_LOCAL",
+        resourceUri: `workspace://${call.arguments.path}`,
+        reversibility: "reversible",
+        sideEffectClass: "workspace_write",
+        workspaceSnapshot: null,
+        externalNetwork: false,
+        processAffinity: null,
+        consistency: "workspace_snapshot",
+        rateLimitGroup: null,
+        cacheable: false,
+        expectedLatencyMs: 60_000,
+        expectedOutputBytes: 4 * 1_024,
       };
     case "patch":
       return {
@@ -1009,8 +1271,10 @@ export function toolEffectMetadata(call: ParsedStandaloneToolCall): StandaloneTo
 
 export interface ExecuteStandaloneToolInput {
   readonly clients: KernelUdsClients;
-  readonly context: RequestContext;
+  readonly context: KernelRequestContextSource;
   readonly workspaceId: string;
+  /** Host path of the workspace; enables project-local tool directories on PATH. */
+  readonly workspaceRoot?: string | null;
   readonly call: ParsedStandaloneToolCall;
   readonly internalToolCallId: string;
   readonly sideEffectId: Uuid7;
@@ -1082,6 +1346,26 @@ export class ObservedSourceTracker {
     this.observed.set(`${workspaceId}:${path}`, sha256);
   }
 
+  /**
+   * Restore observations made in earlier turns/attempts of the same task.
+   *
+   * The tracker is per turn, but read-before-edit is a property of the
+   * *conversation*: a file read in turn 1 and edited in turn 2 was still
+   * observed. Without seeding, the first edit of every follow-up turn was
+   * denied with PATCH_REQUIRES_OBSERVED_SOURCE and the model had to re-read
+   * the file it had just read. Entries are applied in order, so the most
+   * recent observation of a path wins.
+   */
+  seed(entries: Iterable<{ readonly workspaceId: string; readonly path: string; readonly sha256: string }>): number {
+    let applied = 0;
+    for (const entry of entries) {
+      const before = this.observed.get(`${entry.workspaceId}:${entry.path}`);
+      this.record(entry.workspaceId, entry.path, entry.sha256);
+      if (this.observed.get(`${entry.workspaceId}:${entry.path}`) !== before) applied += 1;
+    }
+    return applied;
+  }
+
   resolve(workspaceId: string, path: string): string | null {
     return this.observed.get(`${workspaceId}:${path}`) ?? null;
   }
@@ -1124,40 +1408,38 @@ export async function executeStandaloneTool(
   input: ExecuteStandaloneToolInput,
 ): Promise<ToolResult<unknown>> {
   assertNotAborted(input.signal);
+  // One capability per tool operation. A turn may run much longer than the
+  // token TTL, so resolving here lets the existing mint/cache path renew at
+  // this safe boundary without changing or widening the task scope.
+  const context = await resolveKernelRequestContext(input.context);
   const startedAt = performance.now();
   switch (input.call.toolId) {
+    case "capability":
+      throw new Error("capability activation must settle in the control plane");
     case "read": {
-      // Deep paging uses a real kernel line range so offset_line works even
-      // when earlier pages exceeded the byte cap (Cubic read-paging finding).
-      const deepPage = input.call.arguments.offset_line > 1;
+      // The kernel has no line ranges (it returns a byte prefix and discards
+      // `ranges`), so paging is done here: fetch a large byte window once and
+      // slice the requested lines out of it. A range request would have
+      // returned the head of the file labelled with the requested offset —
+      // silently wrong content, which is worse than no paging at all.
       const response = await withAbortSignal(input.clients.files.Read({
-        context: nextRequestContext(input.context, "read"),
+        context: nextRequestContext(context, "read"),
         intent: toolIntent(input.contractHash, "read_local"),
         path: { workspaceId: input.workspaceId, relativePath: input.call.arguments.path },
-        mode: deepPage ? "ranges" : "full",
-        ranges: deepPage
-          ? [{
-              startLine: input.call.arguments.offset_line,
-              endLine: Math.min(
-                4_000_000,
-                input.call.arguments.offset_line + input.call.arguments.max_lines - 1,
-              ),
-            }]
-          : [],
+        mode: "full",
+        ranges: [],
         symbols: [],
-        maxBytes: input.call.arguments.max_bytes,
+        maxBytes: KERNEL_READ_FETCH_MAX_BYTES,
         expectedSha256: input.call.arguments.expected_sha256 ?? "",
       }), input.signal);
-      const fullProjection = new TextDecoder("utf-8", { fatal: true }).decode(response.modelProjectionUtf8);
-      const totalLines = deepPage ? null : (fullProjection.length === 0 ? 0 : (fullProjection.endsWith("\n") ? fullProjection.slice(0, -1) : fullProjection).split("\n").length);
-      const page = deepPage
-        ? {
-            text: fullProjection,
-            startLine: input.call.arguments.offset_line,
-            endLine: input.call.arguments.offset_line + Math.max(0, fullProjection.split("\n").length - (fullProjection.endsWith("\n") ? 1 : 0)) - 1,
-            hasMore: fullProjection.split("\n").length >= input.call.arguments.max_lines,
-          }
-        : pageLines(fullProjection, input.call.arguments.offset_line, input.call.arguments.max_lines);
+      const fullProjection = new TextDecoder("utf-8", { fatal: false }).decode(response.modelProjectionUtf8);
+      const fetchTruncated = response.truncated;
+      const fetchedLines = fullProjection.length === 0
+        ? 0
+        : (fullProjection.endsWith("\n") ? fullProjection.slice(0, -1) : fullProjection).split("\n").length;
+      // A byte-truncated fetch cannot know the file's real line count.
+      const totalLines = fetchTruncated ? null : fetchedLines;
+      const page = pageLines(fullProjection, input.call.arguments.offset_line, input.call.arguments.max_lines);
       const sourceHash = response.sourceVersion?.sha256 ?? "";
       if (sourceHash.length > 0 && input.observedSources !== undefined) {
         input.observedSources.record(input.workspaceId, input.call.arguments.path, sourceHash);
@@ -1166,32 +1448,40 @@ export async function executeStandaloneTool(
         ? renderNumbered(page.text, page.startLine)
         : page.text;
       // Numbered rendering adds gutter bytes; trim whole lines until the
-      // inline payload provably fits the model-result cap (headroom for the
-      // envelope) instead of letting settlement strip it to an artifact ref.
-      const inlineBudget = MAX_TOOL_MODEL_RESULT_BYTES - 2 * 1_024;
+      // inline payload provably fits the page budget instead of letting
+      // settlement strip it to an artifact ref.
+      const inlineBudget = Math.min(input.call.arguments.max_bytes, READ_PAGE_MAX_BYTES);
+      let byteTrimmed = false;
       while (new TextEncoder().encode(contentUtf8).byteLength > inlineBudget && contentUtf8.includes("\n")) {
         contentUtf8 = contentUtf8.slice(0, contentUtf8.lastIndexOf("\n")) + "\n";
+        byteTrimmed = true;
       }
+      const deliveredLines = contentUtf8.length === 0
+        ? 0
+        : (contentUtf8.endsWith("\n") ? contentUtf8.slice(0, -1) : contentUtf8).split("\n").length;
+      const endLine = page.startLine + deliveredLines - 1;
+      const hasMore = byteTrimmed || page.hasMore || fetchTruncated;
+      const linesRemaining = totalLines === null ? null : Math.max(0, totalLines - endLine);
       const artifact = kernelArtifactDescriptor(response.fullContent);
       const elapsed = performance.now() - startedAt;
       const result = okResult({
         path: input.call.arguments.path,
         content_utf8: contentUtf8,
         file_sha256: sourceHash.length === 0 ? null : sourceHash,
-        // Deep pages cannot know the file length without a second probe;
-        // report null rather than the last page index (Cubic honesty rule).
         total_lines: totalLines,
         render: input.call.arguments.render,
         offset_line: page.startLine,
-        end_line: page.endLine,
+        end_line: endLine,
+        // How much of the file this page did not show. `null` means the file
+        // is larger than the kernel fetch window and the count is unknown.
+        lines_remaining: linesRemaining,
         rendered_mode: response.renderedMode,
         continuation_token: response.continuationToken || null,
-        // A byte-truncated projection cannot serve further line pages.
-        next_offset_line: page.hasMore && !response.truncated ? page.endLine + 1 : null,
+        next_offset_line: hasMore ? endLine + 1 : null,
       }, {
         toolCallId: input.internalToolCallId,
         traceId: input.traceId,
-        summary: `Read ${input.call.arguments.path} lines ${page.startLine}-${page.endLine}${deepPage ? "" : ` of ${totalLines}`}${page.hasMore && !response.truncated ? " (continued)" : ""}`,
+        summary: `Read ${input.call.arguments.path} lines ${page.startLine}-${endLine}${totalLines === null ? "" : ` of ${totalLines}`}${hasMore ? ` (${linesRemaining === null ? "more" : `${linesRemaining} more`} lines; continue at offset_line ${endLine + 1})` : ""}`,
         sourceVersions: sourceHash.length === 0 ? {} : { [input.call.arguments.path]: sourceHash },
         artifacts: artifact === null ? [] : [artifact],
         sideEffects: [sideEffect(input.sideEffectId, "read", `Read ${input.call.arguments.path}`, true)],
@@ -1200,15 +1490,13 @@ export async function executeStandaloneTool(
       return {
         ...result,
         policyDecisionId: input.policyDecisionId,
-        truncation: response.truncated || page.hasMore
+        truncation: hasMore
           ? {
               occurred: true,
-              reason: page.hasMore
-                ? "line page continues beyond this read"
-                : "kernel read projection reached max_bytes",
-              continuation: page.hasMore
-                ? `read ${input.call.arguments.path} at offset_line ${page.endLine + 1}`
-                : response.continuationToken || artifact?.uri || null,
+              reason: fetchTruncated && !page.hasMore && !byteTrimmed
+                ? `file exceeds the ${KERNEL_READ_FETCH_MAX_BYTES}-byte kernel read window`
+                : "line page continues beyond this read",
+              continuation: `read ${input.call.arguments.path} at offset_line ${endLine + 1}`,
             }
           : result.truncation,
         diagnostics: response.diagnostics.map((diagnostic) => ({
@@ -1265,9 +1553,9 @@ export async function executeStandaloneTool(
       let response: Awaited<ReturnType<KernelUdsClients["patch"]["Apply"]>>;
       try {
         response = await withAbortSignal(input.clients.patch.Apply({
-          context: nextRequestContext(input.context, "patch"),
+          context: nextRequestContext(context, "patch"),
           intent: toolIntent(input.contractHash, "write_local"),
-          transactionId: input.context.idempotencyKey,
+          transactionId: context.idempotencyKey,
           baseline: {
             workspaceId: input.workspaceId,
             repositoryRevision: "no-vcs",
@@ -1324,6 +1612,18 @@ export async function executeStandaloneTool(
         };
       }
       const elapsed = performance.now() - startedAt;
+      // The applied edit produced a new source version. Recording it is what
+      // lets a second patch to the same file in the same turn resolve its
+      // baseline; without it the second edit died with PATCH_STALE_SOURCE.
+      // Preview mode changed nothing, so it records nothing.
+      if (input.observedSources !== undefined && patchArguments.commit_mode !== "preview") {
+        for (const file of response.changedFiles) {
+          const changedPath = file.path?.relativePath ?? "";
+          if (changedPath.length > 0 && file.newSha256.length > 0) {
+            input.observedSources.record(input.workspaceId, changedPath, file.newSha256);
+          }
+        }
+      }
       const artifact = kernelArtifactDescriptor(response.completeDiff);
       const result = okResult({
         transaction_id: response.transactionId,
@@ -1348,8 +1648,109 @@ export async function executeStandaloneTool(
         toolCallId: input.internalToolCallId,
         traceId: input.traceId,
         summary: `${patchArguments.commit_mode === "preview" ? "Previewed" : "Applied"} ${edits.length} exact edit${edits.length === 1 ? "" : "s"} to ${patchArguments.path}${anyGuttersStripped ? " (line-number gutters stripped)" : ""}`,
+        // The post-apply hashes are the durable record of what this turn
+        // observed; a later turn seeds its tracker from them.
+        sourceVersions: patchArguments.commit_mode === "preview"
+          ? {}
+          : Object.fromEntries(
+              response.changedFiles
+                .filter((file) => (file.path?.relativePath ?? "").length > 0 && file.newSha256.length > 0)
+                .map((file) => [file.path?.relativePath ?? "", file.newSha256]),
+            ),
         artifacts: artifact === null ? [] : [artifact],
         sideEffects: [sideEffect(input.sideEffectId, "workspace_write", `Patch ${patchArguments.path}`, patchArguments.commit_mode === "preview")],
+        timing: { executionMs: elapsed, totalMs: elapsed },
+      });
+      return { ...result, policyDecisionId: input.policyDecisionId };
+    }
+    case "write": {
+      // Whole-file write mapped onto the kernel's CreateFile effect, which
+      // creates missing parents and overwrites in place. It runs through the
+      // same PatchService transaction (and therefore the same capability,
+      // scope, policy and rollback journal) as `patch`; the only difference
+      // is that it has no anchor and needs no observed source version, which
+      // is exactly why a new file could not be created before.
+      const writeArguments = input.call.arguments;
+      const contentBytes = new TextEncoder().encode(writeArguments.content);
+      let response: Awaited<ReturnType<KernelUdsClients["patch"]["Apply"]>>;
+      try {
+        response = await withAbortSignal(input.clients.patch.Apply({
+          context: nextRequestContext(context, "write"),
+          intent: toolIntent(input.contractHash, "write_local"),
+          transactionId: context.idempotencyKey,
+          baseline: {
+            workspaceId: input.workspaceId,
+            repositoryRevision: "no-vcs",
+            dirtyDigest: "",
+            // CreateFile is unanchored: it asserts the new content, not a
+            // prior version, so the baseline carries no source hash.
+            sources: [],
+          },
+          edits: [{
+            createFile: {
+              path: { workspaceId: input.workspaceId, relativePath: writeArguments.path },
+              mustNotExist: false,
+              content: contentBytes,
+              mediaType: "text/plain; charset=utf-8",
+            },
+          }],
+          validationProfileId: "task-default",
+          allowTransientInvalidState: false,
+          commitMode: PatchCommitMode.PATCH_COMMIT_MODE_APPLY_TO_WORKTREE,
+        }), input.signal);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        const elapsed = performance.now() - startedAt;
+        const base = okResult(null, {
+          toolCallId: input.internalToolCallId,
+          traceId: input.traceId,
+          summary: `Write rejected: ${message.slice(0, 512)}`,
+          timing: { executionMs: elapsed, totalMs: elapsed },
+        });
+        return {
+          ...base,
+          status: "error",
+          policyDecisionId: input.policyDecisionId,
+          diagnostics: [{
+            severity: "error",
+            code: "WRITE_REJECTED",
+            message: message.slice(0, 2_048),
+            path: writeArguments.path,
+            range: null,
+          }],
+        };
+      }
+      const changed = response.changedFiles.find(
+        (file) => (file.path?.relativePath ?? "") === writeArguments.path,
+      );
+      const newSha256 = changed?.newSha256 && changed.newSha256.length > 0
+        ? changed.newSha256
+        : computeContentHash(contentBytes);
+      const created = (changed?.oldSha256 ?? "").length === 0;
+      // A file this turn wrote is a file this turn observed: patch may now
+      // anchor on it without a redundant read.
+      input.observedSources?.record(input.workspaceId, writeArguments.path, newSha256);
+      const elapsed = performance.now() - startedAt;
+      const artifact = kernelArtifactDescriptor(response.completeDiff);
+      const result = okResult({
+        path: writeArguments.path,
+        bytes_written: contentBytes.byteLength,
+        created,
+        file_sha256: newSha256,
+        transaction_id: response.transactionId,
+        state: response.state,
+        validations: response.validations.map((validation) => ({
+          check_id: validation.checkId,
+          status: validation.status,
+          summary: validation.summary,
+        })),
+      }, {
+        toolCallId: input.internalToolCallId,
+        traceId: input.traceId,
+        summary: `${created ? "Created" : "Replaced"} ${writeArguments.path} (${contentBytes.byteLength} bytes)`,
+        sourceVersions: { [writeArguments.path]: newSha256 },
+        artifacts: artifact === null ? [] : [artifact],
+        sideEffects: [sideEffect(input.sideEffectId, "workspace_write", `Write ${writeArguments.path}`, true)],
         timing: { executionMs: elapsed, totalMs: elapsed },
       });
       return { ...result, policyDecisionId: input.policyDecisionId };
@@ -1378,24 +1779,30 @@ export async function executeStandaloneTool(
       }
       const shell = input.call.arguments.shell;
       if (input.call.arguments.background) {
-        const start = await withAbortSignal(input.clients.jobs.Start({
-          context: nextRequestContext(input.context, "exec-background"),
-          intent: toolIntent(input.contractHash, "execute_local"),
-          command: {
-            program: shell !== undefined ? "" : assertProgram(input.call.arguments.program),
-            args: shell !== undefined ? [] : [...input.call.arguments.args],
-            cwd: { workspaceId: input.workspaceId, relativePath: input.call.arguments.cwd },
-            publicEnv: {},
-            secretCapabilityUris: [],
-            timeout: durationFromMilliseconds(input.call.arguments.timeout_ms),
-            allocatePty: false,
-            shell: shell === undefined ? undefined : { enabled: true, dialect: shell.dialect, script: shell.script },
-            allowUnboundedTimeout: false,
-          },
-          sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
-          outputPolicyId: "tool-result-bounded",
-          durable: false,
-        }), input.signal);
+        let start: Awaited<ReturnType<KernelUdsClients["jobs"]["Start"]>>;
+        try {
+          start = await withAbortSignal(input.clients.jobs.Start({
+            context: nextRequestContext(context, "exec-background"),
+            intent: toolIntent(input.contractHash, "execute_local"),
+            command: {
+              program: shell !== undefined ? "" : assertProgram(input.call.arguments.program),
+              args: shell !== undefined ? [] : [...input.call.arguments.args],
+              cwd: { workspaceId: input.workspaceId, relativePath: input.call.arguments.cwd },
+              publicEnv: kernelPublicEnv(process.env, { workspaceRoot: input.workspaceRoot ?? null }),
+              secretCapabilityUris: [],
+              timeout: durationFromMilliseconds(input.call.arguments.timeout_ms),
+              allocatePty: false,
+              shell: shell === undefined ? undefined : { enabled: true, dialect: shell.dialect, script: shell.script },
+              allowUnboundedTimeout: false,
+            },
+            sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
+            outputPolicyId: "tool-result-bounded",
+            durable: false,
+          }), input.signal);
+        } catch (error: unknown) {
+          if (error instanceof ToolAbortedError) throw error;
+          return processDispatchFailure(input, error, startedAt);
+        }
         const elapsed = performance.now() - startedAt;
         const result = okResult({
           background_id: start.jobId,
@@ -1411,58 +1818,71 @@ export async function executeStandaloneTool(
         });
         return { ...result, policyDecisionId: input.policyDecisionId };
       }
-      const events = input.clients.process.Start({
-        context: nextRequestContext(input.context, "exec"),
-        intent: toolIntent(input.contractHash, "execute_local"),
-        command: {
-          program: shell !== undefined ? "" : assertProgram(input.call.arguments.program),
-          args: shell !== undefined ? [] : [...input.call.arguments.args],
-          cwd: { workspaceId: input.workspaceId, relativePath: input.call.arguments.cwd },
-          publicEnv: {},
-          secretCapabilityUris: [],
-          timeout: durationFromMilliseconds(input.call.arguments.timeout_ms),
-          allocatePty: false,
-          shell: shell === undefined ? undefined : { enabled: true, dialect: shell.dialect, script: shell.script },
-          allowUnboundedTimeout: false,
-        },
-        sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
-        outputPolicyId: "tool-result-bounded",
-      });
-      return settleProcessOutcome(input, events, startedAt);
+      try {
+        const events = input.clients.process.Start({
+          context: nextRequestContext(context, "exec"),
+          intent: toolIntent(input.contractHash, "execute_local"),
+          command: {
+            program: shell !== undefined ? "" : assertProgram(input.call.arguments.program),
+            args: shell !== undefined ? [] : [...input.call.arguments.args],
+            cwd: { workspaceId: input.workspaceId, relativePath: input.call.arguments.cwd },
+            publicEnv: kernelPublicEnv(process.env, { workspaceRoot: input.workspaceRoot ?? null }),
+            secretCapabilityUris: [],
+            // Forwarded verbatim: the schema already bounds it (600 s
+            // foreground, 30 min backgrounded) and the kernel owns the
+            // enforcement. Nothing in this layer clamps it further.
+            timeout: durationFromMilliseconds(input.call.arguments.timeout_ms),
+            allocatePty: false,
+            shell: shell === undefined ? undefined : { enabled: true, dialect: shell.dialect, script: shell.script },
+            allowUnboundedTimeout: false,
+          },
+          sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
+          outputPolicyId: "tool-result-bounded",
+        });
+        return await settleProcessOutcome(input, events, startedAt);
+      } catch (error: unknown) {
+        if (error instanceof ToolAbortedError) throw error;
+        return processDispatchFailure(input, error, startedAt);
+      }
     }
     case "grep":
     case "glob": {
       const argv = input.call.toolId === "grep"
         ? grepArgv(input.call.arguments)
         : globArgv(input.call.arguments);
-      const events = input.clients.process.Start({
-        context: nextRequestContext(input.context, input.call.toolId),
-        intent: toolIntent(input.contractHash, "execute_local"),
-        command: {
-          program: argv.program,
-          args: [...argv.args],
-          cwd: { workspaceId: input.workspaceId, relativePath: input.call.arguments.path },
-          publicEnv: {},
-          secretCapabilityUris: [],
-          timeout: durationFromMilliseconds(30_000),
-          allocatePty: false,
-          shell: undefined,
-          allowUnboundedTimeout: false,
-        },
-        sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
-        outputPolicyId: "tool-result-bounded",
-      });
-      return settleProcessOutcome(input, events, startedAt);
+      try {
+        const events = input.clients.process.Start({
+          context: nextRequestContext(context, input.call.toolId),
+          intent: toolIntent(input.contractHash, "execute_local"),
+          command: {
+            program: argv.program,
+            args: [...argv.args],
+            cwd: { workspaceId: input.workspaceId, relativePath: input.call.arguments.path },
+            publicEnv: kernelPublicEnv(process.env, { workspaceRoot: input.workspaceRoot ?? null }),
+            secretCapabilityUris: [],
+            timeout: durationFromMilliseconds(30_000),
+            allocatePty: false,
+            shell: undefined,
+            allowUnboundedTimeout: false,
+          },
+          sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
+          outputPolicyId: "tool-result-bounded",
+        });
+        return await settleProcessOutcome(input, events, startedAt);
+      } catch (error: unknown) {
+        if (error instanceof ToolAbortedError) throw error;
+        return processDispatchFailure(input, error, startedAt);
+      }
     }
     case "exec_poll": {
       return settleJobPoll(
-        { ...input, call: input.call as Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }> },
+        { ...input, context, call: input.call as Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }> },
         startedAt,
       );
     }
     case "web_fetch": {
       return executeWebFetch(
-        { ...input, call: input.call as Extract<ParsedStandaloneToolCall, { toolId: "web_fetch" }> },
+        { ...input, context, call: input.call as Extract<ParsedStandaloneToolCall, { toolId: "web_fetch" }> },
         startedAt,
       );
     }
@@ -1475,6 +1895,7 @@ async function executeWebFetch(
   input: ExecuteStandaloneToolInput & { readonly call: Extract<ParsedStandaloneToolCall, { toolId: "web_fetch" }> },
   startedAt: number,
 ): Promise<ToolResult<unknown>> {
+  const context = await resolveKernelRequestContext(input.context);
   let destination: ReturnType<typeof assertPublicHttpsUrl>;
   try {
     destination = assertPublicHttpsUrl(input.call.arguments.url);
@@ -1504,7 +1925,7 @@ async function executeWebFetch(
   let bodyBytes: Uint8Array;
   try {
     const grant = await withAbortSignal(input.clients.connectors.MintGrant({
-      context: nextRequestContext(input.context, "web-fetch-grant"),
+      context: nextRequestContext(context, "web-fetch-grant"),
       capabilityUri: "",
       binding: {
         connectorId: "web-fetch",
@@ -1522,7 +1943,7 @@ async function executeWebFetch(
     }), input.signal);
     if (grant.encodedGrant.length === 0) throw new Error("kernel returned an empty connector grant");
     const response = await withAbortSignal(input.clients.connectors.Execute({
-      context: nextRequestContext(input.context, "web-fetch-execute"),
+      context: nextRequestContext(context, "web-fetch-execute"),
       encodedGrant: grant.encodedGrant,
       operation: {
         method: "GET",
@@ -1570,7 +1991,7 @@ async function executeWebFetch(
     ? bodyBytes.slice(0, input.call.arguments.max_bytes)
     : bodyBytes;
   const ingest = await withAbortSignal(input.clients.artifacts.Ingest({
-    context: nextRequestContext(input.context, "web-fetch-artifact"),
+    context: nextRequestContext(context, "web-fetch-artifact"),
     content: boundedBody,
     mediaType: "application/octet-stream",
   }), input.signal);
@@ -1610,24 +2031,26 @@ async function executeWebFetch(
 }
 
 /** Bounded tail of a byte buffer (last N bytes, UTF-8 lossy). */
-function tailOf(bytes: Uint8Array, tailBytes: number): { text: string; totalBytes: number; truncated: boolean } {
+function tailOf(bytes: Uint8Array, budgetBytes: number): { text: string; totalBytes: number; truncated: boolean } {
   const totalBytes = bytes.byteLength;
   if (totalBytes === 0) return { text: "", totalBytes, truncated: false };
-  const sliceStart = totalBytes > tailBytes ? totalBytes - tailBytes : 0;
-  const text = new TextDecoder("utf-8").decode(bytes.slice(sliceStart));
-  return {
-    text,
-    totalBytes,
-    truncated: sliceStart > 0,
-  };
+  if (totalBytes <= budgetBytes) {
+    return { text: new TextDecoder("utf-8").decode(bytes), totalBytes, truncated: false };
+  }
+  // Same head/tail contract as foreground exec: a pure tail hid the command
+  // and the first error of every long background job.
+  const stream = new BoundedOutputStream(budgetBytes);
+  stream.push(bytes);
+  return { text: stream.project(budgetBytes), totalBytes, truncated: true };
 }
 
 async function settleJobPoll(
   input: ExecuteStandaloneToolInput & { readonly call: Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }> },
   startedAt: number,
 ): Promise<ToolResult<unknown>> {
+  const context = await resolveKernelRequestContext(input.context);
   const state = await withAbortSignal(input.clients.jobs.Get({
-    context: nextRequestContext(input.context, "exec-poll"),
+    context: nextRequestContext(context, "exec-poll"),
     jobId: input.call.arguments.background_id,
   }), input.signal);
   const elapsed = performance.now() - startedAt;
@@ -1652,48 +2075,27 @@ async function settleJobPoll(
   const stdoutArtifact = kernelArtifactDescriptor(state.stdoutArtifact);
   const stderrArtifact = kernelArtifactDescriptor(state.stderrArtifact);
   const exitExpected = input.call.arguments.expected_exit_codes.includes(state.exitCode);
-  if (!exitExpected) {
-    const elapsed2 = performance.now() - startedAt;
-    const failed = okResult(null, {
-      toolCallId: input.internalToolCallId,
-      traceId: input.traceId,
-      summary: `Job ${input.call.arguments.background_id} exited ${state.exitCode}; expected one of ${input.call.arguments.expected_exit_codes.join(", ")}`,
-      artifacts: [stdoutArtifact, stderrArtifact].filter((a): a is ArtifactDescriptor => a !== null),
-      timing: { executionMs: elapsed2, totalMs: elapsed2 },
-    });
-    return {
-      ...failed,
-      status: "error",
-      policyDecisionId: input.policyDecisionId,
-      diagnostics: [{
-        severity: "error",
-        code: "EXEC_POLL_EXIT_UNEXPECTED",
-        message: [
-          `Background job exited ${state.exitCode}; expected ${input.call.arguments.expected_exit_codes.join(", ")}.`,
-          `stdout tail: ${stdoutTail.text.slice(0, 800) || "(empty)"}`,
-          `stderr tail: ${stderrTail.text.slice(0, 800) || "(empty)"}`,
-        ].join("\n"),
-        path: null,
-        range: null,
-      }],
-    };
-  }
+  // Same rule as foreground exec: a non-zero exit is a result the model must
+  // read, not an error that deletes the output explaining it.
   const result = okResult({
     background_id: state.jobId || input.call.arguments.background_id,
     state: "exited",
     exit_code: state.exitCode,
     signal: null,
+    exit_expected: exitExpected,
     expected_exit_codes: [...input.call.arguments.expected_exit_codes],
+    stdout: stdoutTail.text,
     stdout_tail: stdoutTail.text,
     stdout_truncated_head: stdoutTail.truncated,
     stdout_total_bytes: stdoutTail.totalBytes,
+    stderr: stderrTail.text,
     stderr_tail: stderrTail.text,
     stderr_truncated_head: stderrTail.truncated,
     stderr_total_bytes: stderrTail.totalBytes,
   }, {
     toolCallId: input.internalToolCallId,
     traceId: input.traceId,
-    summary: `Job ${input.call.arguments.background_id} exited ${state.exitCode}`,
+    summary: `Job ${input.call.arguments.background_id} exited ${state.exitCode}${exitExpected ? "" : " (non-zero)"}`,
     artifacts: [stdoutArtifact, stderrArtifact].filter((artifact): artifact is ArtifactDescriptor => artifact !== null),
     sideEffects: [],
     timing: { executionMs: elapsed, totalMs: elapsed },
@@ -1720,8 +2122,9 @@ async function fetchArtifactTail(
     return { text: "", totalBytes: 0, truncated: false };
   }
   try {
+    const context = await resolveKernelRequestContext(input.context);
     const response = await withAbortSignal(input.clients.artifacts.Get({
-      context: nextRequestContext(input.context, "exec-poll-artifact"),
+      context: nextRequestContext(context, "exec-poll-artifact"),
       sha256: artifactRef.sha256,
     }), input.signal);
     return tailOf(response.content, tailBytes);
@@ -1738,6 +2141,132 @@ function assertProgram(program: string | undefined): string {
   return program;
 }
 
+/** Names that must never leave the control plane in a process environment. */
+export const SECRET_ENV_NAME_PATTERN = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i;
+
+export interface KernelPublicEnvOptions {
+  /**
+   * Host path of the workspace the process runs in. When set, the
+   * workspace's own tool directories are put ahead of the user's PATH.
+   */
+  readonly workspaceRoot?: string | null;
+  /** Injectable for tests; defaults to the real filesystem. */
+  readonly exists?: (path: string) => boolean;
+}
+
+/**
+ * Project-local tool directories, in the order they are prepended to PATH.
+ * A Python repository's `pytest` lives in its `.venv/bin`, a JavaScript
+ * repository's `vitest` in `node_modules/.bin`; neither is on the user's
+ * shell PATH, and the sandbox spawns under `env -i` with no activation step.
+ * The eval fixture asked the model to run `pytest -q` and the model got
+ * "pytest: No such file or directory" — the work was done but could not be
+ * proven. Only directories that exist are added, so an unrelated repository's
+ * PATH is byte-identical to before.
+ */
+export const WORKSPACE_TOOL_DIRS = [".venv/bin", "node_modules/.bin"] as const;
+
+export function withWorkspaceToolDirs(
+  path: string | undefined,
+  workspaceRoot: string | null,
+  exists: (path: string) => boolean,
+): string | undefined {
+  if (workspaceRoot === null || workspaceRoot === "") return path;
+  const prefix = WORKSPACE_TOOL_DIRS
+    .map((dir) => joinPath(workspaceRoot, dir))
+    .filter((dir) => exists(dir));
+  if (prefix.length === 0) return path;
+  return path === undefined || path === "" ? prefix.join(":") : `${prefix.join(":")}:${path}`;
+}
+
+/**
+ * The exact environment every kernel-dispatched process receives.
+ *
+ * The kernel spawns under `env -i`, so whatever is not listed here does not
+ * exist inside the sandbox. Sending `{}` (the previous behaviour) left the
+ * process with the Seatbelt profile's fixed `PATH=/usr/bin:/bin:...`, which
+ * contains no bun, node, cargo, rg or git — every toolchain command failed
+ * with "command not found" and the model had no way to see why.
+ *
+ * Contract:
+ *   PATH                 the control plane's own PATH (the user's toolchain)
+ *   HOME                 the real home, so ~/.cargo, ~/.bun, rustup resolve
+ *   TERM=dumb            no curses, no ANSI cursor games in captured output
+ *   LANG                 forwarded when set; UTF-8 default otherwise
+ *   CI=1, NO_COLOR=1     deterministic, colourless test/tool output
+ *   GIT_TERMINAL_PROMPT=0  git fails instead of blocking on a credential prompt
+ *
+ * TMPDIR is deliberately absent: the kernel supplies a writable one inside
+ * the sandbox, and forwarding the host's would point at a path the sandbox
+ * denies. Every value is filtered through {@link SECRET_ENV_NAME_PATTERN} —
+ * a PATH-like variable holding a token never reaches a spawned process.
+ */
+export function kernelPublicEnv(
+  source: Readonly<Record<string, string | undefined>> = process.env,
+  options: KernelPublicEnvOptions = {},
+): Record<string, string> {
+  const candidate: Record<string, string | undefined> = {
+    PATH: withWorkspaceToolDirs(
+      source.TERMINUS_USER_PATH ?? source.PATH,
+      options.workspaceRoot ?? null,
+      options.exists ?? existsSync,
+    ),
+    HOME: source.TERMINUS_USER_HOME ?? source.HOME,
+    TERM: "dumb",
+    LANG: source.LANG ?? "C.UTF-8",
+    CI: "1",
+    NO_COLOR: "1",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(candidate)) {
+    if (value === undefined || value.length === 0) continue;
+    if (SECRET_ENV_NAME_PATTERN.test(name)) continue;
+    env[name] = value;
+  }
+  return env;
+}
+
+/**
+ * A kernel transport fault while starting a process.
+ *
+ * Before this, a stream error out of `process.Start` propagated into
+ * `settleStandaloneProviderTool`, which marked the effect UNKNOWN and ended
+ * the whole turn as INTERRUPTED — one flaky spawn cost the run. A failed
+ * spawn produced no effect, so it is reported as a correctable tool error and
+ * the loop continues, exactly as `patch` already did.
+ */
+function processDispatchFailure(
+  input: ExecuteStandaloneToolInput,
+  error: unknown,
+  startedAt: number,
+): ToolResult<unknown> {
+  const message = error instanceof Error ? error.message : String(error);
+  const classified = classifyLoopError(error);
+  const denied = classified.kind === "policy_denied";
+  const elapsed = performance.now() - startedAt;
+  const base = okResult(null, {
+    toolCallId: input.internalToolCallId,
+    traceId: input.traceId,
+    summary: `${input.call.toolId} could not be started: ${message.slice(0, 256)}`,
+    timing: { executionMs: elapsed, totalMs: elapsed },
+  });
+  return {
+    ...base,
+    status: denied ? "denied" : "error",
+    policyDecisionId: input.policyDecisionId,
+    diagnostics: [{
+      severity: "error",
+      code: denied ? classified.envelope.code : "PROCESS_DISPATCH_FAILED",
+      message: denied
+        ? `${message.slice(0, 2_048)}. The command did not run; nothing was changed. Do not retry or route around this denial. Respond without the tool.`
+        : `${message.slice(0, 2_048)}. The command did not run; nothing was changed. Retry it or take a different approach.`,
+      path: null,
+      range: null,
+    }],
+  };
+}
+
 function nonEmptyAsserted(value: string | undefined, field: string): string {
   if (value === undefined || value.length === 0) throw new Error(`single-edit patch requires ${field}`);
   return value;
@@ -1750,8 +2279,17 @@ function grepArgv(args: StandaloneGrepInput): { readonly program: string; readon
   return { program: "rg", args: [...argv, "--", args.pattern, "."] };
 }
 
-function globArgv(args: StandaloneGlobInput): { readonly program: string; readonly args: readonly string[] } {
-  return { program: "rg", args: ["--files", "--color", "never", "--glob", args.pattern] };
+export function globArgv(args: StandaloneGlobInput): { readonly program: string; readonly args: readonly string[] } {
+  const patterns = [args.pattern];
+  if (args.pattern.startsWith("**/") && args.pattern.length > 3) {
+    // ripgrep's globset treats the leading **/ as requiring a slash. Add the
+    // equivalent root-level spelling so **/* and **/*.ts include root files.
+    patterns.push(args.pattern.slice(3));
+  }
+  return {
+    program: "rg",
+    args: ["--files", "--color", "never", ...patterns.flatMap((pattern) => ["--glob", pattern])],
+  };
 }
 
 async function settleProcessOutcome(
@@ -1763,8 +2301,9 @@ async function settleProcessOutcome(
     events,
     input.signal,
     async (processId) => {
+      const context = await resolveKernelRequestContext(input.context);
       await input.clients.process.Cancel({
-        context: nextRequestContext(input.context, "process-cancel"),
+        context: nextRequestContext(context, "process-cancel"),
         processId,
         reason: "turn-cancelled",
       });
@@ -1795,6 +2334,7 @@ async function settleProcessOutcome(
   const stderrArtifact = kernelArtifactDescriptor(outcome.stderrArtifact);
   const artifacts = [stdoutArtifact, stderrArtifact].filter((artifact): artifact is ArtifactDescriptor => artifact !== null);
   const expected = processExitExpected(input.call, outcome.exitCode);
+  const timedOut = outcome.signal === "TIMEOUT";
   let data: Record<string, unknown>;
   let summary: string;
   let projectionTruncated = outcome.truncated;
@@ -1812,15 +2352,26 @@ async function settleProcessOutcome(
       ? `grep found ${total} match${total === 1 ? "" : "es"} for '${input.call.arguments.pattern}'${total > bounded.length ? `; showing first ${bounded.length}` : ""}`
       : `glob matched ${total} path${total === 1 ? "" : "s"} for '${input.call.arguments.pattern}'${total > bounded.length ? `; showing first ${bounded.length}` : ""}`;
   } else if (input.call.toolId === "exec") {
+    // A command that exits non-zero ran successfully as a *tool*: the model
+    // asked for the exit code and the output, and it gets both. Marking it a
+    // tool error deleted the payload on the way to the model, so every
+    // failing test, failing tsc and failing lint arrived as a bare
+    // "exited 1" with no diagnostics — the single most expensive defect in
+    // the loop. `exit_code` is the signal; `status` is not.
     data = {
       exit_code: outcome.exitCode,
       signal: outcome.signal || null,
+      timed_out: timedOut,
+      duration_ms: Math.round(elapsed),
       stdout: outcome.stdout,
       stderr: outcome.stderr,
+      stdout_total_bytes: outcome.stdoutTotalBytes,
+      stderr_total_bytes: outcome.stderrTotalBytes,
+      output_elided: outcome.truncated,
     };
-    summary = expected
-      ? `${describeProcessCommand(input.call)} exited ${outcome.exitCode}`
-      : `${describeProcessCommand(input.call)} exited ${outcome.exitCode}; expected ${(input.call.toolId === "exec" ? input.call.arguments.expected_exit_codes : [0]).join(", ")}`;
+    summary = timedOut
+      ? `${describeProcessCommand(input.call)} timed out after ${input.call.arguments.timeout_ms} ms`
+      : `${describeProcessCommand(input.call)} exited ${outcome.exitCode}${expected ? "" : " (non-zero)"}`;
   } else {
     throw new Error("settleProcessOutcome called for a non-process tool");
   }
@@ -1834,13 +2385,15 @@ async function settleProcessOutcome(
   });
   return {
     ...base,
-    status: expected ? "success" : "error",
+    // exec always settles as a successful observation of the command; only
+    // grep/glob keep an exit-code verdict, and rg's 0/1 are both fine.
+    status: input.call.toolId === "exec" || expected ? "success" : "error",
     policyDecisionId: input.policyDecisionId,
     truncation: projectionTruncated
       ? {
           occurred: true,
           reason: outcome.truncated
-            ? "process output exceeded the model-result projection"
+            ? `process output exceeded the ${EXEC_OUTPUT_MAX_BYTES}-byte head/tail projection`
             : "search result exceeded max_results",
           continuation: projectionContinuation,
         }
@@ -1921,10 +2474,98 @@ type ProcessOutcome =
       readonly signal: string;
       readonly stdout: string;
       readonly stderr: string;
+      readonly stdoutTotalBytes: number;
+      readonly stderrTotalBytes: number;
       readonly stdoutArtifact: KernelArtifactRef | undefined;
       readonly stderrArtifact: KernelArtifactRef | undefined;
       readonly truncated: boolean;
     };
+
+/**
+ * Head + tail retention for one output stream.
+ *
+ * Command output is informative at both ends and rarely in the middle: the
+ * head carries the invocation and the first failure, the tail carries the
+ * summary line and the last error. Keeping only the head (what exec did) or
+ * only the tail (what exec_poll did) throws away half of every real test run.
+ * Retention is bounded to `cap` bytes at each end regardless of how much the
+ * process writes.
+ */
+class BoundedOutputStream {
+  private readonly headChunks: Uint8Array[] = [];
+  private readonly tailChunks: Uint8Array[] = [];
+  private headBytes = 0;
+  private tailBytes = 0;
+  private total = 0;
+
+  constructor(private readonly cap: number) {}
+
+  push(bytes: Uint8Array): void {
+    if (bytes.byteLength === 0) return;
+    this.total += bytes.byteLength;
+    if (this.headBytes < this.cap) {
+      const take = Math.min(this.cap - this.headBytes, bytes.byteLength);
+      this.headChunks.push(bytes.subarray(0, take));
+      this.headBytes += take;
+    }
+    this.tailChunks.push(bytes);
+    this.tailBytes += bytes.byteLength;
+    while (this.tailChunks.length > 1 && this.tailBytes - this.tailChunks[0]!.byteLength >= this.cap) {
+      this.tailBytes -= this.tailChunks.shift()!.byteLength;
+    }
+    if (this.tailBytes > this.cap) {
+      const first = this.tailChunks[0]!;
+      const drop = Math.min(first.byteLength, this.tailBytes - this.cap);
+      this.tailChunks[0] = first.subarray(drop);
+      this.tailBytes -= drop;
+    }
+  }
+
+  get totalBytes(): number {
+    return this.total;
+  }
+
+  /** Project at most `budget` bytes: whole output, or head + marker + tail. */
+  project(budget: number): string {
+    const decoder = new TextDecoder("utf-8");
+    if (this.total === 0) return "";
+    if (this.total <= budget) return decoder.decode(concatBytes(this.headChunks));
+    const headBudget = Math.ceil(budget / 2);
+    const tailBudget = budget - headBudget;
+    const head = concatBytes(this.headChunks).subarray(0, headBudget);
+    const tailAll = concatBytes(this.tailChunks);
+    const tail = tailAll.subarray(Math.max(0, tailAll.byteLength - tailBudget));
+    const elided = this.total - head.byteLength - tail.byteLength;
+    return `${decoder.decode(head)}\n[… ${elided} bytes elided …]\n${decoder.decode(tail)}`;
+  }
+}
+
+/**
+ * Split a shared output budget across two streams, guaranteeing each a floor.
+ *
+ * A 5 MiB stdout must not erase a 200-byte stderr: each stream first takes up
+ * to `floor` bytes of what it actually produced, then the remainder is shared
+ * in proportion to what each still wants.
+ */
+export function splitOutputBudget(
+  stdoutBytes: number,
+  stderrBytes: number,
+  budget: number = EXEC_OUTPUT_MAX_BYTES,
+  floor: number = EXEC_OUTPUT_STREAM_FLOOR_BYTES,
+): { readonly stdout: number; readonly stderr: number } {
+  if (stdoutBytes + stderrBytes <= budget) return { stdout: stdoutBytes, stderr: stderrBytes };
+  const stdoutFloor = Math.min(stdoutBytes, floor);
+  const stderrFloor = Math.min(stderrBytes, floor);
+  let remaining = Math.max(0, budget - stdoutFloor - stderrFloor);
+  const stdoutWant = Math.max(0, stdoutBytes - stdoutFloor);
+  const stderrWant = Math.max(0, stderrBytes - stderrFloor);
+  const totalWant = stdoutWant + stderrWant;
+  if (totalWant === 0) return { stdout: stdoutFloor, stderr: stderrFloor };
+  const stdoutExtra = Math.min(stdoutWant, Math.floor((remaining * stdoutWant) / totalWant));
+  remaining -= stdoutExtra;
+  const stderrExtra = Math.min(stderrWant, remaining);
+  return { stdout: stdoutFloor + stdoutExtra, stderr: stderrFloor + stderrExtra };
+}
 
 function collectProcess(
   events: { readonly subscribe: (observer: {
@@ -1935,12 +2576,12 @@ function collectProcess(
   signal: AbortSignal | null | undefined,
   cancelProcess: (processId: string) => Promise<void>,
 ): Promise<ProcessOutcome> {
-  const maximumProjectionBytes = 20 * 1_024;
+  // Each stream retains up to the whole shared budget at its head and at its
+  // tail; the final 50/50 split with a per-stream floor happens once the
+  // totals are known.
   return new Promise((resolve, reject) => {
-    const stdout: Uint8Array[] = [];
-    const stderr: Uint8Array[] = [];
-    let projectedBytes = 0;
-    let totalBytes = 0;
+    const stdout = new BoundedOutputStream(EXEC_OUTPUT_MAX_BYTES);
+    const stderr = new BoundedOutputStream(EXEC_OUTPUT_MAX_BYTES);
     let settled = false;
     let subscription: { readonly unsubscribe: () => void } | null = null;
     let processId: string | null = null;
@@ -1951,14 +2592,6 @@ function collectProcess(
       subscription?.unsubscribe();
       signal?.removeEventListener("abort", onAbort);
       callback();
-    };
-    const retain = (target: Uint8Array[], bytes: Uint8Array): void => {
-      totalBytes += bytes.byteLength;
-      const remaining = maximumProjectionBytes - projectedBytes;
-      if (remaining <= 0) return;
-      const retained = bytes.byteLength <= remaining ? bytes : bytes.slice(0, remaining);
-      target.push(retained);
-      projectedBytes += retained.byteLength;
     };
     const onAbort = (): void => {
       if (settled) return;
@@ -1987,20 +2620,24 @@ function collectProcess(
           finish(() => resolve({ kind: "denied", policy }));
           return;
         }
-        if (event.stdout !== undefined) retain(stdout, event.stdout.bytes);
-        if (event.stderr !== undefined) retain(stderr, event.stderr.bytes);
+        if (event.stdout !== undefined) stdout.push(event.stdout.bytes);
+        if (event.stderr !== undefined) stderr.push(event.stderr.bytes);
         const exited = event.exited;
         if (exited !== undefined) {
-          const decoder = new TextDecoder("utf-8");
+          const split = splitOutputBudget(stdout.totalBytes, stderr.totalBytes);
+          const stdoutText = stdout.project(split.stdout);
+          const stderrText = stderr.project(split.stderr);
           finish(() => resolve({
             kind: "exited",
             exitCode: exited.exitCode,
             signal: exited.signal,
-            stdout: decoder.decode(concatBytes(stdout)),
-            stderr: decoder.decode(concatBytes(stderr)),
+            stdout: stdoutText,
+            stderr: stderrText,
+            stdoutTotalBytes: stdout.totalBytes,
+            stderrTotalBytes: stderr.totalBytes,
             stdoutArtifact: exited.stdoutArtifact,
             stderrArtifact: exited.stderrArtifact,
-            truncated: totalBytes > projectedBytes,
+            truncated: stdout.totalBytes + stderr.totalBytes > split.stdout + split.stderr,
           }));
         }
       },

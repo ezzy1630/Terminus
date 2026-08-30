@@ -80,6 +80,8 @@ const FORBIDDEN_ENTITLEMENTS = [
   "com.apple.security.cs.disable-libsystem-validation",
 ] as const;
 const MAX_ARTIFACT_SCAN_BYTES = 64 * 1024 * 1024;
+const PACKAGED_HISTORICAL_MIGRATION =
+  /\/Contents\/Resources\/runtime\/terminus-control\/share\/terminus\/migrations\/sqlite\/\d+_[^/]+[.]sql$/;
 
 const RUNTIME_ROOTS = [
   "src",
@@ -228,7 +230,10 @@ function checkBuiltDesktopArtifacts(): void {
       for (const marker of RETIRED_DESKTOP_MARKERS) {
         if (text.includes(marker)) fail(`built desktop artifact retains retired bridge marker ${marker}: ${relativePath}`);
       }
-      if (FORBIDDEN_SPECIFIER.test(text)) {
+      // Applied SQL migrations are immutable compatibility history. A legacy
+      // data value is not an executable dependency; imports, manifests, and
+      // all other packaged runtime files remain fail-closed below.
+      if (FORBIDDEN_SPECIFIER.test(text) && !PACKAGED_HISTORICAL_MIGRATION.test(relativePath)) {
         fail(`built desktop artifact retains retired OpenCode runtime marker: ${relativePath}`);
       }
     }

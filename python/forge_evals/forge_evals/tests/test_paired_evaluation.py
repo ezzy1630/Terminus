@@ -5,12 +5,15 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from forge_evals.analysis.load_runs import load_runs_from_parquet
 from forge_evals.evidence import EvidenceClass
 from forge_evals.identity import EvaluationIdentity
 from forge_evals.paired_evaluation import derive_paired_evidence
 from forge_evals.promotion_gate import PromotionDecision, evaluate_paired_promotion
 from forge_evals.run_record import CostBreakdown, GraderResult, Outcome, RunRecord
+from forge_evals.statistics.bootstrap import bootstrap_ci
 
 
 def _identity(task: str, seed: int, harness: str) -> EvaluationIdentity:
@@ -59,12 +62,14 @@ def _record(task: str, seed: int, harness: str, passed: bool) -> RunRecord:
         ],
     )
     record.outcome = Outcome.COMPLETED if passed else Outcome.FAILED
-    record.grader_results = [GraderResult(
-        grader_id="end_state",
-        grader_version="v1",
-        passed=passed,
-        score=1.0 if passed else 0.0,
-    )]
+    record.grader_results = [
+        GraderResult(
+            grader_id="end_state",
+            grader_version="v1",
+            passed=passed,
+            score=1.0 if passed else 0.0,
+        )
+    ]
     record.cost = CostBreakdown(
         provider_reported_usd=0.01,
         computed_usd=0.01,
@@ -174,8 +179,12 @@ def test_paired_promotion_does_not_promote_without_operational_evidence() -> Non
 
 
 def test_paired_promotion_requires_explicit_operational_and_frontier_claims() -> None:
-    baseline = [_record(f"task-{i}", seed, "baseline", False) for i in range(3) for seed in range(3)]
-    candidate = [_record(f"task-{i}", seed, "candidate", True) for i in range(3) for seed in range(3)]
+    baseline = [
+        _record(f"task-{i}", seed, "baseline", False) for i in range(3) for seed in range(3)
+    ]
+    candidate = [
+        _record(f"task-{i}", seed, "candidate", True) for i in range(3) for seed in range(3)
+    ]
     evidence = derive_paired_evidence(
         baseline,
         candidate,
@@ -207,3 +216,132 @@ def test_paired_promotion_requires_explicit_operational_and_frontier_claims() ->
         require_complete_cohort=True,
     )
     assert result.decision is PromotionDecision.PROMOTE
+
+
+def test_exact_pass_fail_outcomes_are_keyed_by_suite_task_and_seed() -> None:
+    """The primary benchmark outcome is the independent grader verdict."""
+    baseline = [_record("task-1", seed, "baseline", False) for seed in (2, 1)]
+    candidate = [_record("task-1", seed, "candidate", True) for seed in (1, 2)]
+
+    evidence = derive_paired_evidence(baseline, candidate, min_pairs=2, n_bootstrap=32)
+
+    assert [outcome.key for outcome in evidence.outcomes] == [
+        ("tiny_bugfix", "task-1", 1),
+        ("tiny_bugfix", "task-1", 2),
+    ]
+    assert [outcome.baseline_passed for outcome in evidence.exact_pairs] == [False, False]
+    assert [outcome.candidate_passed for outcome in evidence.exact_pairs] == [True, True]
+    assert evidence.mcnemar.n == 2
+    assert evidence.mcnemar.discordant == 2
+    assert evidence.to_dict()["outcomes"] == [outcome.to_dict() for outcome in evidence.outcomes]
+
+
+def test_paired_success_does_not_erase_a_passing_patch_after_harness_failure() -> None:
+    """Lifecycle failure is secondary; the hidden grader still owns task success."""
+    baseline = _record("task-1", 1, "baseline", False)
+    candidate = _record("task-1", 1, "candidate", True)
+    candidate.outcome = Outcome.FAILED
+
+    evidence = derive_paired_evidence([baseline], [candidate], min_pairs=1, n_bootstrap=32)
+
+    assert candidate.success is True
+    assert candidate.passed is False
+    assert evidence.outcomes[0].candidate_passed is True
+    assert evidence.pairs[0].candidate == 1.0
+
+
+def test_repeated_seeds_use_task_cluster_bootstrap_for_uncertainty() -> None:
+    """Repeated seeds must not be counted as independent task clusters."""
+    baseline = []
+    candidate = []
+    for task, baseline_passed, candidate_passed in (
+        ("task-a", False, True),
+        ("task-b", False, False),
+        ("task-c", False, False),
+    ):
+        for seed in (1, 2):
+            baseline.append(_record(task, seed, "baseline", baseline_passed))
+            candidate.append(_record(task, seed, "candidate", candidate_passed))
+
+    evidence = derive_paired_evidence(
+        baseline,
+        candidate,
+        min_pairs=6,
+        n_bootstrap=256,
+        rng_seed=23,
+        practical_improvement_threshold=0.25,
+    )
+    expected_cluster_ci = bootstrap_ci(
+        [1.0, 0.0, 0.0],
+        lambda sample: sum(sample) / len(sample) if sample else 0.0,
+        n_resamples=256,
+        rng_seed=23,
+    )
+
+    assert evidence.n == 6
+    assert evidence.cluster_count == 3
+    assert evidence.uncertainty_unit == "task"
+    assert evidence.pair_mean_delta == pytest.approx(1 / 3)
+    assert evidence.cluster_mean_delta == pytest.approx(1 / 3)
+    assert evidence.cluster_ci_low == pytest.approx(expected_cluster_ci[0])
+    assert evidence.cluster_ci_high == pytest.approx(expected_cluster_ci[1])
+    assert evidence.ci_low == evidence.cluster_ci_low
+    assert evidence.ci_high == evidence.cluster_ci_high
+
+
+def test_holm_alpha_and_practical_threshold_form_a_separate_significance_gate() -> None:
+    """Holm correction and a meaningful delta are both required for the gate."""
+    baseline = [_record(f"task-{index}", 1, "baseline", False) for index in range(30)]
+    candidate = [_record(f"task-{index}", 1, "candidate", True) for index in range(30)]
+
+    evidence = derive_paired_evidence(
+        baseline,
+        candidate,
+        min_pairs=30,
+        n_bootstrap=64,
+        alpha=0.01,
+        holm_family_size=5,
+        practical_improvement_threshold=0.9,
+    )
+
+    assert evidence.alpha == 0.01
+    assert evidence.holm_family_size == 5
+    assert evidence.holm_adjusted_p_value >= evidence.mcnemar.p_value
+    assert evidence.statistically_significant
+    assert evidence.practically_significant
+    assert evidence.significance_passed
+    assert evidence.benchmark_gate_passed
+
+    too_high = derive_paired_evidence(
+        baseline,
+        candidate,
+        min_pairs=30,
+        n_bootstrap=64,
+        practical_threshold=1.01,
+    )
+    assert too_high.statistically_significant
+    assert not too_high.practically_significant
+    assert not too_high.significance_passed
+
+
+def test_significance_fields_do_not_bypass_provider_receipt_gate() -> None:
+    """A significant result remains ineligible when receipt evidence is incomplete."""
+    baseline = [_record(f"task-{index}", 1, "baseline", False) for index in range(30)]
+    candidate = [_record(f"task-{index}", 1, "candidate", True) for index in range(30)]
+    candidate[0].provider_receipts = []
+
+    evidence = derive_paired_evidence(
+        baseline,
+        candidate,
+        min_pairs=30,
+        n_bootstrap=64,
+        require_provider_receipts=True,
+        practical_improvement_threshold=0.1,
+    )
+
+    assert evidence.statistically_significant
+    assert evidence.practically_significant
+    assert evidence.significance_passed
+    assert not evidence.provider_receipts_complete
+    assert not evidence.eligible
+    assert any("provider receipts" in issue.reason for issue in evidence.issues)

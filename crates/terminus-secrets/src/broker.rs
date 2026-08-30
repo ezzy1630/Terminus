@@ -1,7 +1,25 @@
+use crate::cache::SecretCache;
 use crate::error::SecretError;
+use crate::namespace::unix_time;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
+
+/// Wall-clock ceiling on one credential resolve.
+///
+/// A resolve is synchronous host work: on macOS it ends in
+/// `SecKeychainFindGenericPassword`, which blocks until the user answers a
+/// `SecurityAgent` prompt when the calling binary's code identity is not on the
+/// keychain item's ACL — a certainty for an ad-hoc-signed dev build, which
+/// gets a fresh identity on every rebuild. Left unbounded on a tokio worker
+/// that parks the runtime thread and the control plane's 30 s unary deadline
+/// fires with `DEADLINE_EXCEEDED` and no explanation.
+///
+/// 15 s sits below that deadline with room for the rest of a mint, so the
+/// caller sees the actionable message in [`SecretError::ResolveTimeout`]
+/// instead of a timeout with no cause.
+pub const SECRET_RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Metadata about a secret — never includes the raw value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +205,9 @@ pub struct SecretBroker {
         std::sync::Arc<Mutex<HashMap<String, std::sync::Arc<dyn WritableSecretProvider>>>>,
     revocations: std::sync::Arc<Mutex<std::collections::HashSet<String>>>,
     audit: std::sync::Arc<crate::audit::SecretAuditLog>,
+    /// Resolved-credential cache. Collapses the two provider reads one
+    /// request makes (mint + execute) into one; see [`crate::cache`].
+    cache: std::sync::Arc<SecretCache>,
 }
 
 impl std::fmt::Debug for SecretBroker {
@@ -212,6 +233,7 @@ impl SecretBroker {
             writable_providers: std::sync::Arc::new(Mutex::new(HashMap::new())),
             revocations: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
             audit: std::sync::Arc::new(crate::audit::SecretAuditLog::new()),
+            cache: std::sync::Arc::new(SecretCache::new()),
         }
     }
 
@@ -247,7 +269,14 @@ impl SecretBroker {
             .get(&provider_name)
             .cloned()
             .ok_or_else(|| SecretError::UnknownCapability(uri.to_string()))?;
-        provider.store(uri, value)
+        // Invalidate before AND after the write: before, so a concurrent
+        // reader cannot re-populate the old value from a resolve that was
+        // already in flight when the write landed; after, so the entry is
+        // gone even if the write failed part-way.
+        self.cache.invalidate(uri);
+        let result = provider.store(uri, value);
+        self.cache.invalidate(uri);
+        result
     }
 
     pub fn delete(&self, uri: &str) -> Result<(), SecretError> {
@@ -259,13 +288,19 @@ impl SecretBroker {
             .get(&provider_name)
             .cloned()
             .ok_or_else(|| SecretError::UnknownCapability(uri.to_string()))?;
-        provider.delete(uri)
+        self.cache.invalidate(uri);
+        let result = provider.delete(uri);
+        self.cache.invalidate(uri);
+        result
     }
 
     pub fn revoke(&self, uri: &str) {
         if let Ok(mut g) = self.revocations.lock() {
             g.insert(uri.to_string());
         }
+        // A revoked URI must not survive in the cache: `request` refuses it,
+        // but nothing should still be holding its bytes.
+        self.cache.invalidate(uri);
     }
 
     pub fn is_revoked(&self, uri: &str) -> bool {
@@ -275,8 +310,99 @@ impl SecretBroker {
             .unwrap_or(false)
     }
 
-    /// Request a secret. Records the use in the audit log.
+    /// Request a secret **synchronously**. Records the use in the audit log.
+    ///
+    /// This blocks the calling thread for as long as the provider takes.
+    /// Async callers MUST use [`SecretBroker::request_async`]: a keychain
+    /// provider can park for minutes behind an OS approval prompt, and
+    /// parking a tokio worker thread there stalls unrelated work on the same
+    /// runtime.
     pub fn request(&self, uri: &str, requested_by: &str) -> Result<SecretHandle, SecretError> {
+        let provider = match self.begin_request(uri)? {
+            RequestStep::Cached(handle) => {
+                self.audit.record_use(uri, requested_by, &handle.metadata);
+                return Ok(handle);
+            }
+            RequestStep::Resolve(provider) => provider,
+        };
+        let handle = provider.resolve(uri)?;
+        self.finish_request(uri, requested_by, &handle);
+        Ok(handle)
+    }
+
+    /// Request a secret from an async context.
+    ///
+    /// A cache hit never leaves the calling task. A miss runs the provider's
+    /// synchronous resolve on the blocking pool under
+    /// [`SECRET_RESOLVE_TIMEOUT`], so the async runtime keeps making progress
+    /// while an OS keychain prompt is on screen, and the caller gets an
+    /// actionable [`SecretError::ResolveTimeout`] instead of a bare deadline.
+    ///
+    /// # Errors
+    /// Propagates the provider's own failure, or returns
+    /// [`SecretError::ResolveTimeout`] when the resolve does not complete in
+    /// time. The abandoned resolve is left to finish on the blocking pool —
+    /// it cannot be cancelled — and its handle is dropped (and wiped) there.
+    pub async fn request_async(
+        &self,
+        uri: &str,
+        requested_by: &str,
+    ) -> Result<SecretHandle, SecretError> {
+        self.request_with_timeout(uri, requested_by, SECRET_RESOLVE_TIMEOUT)
+            .await
+    }
+
+    /// [`Self::request_async`] with an explicit ceiling. Production callers
+    /// use `request_async`; this exists so the ceiling itself is testable
+    /// without a 15 s test.
+    ///
+    /// # Errors
+    /// See [`Self::request_async`].
+    pub async fn request_with_timeout(
+        &self,
+        uri: &str,
+        requested_by: &str,
+        timeout: Duration,
+    ) -> Result<SecretHandle, SecretError> {
+        let provider = match self.begin_request(uri)? {
+            RequestStep::Cached(handle) => {
+                self.audit.record_use(uri, requested_by, &handle.metadata);
+                return Ok(handle);
+            }
+            RequestStep::Resolve(provider) => provider,
+        };
+        let owned_uri = uri.to_string();
+        let resolve = tokio::task::spawn_blocking(move || provider.resolve(&owned_uri));
+        let handle = match tokio::time::timeout(timeout, resolve).await {
+            Ok(Ok(resolved)) => resolved?,
+            Ok(Err(join_error)) => {
+                return Err(SecretError::ProviderUnavailable(format!(
+                    "secret resolve task failed: {join_error}"
+                )));
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    target: "terminus_kernel_audit",
+                    event = "secret.resolve_timeout",
+                    secret_uri = %uri,
+                    requested_by = %requested_by,
+                    timeout_secs = timeout.as_secs(),
+                    "credential resolve exceeded its ceiling; an OS keychain prompt is \
+                     probably waiting for approval"
+                );
+                return Err(SecretError::ResolveTimeout {
+                    uri: uri.to_string(),
+                    timeout_secs: timeout.as_secs(),
+                });
+            }
+        };
+        self.finish_request(uri, requested_by, &handle);
+        Ok(handle)
+    }
+
+    /// Revocation check, URI parse, provider lookup, and cache probe — the
+    /// part [`Self::request`] and [`Self::request_async`] share.
+    fn begin_request(&self, uri: &str) -> Result<RequestStep, SecretError> {
         if self.is_revoked(uri) {
             return Err(SecretError::CapabilityRevoked(uri.to_string()));
         }
@@ -290,14 +416,34 @@ impl SecretBroker {
                 .cloned()
                 .ok_or_else(|| SecretError::UnknownCapability(uri.to_string()))?
         };
-        let handle = provider.resolve(uri)?;
+        // The provider must exist before a cache hit is honoured: a URI whose
+        // provider was unregistered is not resolvable, cached or not.
+        if let Some(handle) = self.cache.get(uri, unix_time()?) {
+            return Ok(RequestStep::Cached(handle));
+        }
+        Ok(RequestStep::Resolve(provider))
+    }
+
+    /// Cache the resolved credential and record the use. The audit entry is
+    /// written on every request, cache hit or miss.
+    fn finish_request(&self, uri: &str, requested_by: &str, handle: &SecretHandle) {
+        if let Ok(now) = unix_time() {
+            self.cache.insert(&handle.metadata, &handle.value, now);
+        }
         self.audit.record_use(uri, requested_by, &handle.metadata);
-        Ok(handle)
     }
 
     pub fn audit_log(&self) -> std::sync::Arc<crate::audit::SecretAuditLog> {
         std::sync::Arc::clone(&self.audit)
     }
+}
+
+/// Outcome of the shared pre-resolve steps.
+enum RequestStep {
+    /// A live cached credential; no provider call is needed.
+    Cached(SecretHandle),
+    /// The registered provider to resolve through.
+    Resolve(std::sync::Arc<dyn SecretProvider>),
 }
 
 impl Default for SecretBroker {
@@ -431,5 +577,217 @@ mod tests {
         drop(handle);
         broker.delete("secret://opencode/zen").unwrap();
         assert!(broker.request("secret://opencode/zen", "task-1").is_err());
+    }
+
+    // ---------- resolve cache + non-blocking resolve ----------
+
+    /// Counts resolves and controls how long each one takes and how long the
+    /// lease it hands back is valid for.
+    #[derive(Debug)]
+    struct ProbeProvider {
+        value: Vec<u8>,
+        lease_secs: u64,
+        delay: Duration,
+        resolves: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ProbeProvider {
+        fn new(value: &[u8], lease_secs: u64) -> Self {
+            Self {
+                value: value.to_vec(),
+                lease_secs,
+                delay: Duration::ZERO,
+                resolves: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn with_delay(mut self, delay: Duration) -> Self {
+            self.delay = delay;
+            self
+        }
+
+        fn counter(&self) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+            std::sync::Arc::clone(&self.resolves)
+        }
+    }
+
+    impl SecretProvider for ProbeProvider {
+        fn resolve(&self, uri: &str) -> Result<SecretHandle, SecretError> {
+            self.resolves
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if !self.delay.is_zero() {
+                std::thread::sleep(self.delay);
+            }
+            let now = unix_time()?;
+            let (provider, scope) = parse_uri(uri)?;
+            Ok(SecretHandle::from_value(
+                SecretMetadata {
+                    uri: uri.to_string(),
+                    provider,
+                    scope,
+                    issued_at_unix: now,
+                    expires_at_unix: now.saturating_add(self.lease_secs),
+                    redaction_patterns: Vec::new(),
+                    allowed_destinations: Vec::new(),
+                },
+                self.value.clone(),
+            ))
+        }
+    }
+
+    const PROBE_URI: &str = "secret://fixture/probe";
+
+    #[test]
+    fn second_request_inside_the_lease_is_served_from_cache() {
+        let broker = SecretBroker::new();
+        let provider = ProbeProvider::new(b"probe-value", 300);
+        let resolves = provider.counter();
+        broker.register_provider("fixture", std::sync::Arc::new(provider));
+
+        let first = broker.request(PROBE_URI, "task-1").unwrap();
+        let second = broker.request(PROBE_URI, "task-1").unwrap();
+        assert_eq!(resolves.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Same material, so the grant digest pinned at mint time still
+        // matches the header injected at execute time.
+        assert_eq!(first.digest(), second.digest());
+        // The audit log records each use, not each resolve.
+        assert_eq!(broker.audit_log().entries().len(), 2);
+    }
+
+    #[test]
+    fn expired_lease_forces_a_fresh_resolve() {
+        let broker = SecretBroker::new();
+        // A zero-second lease is already elapsed when it is handed back.
+        let provider = ProbeProvider::new(b"probe-value", 0);
+        let resolves = provider.counter();
+        broker.register_provider("fixture", std::sync::Arc::new(provider));
+
+        broker.request(PROBE_URI, "task-1").unwrap();
+        broker.request(PROBE_URI, "task-1").unwrap();
+        assert_eq!(resolves.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn store_invalidates_the_cached_value() {
+        let broker = SecretBroker::new();
+        let provider = std::sync::Arc::new(InMemoryProvider::new());
+        broker.register_writable_provider("opencode", provider);
+        broker
+            .store("secret://opencode/zen", b"first-value")
+            .unwrap();
+        let first = broker.request("secret://opencode/zen", "task-1").unwrap();
+        broker
+            .store("secret://opencode/zen", b"second-value")
+            .unwrap();
+        let second = broker.request("secret://opencode/zen", "task-1").unwrap();
+        assert_ne!(
+            first.digest(),
+            second.digest(),
+            "a rotated credential must not be served from cache"
+        );
+    }
+
+    #[test]
+    fn delete_invalidates_the_cached_value() {
+        let broker = SecretBroker::new();
+        let provider = std::sync::Arc::new(InMemoryProvider::new());
+        broker.register_writable_provider("opencode", provider);
+        broker
+            .store("secret://opencode/zen", b"first-value")
+            .unwrap();
+        broker.request("secret://opencode/zen", "task-1").unwrap();
+        broker.delete("secret://opencode/zen").unwrap();
+        assert!(broker.request("secret://opencode/zen", "task-1").is_err());
+    }
+
+    #[test]
+    fn revoke_invalidates_the_cached_value() {
+        let broker = SecretBroker::new();
+        let provider = ProbeProvider::new(b"probe-value", 300);
+        broker.register_provider("fixture", std::sync::Arc::new(provider));
+        broker.request(PROBE_URI, "task-1").unwrap();
+        broker.revoke(PROBE_URI);
+        let error = broker.request(PROBE_URI, "task-1").unwrap_err();
+        assert!(matches!(error, SecretError::CapabilityRevoked(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn async_request_passes_a_fast_provider_through() {
+        let broker = SecretBroker::new();
+        let provider = ProbeProvider::new(b"probe-value", 300);
+        let resolves = provider.counter();
+        broker.register_provider("fixture", std::sync::Arc::new(provider));
+
+        let handle = broker.request_async(PROBE_URI, "task-1").await.unwrap();
+        assert_eq!(handle.metadata.uri, PROBE_URI);
+        // The second request never reaches the provider at all.
+        let cached = broker.request_async(PROBE_URI, "task-1").await.unwrap();
+        assert_eq!(handle.digest(), cached.digest());
+        assert_eq!(resolves.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(broker.audit_log().entries().len(), 2);
+    }
+
+    /// A provider that blocks longer than the ceiling must yield the
+    /// actionable error, and the single-worker runtime must keep scheduling
+    /// other tasks the whole time it is blocked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn async_request_times_out_without_stalling_the_runtime() {
+        let broker = SecretBroker::new();
+        let provider = ProbeProvider::new(b"probe-value", 300)
+            // An order of magnitude past the (test-shortened) ceiling below,
+            // and short enough that the abandoned blocking task does not hold
+            // the test binary open.
+            .with_delay(Duration::from_secs(1));
+        broker.register_provider("fixture", std::sync::Arc::new(provider));
+
+        let ticks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ticker = {
+            let ticks = std::sync::Arc::clone(&ticks);
+            tokio::spawn(async move {
+                for _ in 0..5 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+        };
+
+        // Same code path as `request_async`, with the production ceiling
+        // replaced so the test does not sleep for 15 s.
+        let error = broker
+            .request_with_timeout(PROBE_URI, "task-1", Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            matches!(error, SecretError::ResolveTimeout { .. }),
+            "expected a resolve timeout, got {message}"
+        );
+        assert!(message.contains(PROBE_URI), "{message}");
+        assert!(message.contains("did not complete within"), "{message}");
+        assert!(
+            message.contains("TERMINUS_SECRETS_BACKEND=file"),
+            "the error must name the remedy: {message}"
+        );
+        // The value never appears in the error.
+        assert!(!message.contains("probe-value"), "{message}");
+
+        ticker.await.unwrap();
+        assert_eq!(
+            ticks.load(std::sync::atomic::Ordering::SeqCst),
+            5,
+            "the runtime must keep making progress while a resolve is parked"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn async_request_propagates_a_provider_failure() {
+        let broker = SecretBroker::new();
+        let provider = std::sync::Arc::new(InMemoryProvider::new());
+        broker.register_provider("fixture", provider);
+        let error = broker
+            .request_async("secret://fixture/missing", "task-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SecretError::UnknownCapability(_)));
     }
 }

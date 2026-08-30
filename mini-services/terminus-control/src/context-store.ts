@@ -34,6 +34,10 @@ import type {
   RequestContext,
 } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import type { RenderedProviderRequest } from "@terminus/provider-core";
+import {
+  resolveKernelRequestContext,
+  type KernelRequestContextSource,
+} from "./kernel-request-context.js";
 
 const EMPTY_CONTENT_HASH = ("sha256:" + "0".repeat(64)) as ContentHash;
 
@@ -49,10 +53,11 @@ export type ContextTransactionFence = (tx: Prisma.TransactionClient) => Promise<
 
 export function createKernelArtifactClient(
   rpc: ArtifactIngestServiceClientImpl,
-  context: RequestContext,
+  contextSource: KernelRequestContextSource,
 ): ArtifactClient {
   const kernel: ArtifactKernelClient = {
     async ingest(bytes, metadata): Promise<ContentHash> {
+      const context = await resolveKernelRequestContext(contextSource);
       const response: IngestArtifactResponse = await rpc.Ingest({
         context: nextRequestContext(context),
         content: bytes,
@@ -64,10 +69,12 @@ export function createKernelArtifactClient(
       return artifact.sha256 as ContentHash;
     },
     async get(hash): Promise<Uint8Array | null> {
+      const context = await resolveKernelRequestContext(contextSource);
       const response: GetArtifactResponse = await rpc.Get({ context: nextRequestContext(context), sha256: hash });
       return response.artifact === undefined ? null : response.content;
     },
     async getMetadata(hash): Promise<Readonly<Record<string, unknown>> | null> {
+      const context = await resolveKernelRequestContext(contextSource);
       const response: GetArtifactMetadataResponse = await rpc.GetMetadata({ context: nextRequestContext(context), sha256: hash });
       if (response.artifact === undefined) return null;
       return {
@@ -77,6 +84,7 @@ export function createKernelArtifactClient(
       };
     },
     async link(hash, ownerType, ownerId, purpose): Promise<void> {
+      const context = await resolveKernelRequestContext(contextSource);
       // The kernel rejects an inadmissible (owner_type, purpose) pair with a
       // bare INVALID_ARGUMENT whose gRPC details are the generic "kernel
       // request failed". Without the pair in the message the failure is

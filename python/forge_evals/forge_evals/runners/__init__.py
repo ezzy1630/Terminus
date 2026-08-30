@@ -22,9 +22,15 @@ from .baseline_adapters import (
 )
 from .benchmark_adapters import (
     SWE_BENCH_HARNESS_COMMIT,
+    SWE_BENCH_PRO_HARNESS_COMMIT,
+    SWE_BENCH_PRO_REVISION,
     SWE_BENCH_VERIFIED_REVISION,
+    TERMINAL_BENCH_DATASET,
+    TERMINAL_BENCH_DATASET_VERSION,
     TERMINAL_BENCH_HARBOR_COMMIT,
+    TERMINAL_BENCH_HARBOR_VERSION,
     TERMINAL_BENCH_TASK_COMMIT,
+    TERMINAL_BENCH_TASK_COUNT,
     BenchmarkAdapter,
     BenchmarkAdapterError,
     BenchmarkExecution,
@@ -35,11 +41,21 @@ from .benchmark_adapters import (
     HarborAdapter,
     HarborTerminalBenchAdapter,
     LiveBenchmarkHarness,
+    SWEBenchProAdapter,
+    SweBenchProAdapter,
     SWEBenchVerifiedAdapter,
     SweBenchVerifiedAdapter,
     TranslatedTaskManifest,
     adapter_for_suite,
     load_benchmark_manifest,
+)
+from .cli_adapters import CliHarnessError, OpenCodeCliAdapter, PiCliAdapter
+from .control_plane_metrics import (
+    AttemptUsage,
+    TurnMetrics,
+    VerificationVerdict,
+    parse_budget_ledger,
+    reconcile_metrics,
 )
 from .cross_harness import (
     CrossHarnessPlan,
@@ -51,6 +67,7 @@ from .cross_harness import (
 from .cross_harness import (
     TaskSpec as CrossTaskSpec,
 )
+from .environment_digest import LiveEnvironmentDigest, hash_workspace_tree
 from .fake_provider import (
     FakeProvider,
     FakeProviderBuilder,
@@ -70,17 +87,27 @@ from .harness_runner import (
     HarnessRunner,
     ModelCapabilitySnapshot,
     RunRequest,
+    apply_metrics_to_record,
     build_evaluation_identity,
     make_default_cost,
 )
 from .mini_swe_adapter import MiniSweAgentAdapter, MiniSweAgentTurn
+from .model_pricing import ModelPrices, compute_cost, resolve_model_prices
+from .task_graders import TaskGraderSpec, acceptance_criteria_for_task, run_task_grader
 from .trajectory_recorder import TrajectoryEvent, TrajectoryRecorder
 
 __all__ = [
     "SWE_BENCH_HARNESS_COMMIT",
+    "SWE_BENCH_PRO_HARNESS_COMMIT",
+    "SWE_BENCH_PRO_REVISION",
     "SWE_BENCH_VERIFIED_REVISION",
+    "TERMINAL_BENCH_DATASET",
+    "TERMINAL_BENCH_DATASET_VERSION",
     "TERMINAL_BENCH_HARBOR_COMMIT",
+    "TERMINAL_BENCH_HARBOR_VERSION",
     "TERMINAL_BENCH_TASK_COMMIT",
+    "TERMINAL_BENCH_TASK_COUNT",
+    "AttemptUsage",
     "BenchmarkAdapter",
     "BenchmarkAdapterError",
     "BenchmarkExecution",
@@ -89,6 +116,7 @@ __all__ = [
     "BenchmarkManifestError",
     "Budgets",
     "ClaudeCodeAdapter",
+    "CliHarnessError",
     "CodexAdapter",
     "CrossHarnessPlan",
     "CrossHarnessResult",
@@ -111,29 +139,46 @@ __all__ = [
     "HarnessSelection",
     "HarnessSpec",
     "LiveBenchmarkHarness",
+    "LiveEnvironmentDigest",
     "LiveHarnessContract",
     "MiniSweAgentAdapter",
     "MiniSweAgentTurn",
     "ModelCapabilitySnapshot",
+    "ModelPrices",
     "OhMyPiAdapter",
+    "OpenCodeCliAdapter",
     "PiAdapter",
+    "PiCliAdapter",
     "RunRequest",
+    "SWEBenchProAdapter",
     "SWEBenchVerifiedAdapter",
     "ScriptStep",
+    "SweBenchProAdapter",
     "SweBenchVerifiedAdapter",
+    "TaskGraderSpec",
     "TerminusFullAdapter",
     "TerminusMinimalAdapter",
     "TrajectoryEvent",
     "TrajectoryRecorder",
     "TranslatedTaskManifest",
+    "TurnMetrics",
+    "VerificationVerdict",
+    "acceptance_criteria_for_task",
     "adapter_for_suite",
+    "apply_metrics_to_record",
     "build_evaluation_identity",
     "canonical_harness_id",
+    "compute_cost",
     "fake_text_provider",
     "fake_tool_call_provider",
     "get_baseline_harness",
+    "hash_workspace_tree",
     "load_benchmark_manifest",
     "make_default_cost",
+    "parse_budget_ledger",
+    "reconcile_metrics",
+    "resolve_model_prices",
     "run_paired_comparison",
+    "run_task_grader",
     "select_harness",
 ]

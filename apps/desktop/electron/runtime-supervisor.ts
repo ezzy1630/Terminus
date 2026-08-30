@@ -18,7 +18,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   CONTROL_EXECUTABLE_PATH,
   CONTROL_MANIFEST_PATH,
@@ -76,6 +76,7 @@ export interface VerifiedRuntimeIdentity {
 export interface StandaloneRuntimeStartInput {
   readonly resourcesPath: string;
   readonly userDataPath: string;
+  readonly userHomePath: string;
   readonly platform: NodeJS.Platform;
   readonly architecture: string;
   readonly expectedVersion: string;
@@ -108,6 +109,9 @@ interface RuntimeStatePaths {
 
 interface RuntimeEnvironmentInput extends RuntimeStatePaths {
   readonly userDataPath: string;
+  readonly userHomePath: string;
+  /** PATH inherited by Electron. Finder launches may supply only system dirs. */
+  readonly inheritedPath?: string | undefined;
   readonly controlToken: string;
   readonly controlInstanceNonce: string;
   readonly bootstrapToken: string;
@@ -285,6 +289,7 @@ export class StandaloneRuntimeSupervisor {
       input.expectedBuildKind,
     );
     if (!isAbsolute(input.userDataPath)) throw new Error("Electron userData path must be absolute");
+    if (!isAbsolute(input.userHomePath)) throw new Error("Electron user home path must be absolute");
     const stateRoot = join(input.userDataPath, "runtime");
     const paths: RuntimeStatePaths = {
       database: join(stateRoot, "control.db"),
@@ -328,6 +333,8 @@ export class StandaloneRuntimeSupervisor {
     const environments = runtimeEnvironments({
       ...this.paths,
       userDataPath: this.input.userDataPath,
+      userHomePath: this.input.userHomePath,
+      inheritedPath: process.env.PATH,
       controlToken: this.connection.controlToken,
       controlInstanceNonce,
       bootstrapToken: randomToken(),
@@ -528,6 +535,7 @@ export function runtimeEnvironments(input: RuntimeEnvironmentInput): RuntimeEnvi
   };
   const kernel: NodeJS.ProcessEnv = {
     ...common(),
+    TERMINUS_USER_HOME: input.userHomePath,
     TERMINUS_DATA: input.kernelData,
     TERMINUS_KERNEL_GRPC_SOCKET: input.kernelSocket,
     TERMINUS_KERNEL_REQUIRE_UDS: "1",
@@ -540,6 +548,12 @@ export function runtimeEnvironments(input: RuntimeEnvironmentInput): RuntimeEnvi
   };
   const control: NodeJS.ProcessEnv = {
     ...common(),
+    // Keep the control process itself isolated under Electron userData, while
+    // giving the kernel tool adapter an explicit, non-secret view of the
+    // invoking user's toolchain. `kernelPublicEnv` translates these into the
+    // payload's HOME/PATH; it never forwards the TERMINUS_* names themselves.
+    TERMINUS_USER_HOME: input.userHomePath,
+    TERMINUS_USER_PATH: userToolchainPath(input.userHomePath, input.inheritedPath),
     DATABASE_URL: `file:${input.database}`,
     TERMINUS_KERNEL_GRPC_SOCKET: input.kernelSocket,
     TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN: input.bootstrapToken,
@@ -553,6 +567,34 @@ export function runtimeEnvironments(input: RuntimeEnvironmentInput): RuntimeEnvi
     control.TERMINUS_LOCAL_PROVIDER_COMMAND_JSON = input.providerCommandJson;
   }
   return { migration, kernel, control };
+}
+
+/**
+ * Deterministic tool search path for a packaged app launched from Finder.
+ *
+ * Finder commonly gives Electron only `/usr/bin:/bin:...`, which makes
+ * user-installed `cargo`, `bun`, `node`, `uv`, and `rg` invisible. Only
+ * absolute entries are admitted. The kernel's Seatbelt profile separately
+ * constrains what any resolved executable may read or mutate.
+ */
+export function userToolchainPath(userHomePath: string, inheritedPath?: string): string {
+  if (!isAbsolute(userHomePath)) throw new Error("Electron user home path must be absolute");
+  const candidates = [
+    join(userHomePath, ".cargo", "bin"),
+    join(userHomePath, ".bun", "bin"),
+    join(userHomePath, ".local", "bin"),
+    join(userHomePath, ".volta", "bin"),
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+    ...(inheritedPath ?? "").split(delimiter),
+  ];
+  return [...new Set(candidates.filter((entry) => isAbsolute(entry)))].join(delimiter);
 }
 
 async function prepareState(

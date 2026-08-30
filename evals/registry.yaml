@@ -6,7 +6,47 @@
 # durable verification evidence.
 schema_version: 1
 registry_id: terminus-evaluation
-updated: "2026-08-26"
+updated: "2026-08-29"
+
+# Price of record for cost accounting, in USD per million tokens.
+#
+# Source order used by `forge_evals.runners.model_pricing.resolve_model_prices`:
+#   1. the control plane's `GET /v1/provider-models` (omits prices entirely for
+#      subscription-billed accounts, which is the ChatGPT/Codex path),
+#   2. this block,
+#   3. `packages/provider-core/src/catalog/models_dev_snapshot.json`.
+#
+# `cached_input_usd_per_mtok` is the cache-READ rate. `reasoning_accounting`
+# is false when the provider already counts reasoning tokens inside
+# `output_tokens` (true for the OpenAI Responses/Codex dialect) — setting it
+# true would double-bill them.
+#
+# Provenance: rates below mirror the committed models.dev snapshot shipped in
+# `packages/provider-core/src/catalog/models_dev_snapshot.json`. A
+# subscription run still records a computed dollar figure so cost-per-verified-
+# success stays comparable against metered baselines; the run record's
+# `cost.provider_reported_usd` carries what the provider actually billed.
+model_pricing:
+  gpt-5.6:
+    input_usd_per_mtok: 2.0
+    output_usd_per_mtok: 12.0
+    cached_input_usd_per_mtok: 0.2
+    reasoning_accounting: false
+  gpt-5.6-sol:
+    input_usd_per_mtok: 4.0
+    output_usd_per_mtok: 20.0
+    cached_input_usd_per_mtok: 0.4
+    reasoning_accounting: false
+  gpt-5.6-terra:
+    input_usd_per_mtok: 2.0
+    output_usd_per_mtok: 12.0
+    cached_input_usd_per_mtok: 0.2
+    reasoning_accounting: false
+  gpt-5.6-luna:
+    input_usd_per_mtok: 0.2
+    output_usd_per_mtok: 1.2
+    cached_input_usd_per_mtok: 0.02
+    reasoning_accounting: false
 
 tiers:
   tier0:
@@ -42,6 +82,12 @@ suites:
     manifest: evals/suites/swe-bench-verified.yaml
     source: pinned_external
     license: MIT
+    default_tier: tier3
+    live_provider_required_for_promotion: true
+  - id: swe-bench-pro
+    manifest: evals/suites/swe-bench-pro.yaml
+    source: pinned_external
+    license: CC-BY-4.0
     default_tier: tier3
     live_provider_required_for_promotion: true
 

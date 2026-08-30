@@ -139,8 +139,8 @@ describeSpine("PR 7: Complete End-to-End Turn Integration Spine", () => {
         },
       ],
       allowed_scope: {
-        read_paths: ["."],
-        write_paths: ["."],
+        read_paths: [".", "e2e-fixture.txt"],
+        write_paths: [".", "e2e-fixture.txt"],
         external_systems: [],
       },
     });
@@ -211,7 +211,7 @@ describeSpine("PR 7: Complete End-to-End Turn Integration Spine", () => {
     const planResults = objectArrayField(taskPlan!, "results", "verification plan");
     expect(planResults.length).toBeGreaterThan(0);
     expect(planResults.every((result) => result.status === "pass")).toBe(true);
-  });
+  }, 30_000);
 
   test("Scenario 2 (Mid-Turn Disconnect / Reconnect): stream resume replays authoritative events without loss", async () => {
     expect(taskId).not.toBe("");

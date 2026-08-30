@@ -270,26 +270,52 @@ function v2Contract(input: {
   };
 }
 
-async function waitForTaskCompletion(id: string): Promise<JsonObject> {
+async function waitForResumedTurnCompletion(
+  taskId: string,
+  turnId: string,
+): Promise<{ readonly task: JsonObject; readonly turn: JsonObject }> {
   const deadline = Date.now() + 30_000;
-  let task = await api("GET", `/v1/tasks/${encodeURIComponent(id)}`);
-  while (task.status !== "COMPLETED") {
+  let task = await api("GET", `/v1/tasks/${encodeURIComponent(taskId)}`);
+  let turn = await api("GET", `/v1/turns/${encodeURIComponent(turnId)}`);
+  while (turn.state !== "COMPLETED") {
     if (
       task.status === "FAILED"
       || task.status === "FAILED_VERIFICATION"
       || task.status === "ABORTED"
       || task.status === "BLOCKED"
+      || turn.state === "FAILED"
+      || turn.state === "ABORTED"
+      || turn.state === "INTERRUPTED"
       || Date.now() >= deadline
     ) {
-      throw new Error(`resumed task did not complete through the local provider: ${JSON.stringify(task)}`);
+      throw new Error(
+        `resumed turn did not complete through the local provider: ${JSON.stringify({ task, turn })}`,
+      );
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
-    task = await api("GET", `/v1/tasks/${encodeURIComponent(id)}`);
+    task = await api("GET", `/v1/tasks/${encodeURIComponent(taskId)}`);
+    turn = await api("GET", `/v1/turns/${encodeURIComponent(turnId)}`);
   }
-  if (task.terminal_reason !== null || task.phase !== "COMPLETE") {
-    throw new Error(`resumed task retained a failure reason: ${JSON.stringify(task)}`);
+  // The two projections are separate HTTP snapshots. The turn can settle
+  // between the task read and the following turn read, leaving `task` with a
+  // truthful but older FINALIZING projection. Read the task once more after
+  // observing terminal turn state so the invariant below compares ordered
+  // snapshots instead of manufacturing an atomic cross-endpoint read.
+  task = await api("GET", `/v1/tasks/${encodeURIComponent(taskId)}`);
+  // This fixture is deliberately read-only. H3 keeps its task active after a
+  // successful conversational turn, but resumption must remove every stale
+  // BLOCKED projection from the previous crashed attempt.
+  if (
+    task.status !== "ACTIVE"
+    || task.phase !== "IMPLEMENT"
+    || task.completed_at !== null
+    || task.terminal_reason !== null
+    || task.active_turn !== null
+    || turn.terminal_error !== null
+  ) {
+    throw new Error(`resumed task retained stale terminal state: ${JSON.stringify({ task, turn })}`);
   }
-  return task;
+  return { task, turn };
 }
 
 const startupReconciledJobs = await Promise.all(
@@ -464,7 +490,7 @@ const resumedTurn = await api("POST", "/v1/turns", {
   user_input: "resume the original checkpointed task after restart",
 });
 const resumedTurnId = nonEmpty(resumedTurn, "id", "resumed turn");
-await waitForTaskCompletion(resumedTaskId);
+await waitForResumedTurnCompletion(resumedTaskId, resumedTurnId);
 
 const afterRecovery = await api("POST", "/v1/system/recover", {});
 if (afterRecovery.integrity_ok !== true) {

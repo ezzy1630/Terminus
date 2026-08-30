@@ -189,6 +189,18 @@ describe("reasoning trace decoding", () => {
     expect(trace?.startedAt).toBe("2026-08-24T01:00:00.000Z");
   });
 
+  test("does not show a tool phase for a zero-call settlement", () => {
+    const [trace] = decodeFeed([
+      ...reasoningEvents(false),
+      toolEvent("turn-0-no-tools", "turn.tool_settlement", { tool_calls: 0 }),
+    ], "2026-08-24T00:59:00.000Z").reasoning;
+
+    expect(trace?.phases.map((phase) => phase.kind)).toEqual([
+      "context_compiling",
+      "provider_running",
+    ]);
+  });
+
   test("leaves the trace open while the turn is still running", () => {
     const [trace] = decodeFeed(reasoningEvents(false), "2026-08-24T00:59:00.000Z").reasoning;
     expect(trace?.endedAt).toBeNull();
@@ -241,6 +253,7 @@ describe("ReasoningTrace", () => {
 
     fireEvent.click(summary);
     expect(summary).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("This model did not expose a reasoning trace.")).toBeInTheDocument();
     expect(screen.getByText("Reading context")).toBeInTheDocument();
     expect(screen.getByText("Thinking")).toBeInTheDocument();
   });
@@ -398,6 +411,17 @@ describe("turn outcome decoding", () => {
     ], TASK_CREATED_AT);
 
     expect(reasoning[0]?.text).toBe("Checked the shell first.");
+  });
+
+  test("streams provider reasoning into the open thought trace", () => {
+    const { reasoning, messages } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("r1", "turn.provider_reasoning_delta", { text: "Checked " }),
+      toolEvent("r2", "turn.provider_reasoning_delta", { text: "the contract." }),
+    ], TASK_CREATED_AT);
+
+    expect(reasoning[0]?.text).toBe("Checked the contract.");
+    expect(messages.every((message) => message.role === "user")).toBe(true);
   });
 
   test("never leaves a completed turn as an empty reply", () => {

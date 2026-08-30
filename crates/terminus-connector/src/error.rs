@@ -22,4 +22,9 @@ pub enum ConnectorError {
     Protocol(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// The caller tore the dispatch down (the gRPC consumer dropped the
+    /// stream, or a cancel was requested). The request may have been
+    /// partially executed upstream, so the receipt stays `DispatchUncertain`.
+    #[error("dispatch cancelled by the caller")]
+    Cancelled,
 }

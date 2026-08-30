@@ -19,6 +19,7 @@ interface CatalogModel {
   readonly inputCost: number;
   readonly cachedInputCost: number;
   readonly outputCost: number;
+  readonly status: string | null;
 }
 
 interface CatalogProvider {
@@ -157,6 +158,9 @@ export function parseModelsDevCatalog(input: unknown): ModelsDevCatalog {
         inputCost: nonNegativeNumberOrZero(cost.input),
         cachedInputCost: nonNegativeNumberOrZero(cost.cache_read),
         outputCost: nonNegativeNumberOrZero(cost.output),
+        status: typeof model.status === "string" && model.status.trim() !== ""
+          ? model.status.trim().toLowerCase()
+          : null,
       });
     }
     providers.set(providerKey, {
@@ -192,6 +196,13 @@ export function discoverGatewayModels(input: {
       rejected.push({
         modelId: available.id,
         reason: `model is absent from the decoded ${providerKey} catalog`,
+      });
+      continue;
+    }
+    if (catalogModel.status === "deprecated") {
+      rejected.push({
+        modelId: available.id,
+        reason: `model is deprecated in the decoded ${providerKey} catalog`,
       });
       continue;
     }

@@ -5,6 +5,7 @@ import type {
   ProviderTransport,
   UsageRecord,
 } from "@terminus/provider-core";
+import { reasoningItemFromOutputItem } from "@terminus/provider-openai";
 import type { GatewayModel, GatewayProtocol } from "./catalog.js";
 
 export interface GatewayHttpRequest {
@@ -211,6 +212,7 @@ async function* normalizeChatCompletions(
   const tools = new Map<number, ToolAccumulator>();
   let finalUsage: UsageRecord | undefined;
   let providerRequestId: string | null = null;
+  let stopReason: string | null = null;
   let done = false;
   for await (const event of events) {
     if (event.data === "[DONE]") {
@@ -219,6 +221,7 @@ async function* normalizeChatCompletions(
         kind: "done",
         ...(finalUsage ? { usage: finalUsage } : {}),
         ...(providerRequestId === null ? {} : { providerRequestId }),
+        ...(stopReason === null ? {} : { stopReason }),
       };
       done = true;
       continue;
@@ -238,6 +241,9 @@ async function* normalizeChatCompletions(
       if (typeof delta.content === "string" && delta.content !== "") {
         yield { kind: "text", text: delta.content };
       }
+      if (typeof delta.reasoning_content === "string" && delta.reasoning_content !== "") {
+        yield { kind: "text", reasoning: delta.reasoning_content };
+      }
       if (Array.isArray(delta.tool_calls)) {
         for (const rawTool of delta.tool_calls) {
           const tool = optionalRecord(rawTool);
@@ -251,7 +257,10 @@ async function* normalizeChatCompletions(
           });
         }
       }
-      if (choice.finish_reason === "tool_calls") yield* flushTools(tools);
+      if (typeof choice.finish_reason === "string" && choice.finish_reason !== "") {
+        stopReason = choice.finish_reason;
+        if (stopReason === "tool_calls") yield* flushTools(tools);
+      }
     }
   }
   if (!done) {
@@ -331,6 +340,16 @@ async function* normalizeResponses(
           argumentsJson: stringOrEmpty(item.arguments) || current.argumentsJson,
         });
         yield* flushTools(tools, index);
+      }
+      // `include: ["reasoning.encrypted_content"]` is honoured here or nowhere:
+      // the ChatGPT-Codex and OpenAI-compatible accounts stream through this
+      // normalizer, and a reasoning item that is not surfaced as a chunk never
+      // reaches the replay ledger, so every later attempt of the turn made the
+      // model re-derive the chain it had already built (and paid for). Emitted
+      // in wire order so the ledger can attach it to the call it preceded.
+      if (item.type === "reasoning") {
+        const reasoningItem = reasoningItemFromOutputItem(item);
+        if (reasoningItem !== null) yield { kind: "text", reasoningItem };
       }
       continue;
     }

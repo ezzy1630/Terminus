@@ -150,6 +150,8 @@ fn required_operation_class(method: &axum::http::Method, path: &str) -> Option<O
         OperationClass::Job
     } else if method == Method::GET && path.starts_with("/v1/artifacts/") {
         OperationClass::ArtifactIngest
+    } else if method == Method::GET && path.starts_with("/v1/process/") {
+        OperationClass::Exec
     } else if method != Method::POST {
         return None;
     } else if path == "/v1/workspaces/register" {
@@ -215,7 +217,7 @@ pub async fn cors_layer(req: Request, next: Next) -> Response {
     headers.insert(
         axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
         axum::http::HeaderValue::from_static(
-            "Authorization, Content-Type, x-capability-token, x-terminus-task-id, x-terminus-session-id, x-terminus-workspace-id, Idempotency-Key, x-trace-id, traceparent, X-Transform-Port",
+            "Authorization, Content-Type, Last-Event-ID, x-capability-token, x-terminus-task-id, x-terminus-session-id, x-terminus-workspace-id, Idempotency-Key, x-trace-id, traceparent, X-Transform-Port",
         ),
     );
     headers.insert(
@@ -242,7 +244,8 @@ pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::constant_time_eq;
+    use super::{constant_time_eq, required_operation_class};
+    use terminus_authz::OperationClass;
 
     #[test]
     fn matches_equal_and_rejects_unequal() {
@@ -256,5 +259,13 @@ mod tests {
         ));
         assert!(!constant_time_eq("short", "longer-token"));
         assert!(constant_time_eq("", ""));
+    }
+
+    #[test]
+    fn process_output_requires_exec_capability() {
+        assert_eq!(
+            required_operation_class(&axum::http::Method::GET, "/v1/process/process-1/output"),
+            Some(OperationClass::Exec)
+        );
     }
 }

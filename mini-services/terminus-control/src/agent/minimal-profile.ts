@@ -5,7 +5,33 @@ import { canonicalJson, computeContentHash } from "@terminus/context-ir";
 /** The permanent narrow standalone control arm (ADR-0025, ADR-0039). */
 export const TERMINUS_MINIMAL_PROFILE_ID = "terminus-minimal" as const;
 export const TERMINUS_MINIMAL_PROFILE_VERSION = "1" as const;
-export const TERMINUS_MINIMAL_TOOL_IDS = ["read", "patch", "exec"] as const;
+/**
+ * The always-on coding surface. Every id here is declared to the provider,
+ * accepted by the dispatch guard, and executable.
+ *
+ * It used to be `["read","patch","exec"]` while `grep`, `glob` and
+ * `exec_poll` were implemented, documented in the system prompt, and named by
+ * the exec tool's own description — and then rejected at dispatch. Three
+ * inventories disagreeing is what this constant now prevents: it must stay
+ * equal to `STANDALONE_ALWAYS_ON_TOOL_IDS` in agent-tools.ts, which
+ * `minimal-profile.test.ts` asserts.
+ */
+export const TERMINUS_MINIMAL_TOOL_IDS = [
+  "read",
+  "patch",
+  "write",
+  "exec",
+  "exec_poll",
+  "grep",
+  "glob",
+] as const;
+
+/** Tools a profile may declare: always-on plus the activatable ones. */
+export const TERMINUS_DECLARABLE_TOOL_IDS = [
+  "capability",
+  ...TERMINUS_MINIMAL_TOOL_IDS,
+  "web_fetch",
+] as const;
 
 export interface TerminusMinimalProfile {
   readonly profileId: typeof TERMINUS_MINIMAL_PROFILE_ID;
@@ -27,11 +53,12 @@ export const terminusMinimalProfileSchema = z.object({
   version: z.literal(TERMINUS_MINIMAL_PROFILE_VERSION),
   providerId: z.string().min(1),
   modelKey: z.string().min(1),
-  toolIds: z.tuple([
-    z.literal("read"),
-    z.literal("patch"),
-    z.literal("exec"),
-  ]),
+  // An array over the declarable set, not a fixed 3-tuple: the tuple made
+  // any profile that shipped the real tool surface fail its own validation.
+  // A provider without tool calling may declare zero tools. An explicit
+  // empty array is different from an omitted array, which still selects the
+  // normal coding tool set.
+  toolIds: z.array(z.enum(TERMINUS_DECLARABLE_TOOL_IDS)),
   routerEnabled: z.literal(false),
   memoryEnabled: z.literal(false),
   workflowEnabled: z.literal(false),
@@ -45,6 +72,12 @@ export interface TerminusMinimalProfileInput {
   readonly modelKey: string;
   /** Safe configuration identity. Do not pass API keys or secret material. */
   readonly configuration?: Readonly<Record<string, unknown>> | undefined;
+  /**
+   * The bounded tool lifecycle this turn may declare to the provider.
+   * Defaults to the always-on set; lazy activation passes capability plus the
+   * workspace set while attempt records retain the exact per-request schema.
+   */
+  readonly toolIds?: readonly string[] | undefined;
 }
 
 /**
@@ -62,12 +95,21 @@ export function createTerminusMinimalProfile(
   const configuration = input.configuration ?? {};
   assertSafeConfiguration(configuration);
   const configurationHash = computeContentHash(canonicalJson(configuration));
+  const declarable = new Set<string>(TERMINUS_DECLARABLE_TOOL_IDS);
+  const requestedToolIds = input.toolIds === undefined
+    ? [...TERMINUS_MINIMAL_TOOL_IDS]
+    : [...new Set(input.toolIds)];
+  const unknownToolId = requestedToolIds.find((toolId) => !declarable.has(toolId));
+  if (unknownToolId !== undefined) {
+    throw new Error(`terminus-minimal cannot declare unknown tool '${unknownToolId}'`);
+  }
   const base = {
     profileId: TERMINUS_MINIMAL_PROFILE_ID,
     version: TERMINUS_MINIMAL_PROFILE_VERSION,
     providerId,
     modelKey,
-    toolIds: [...TERMINUS_MINIMAL_TOOL_IDS],
+    // Sorted so the profile hash is stable across declaration order.
+    toolIds: [...requestedToolIds].sort(),
     routerEnabled: false as const,
     memoryEnabled: false as const,
     workflowEnabled: false as const,

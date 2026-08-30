@@ -9,6 +9,7 @@ import {
   mapLocalCredential,
   providerAccountCapabilityScope,
   providerAccountProviderId,
+  providerAccountWorkspaceAccess,
   providerAccountSecretUri,
   providerAccountWire,
   resolveTurnProvider,
@@ -318,17 +319,23 @@ function fakeDependencies(input: {
   readonly credentials: readonly LocalProviderCredential[];
   readonly store?: FakeStore;
   readonly gateway?: Parameters<typeof mapGatewayConfiguration>[0] | null;
+  readonly opencodeInstalled?: boolean;
+  /** Omitted entirely when absent, so the default (no probe) is exercised. */
+  readonly credentialResolves?: (credentialUri: string) => Promise<boolean>;
 }): { readonly dependencies: Parameters<typeof discoverAndConnectLocalAccounts>[0]; readonly store: FakeStore } {
   const store: FakeStore = input.store ?? { rows: new Map(), imports: [] };
   let counter = 0;
   return {
     store,
     dependencies: {
+      ...(input.credentialResolves === undefined
+        ? {}
+        : { credentialResolves: input.credentialResolves }),
       discoverLocal: async () => ({
         credentials: input.credentials,
         warnings: ["local-auth-store: one entry did not decode"],
         codexInstalled: true,
-        opencodeInstalled: true,
+        opencodeInstalled: input.opencodeInstalled ?? false,
       }),
       importLocal: async ({ source, capabilityUri, fingerprint }) => {
         store.imports.push({ source, capabilityUri, fingerprint });
@@ -363,6 +370,29 @@ function fakeDependencies(input: {
 }
 
 describe("discoverAndConnectLocalAccounts", () => {
+  test("an installed OpenCode creates a ready anonymous free-model account", async () => {
+    const { dependencies, store } = fakeDependencies({
+      credentials: [],
+      opencodeInstalled: true,
+    });
+
+    const result = await discoverAndConnectLocalAccounts(dependencies);
+
+    expect(result.opencodeInstalled).toBe(true);
+    expect(result.accounts).toHaveLength(1);
+    expect(store.rows.get(ZEN_SOURCE)).toMatchObject({
+      source: ZEN_SOURCE,
+      authKind: "anonymous",
+      status: "connected",
+      billing: "free",
+      credentialUri: "",
+      isDefault: true,
+    });
+    expect(store.rows.get(ZEN_SOURCE)?.metadataJson).toBe(
+      JSON.stringify({ connection_origin: "installed_opencode" }),
+    );
+  });
+
   test("imports every routable credential into its own provider-account URI", async () => {
     const { dependencies, store } = fakeDependencies({
       credentials: [
@@ -480,6 +510,80 @@ describe("discoverAndConnectLocalAccounts", () => {
     const result = await discoverAndConnectLocalAccounts(failing);
     expect(result.accounts).toHaveLength(0);
     expect(result.warnings[0]).toContain("kernel unavailable");
+  });
+
+  test("a credential the kernel can no longer resolve is re-imported", async () => {
+    const store: FakeStore = { rows: new Map(), imports: [] };
+    const credentials = [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })];
+    await discoverAndConnectLocalAccounts(
+      fakeDependencies({ credentials, store, credentialResolves: async () => true }).dependencies,
+    );
+    const before = store.rows.get("opencode:cerebras")!;
+    expect(before.credentialUri).not.toBe("");
+    store.imports.length = 0;
+
+    // The kernel's secret backend changed under us: the row still names a URI
+    // and the fingerprint has not rotated, but the bytes are gone.
+    const probed: string[] = [];
+    const recovered = await discoverAndConnectLocalAccounts(
+      fakeDependencies({
+        credentials,
+        store,
+        credentialResolves: async (uri) => {
+          probed.push(uri);
+          return false;
+        },
+      }).dependencies,
+    );
+
+    expect(probed).toEqual([before.credentialUri]);
+    expect(store.imports).toHaveLength(1);
+    expect(store.imports[0]).toMatchObject({
+      capabilityUri: before.credentialUri,
+      fingerprint: "aaaaaaaaaaaa",
+    });
+    expect(recovered.imported).toEqual([before.id]);
+    expect(store.rows.get("opencode:cerebras")?.credentialUri).toBe(before.credentialUri);
+    expect(store.rows.get("opencode:cerebras")?.status).toBe("connected");
+  });
+
+  test("a resolvable credential is not re-imported", async () => {
+    const store: FakeStore = { rows: new Map(), imports: [] };
+    const credentials = [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })];
+    await discoverAndConnectLocalAccounts(
+      fakeDependencies({ credentials, store, credentialResolves: async () => true }).dependencies,
+    );
+    store.imports.length = 0;
+
+    const second = await discoverAndConnectLocalAccounts(
+      fakeDependencies({ credentials, store, credentialResolves: async () => true }).dependencies,
+    );
+    expect(store.imports).toHaveLength(0);
+    expect(second.imported).toHaveLength(0);
+  });
+
+  test("a failing resolution probe fails open rather than re-importing", async () => {
+    const store: FakeStore = { rows: new Map(), imports: [] };
+    const credentials = [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })];
+    await discoverAndConnectLocalAccounts(
+      fakeDependencies({ credentials, store, credentialResolves: async () => true }).dependencies,
+    );
+    store.imports.length = 0;
+
+    const warnings: string[] = [];
+    const { dependencies } = fakeDependencies({
+      credentials,
+      store,
+      credentialResolves: async (): Promise<never> => { throw new Error("kernel restarting"); },
+    });
+    const result = await discoverAndConnectLocalAccounts({
+      ...dependencies,
+      warn: (message) => warnings.push(message),
+    });
+
+    expect(store.imports).toHaveLength(0);
+    expect(result.imported).toHaveLength(0);
+    expect(warnings.join("\n")).toContain("kernel restarting");
   });
 });
 
@@ -613,6 +717,16 @@ describe("account projections", () => {
       });
     expect(providerAccountCapabilityScope({ host: "opencode.ai", credentialUri: "" }))
       .toEqual({ networkDestinations: ["opencode.ai:443"], secretCapabilities: [] });
+  });
+
+  test("only a kernel-discovered OpenCode delegation bypasses manual gateway terms", () => {
+    expect(providerAccountWorkspaceAccess(account({ source: "opencode:cerebras" }), false)).toBe(true);
+    expect(providerAccountWorkspaceAccess(account({ source: ZEN_SOURCE, metadataJson: "{}" }), false)).toBe(false);
+    expect(providerAccountWorkspaceAccess(account({
+      source: ZEN_SOURCE,
+      metadataJson: JSON.stringify({ connection_origin: "installed_opencode" }),
+    }), false)).toBe(true);
+    expect(providerAccountWorkspaceAccess(account({ source: ZEN_SOURCE, metadataJson: "{}" }), true)).toBe(true);
   });
 });
 

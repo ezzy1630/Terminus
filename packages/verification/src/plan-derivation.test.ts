@@ -175,3 +175,56 @@ describe("verification plan derivation", () => {
     expect(parseNodeSpec(criterion?.specification ?? "").predicateType).toBe("schema_compatibility");
   });
 });
+
+describe("node timeout budgets", () => {
+  const criteria = [
+    { id: "tests", statement: "The suite passes", verificationHint: "predicate: unit_test", required: true },
+    { id: "types", statement: "It typechecks", verificationHint: "predicate: static_diagnostics", required: true },
+  ];
+
+  test("test nodes get 600 s and parse/lint nodes 120 s by default", () => {
+    // 30 s made every repository-native recipe (`cargo test`, `bun run test`,
+    // `pytest`) a guaranteed timeout, and those recipes are *required* nodes:
+    // admission was arithmetically impossible.
+    const derivation = deriveVerificationNodes({
+      criteria,
+      objective: "fix the bug",
+      riskClass: "normal",
+      mode: "admission",
+      signals: { changedFiles: ["src/a.ts"] },
+      idSource: idSource(),
+    });
+    const byPredicate = new Map(
+      derivation.nodes.map((node) => [parseNodeSpec(node.specification).predicateType, node.timeout]),
+    );
+    expect(byPredicate.get("unit_test")).toBe(600_000);
+    expect(byPredicate.get("static_diagnostics")).toBe(120_000);
+    expect(byPredicate.get("file_parses") ?? 120_000).toBe(120_000);
+    for (const node of derivation.nodes) expect(node.timeout).toBeGreaterThanOrEqual(120_000);
+  });
+
+  test("the contract budget raises a node above its floor but never below it", () => {
+    const withBudget = (timeoutSeconds: number) => new Map(
+      deriveVerificationNodes({
+        criteria,
+        objective: "fix the bug",
+        riskClass: "normal",
+        mode: "admission",
+        signals: { changedFiles: ["src/a.ts"] },
+        timeoutSeconds,
+        idSource: idSource(),
+      }).nodes.map((node) => [parseNodeSpec(node.specification).predicateType, node.timeout]),
+    );
+    // A generous contract budget raises both classes, each capped by its own
+    // ceiling (30 min tests / 10 min static).
+    const generous = withBudget(3_600);
+    expect(generous.get("unit_test")).toBe(1_800_000);
+    expect(generous.get("static_diagnostics")).toBe(600_000);
+    // A stingy one cannot reintroduce a guaranteed timeout.
+    const stingy = withBudget(30);
+    expect(stingy.get("unit_test")).toBe(600_000);
+    expect(stingy.get("static_diagnostics")).toBe(120_000);
+    // An in-range budget is honoured exactly.
+    expect(withBudget(900).get("unit_test")).toBe(900_000);
+  });
+});

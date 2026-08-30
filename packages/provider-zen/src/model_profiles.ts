@@ -1,6 +1,7 @@
 import { micros, type ModelProfile } from "@terminus/domain";
 import {
   defineProviderProfileBundle,
+  resolveTestedSafeContextTokens,
   type ProviderProfileBundle,
   type ProviderRenderingProfile,
 } from "@terminus/provider-core";
@@ -51,7 +52,10 @@ export function gatewayProfileBundles(
         "reject_incomplete_tool_arguments",
       ],
     };
-    const testedSafeContextTokens = Math.max(1, Math.min(model.contextTokens, 32_768));
+    const testedSafeContextTokens = resolveTestedSafeContextTokens({
+      modelId: model.id,
+      contextTokens: model.contextTokens,
+    });
     const profile: ModelProfile = {
       id: `profile-${model.providerId}-${model.id}-${version}`,
       adapterRef: model.providerId,

@@ -23,10 +23,17 @@ import type {
   UsageRecord,
 } from "@terminus/provider-core";
 import type { Rfc3339Timestamp } from "@terminus/domain";
-import { AnthropicRenderer, decodeAnthropicMessagesStream } from "@terminus/provider-anthropic";
+import { ReasoningReplayLedger } from "@terminus/provider-core";
+import {
+  AnthropicRenderer,
+  anthropicBetaHeader,
+  decodeAnthropicMessagesStream,
+} from "@terminus/provider-anthropic";
 import { OpenAiRenderer, decodeOpenAiStream, renderResponsesRequest } from "@terminus/provider-openai";
 import type {
   ConnectorChunk,
+  ConnectorHeaderMessage,
+  ConnectorReceiptMessage,
   ConnectorService,
   ExecuteConnectorRequest,
   RequestContext,
@@ -41,6 +48,152 @@ export const DIRECT_ENDPOINTS = {
 } as const;
 
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The kernel's pre-body receipt.
+ *
+ * `ExecuteStream` now emits a receipt with `outcome == "head"` before the
+ * first body byte, for error statuses as well as 2xx. It carries the HTTP
+ * status and the lowercased response headers the connector allowlist admits.
+ * It is emphatically *not* terminal: the stream continues after it, and the
+ * real receipt (`accepted` | `rejected_non_retryable` | `dispatch_uncertain`
+ * | `not_dispatched`) still arrives at the end.
+ *
+ * Treating it as terminal would end every successful stream at zero bytes;
+ * ignoring it would keep the old behaviour where `retry-after` only became
+ * readable after the whole response had already been waited out.
+ */
+export const HEAD_RECEIPT_OUTCOME = "head";
+
+export function isHeadReceipt(
+  receipt: { readonly outcome?: string | undefined } | undefined,
+): boolean {
+  return (receipt?.outcome ?? "") === HEAD_RECEIPT_OUTCOME;
+}
+
+/** Response-header value cap; the kernel bounds these, this is defence in depth. */
+const MAX_HEADER_VALUE_CHARS = 4096;
+
+/**
+ * The receipt's response headers as a lowercased map.
+ *
+ * The kernel already lowercases and bounds them (≤32 headers, ≤4096 bytes
+ * each); doing it again here means a consumer never has to care which side of
+ * the boundary normalised what.
+ */
+export function responseHeaderMap(
+  receipt: { readonly responseHeaders?: readonly ConnectorHeaderMessage[] | undefined } | undefined,
+): Readonly<Record<string, string>> {
+  const collected: Record<string, string> = {};
+  for (const header of receipt?.responseHeaders ?? []) {
+    if (typeof header.name !== "string" || typeof header.value !== "string") continue;
+    collected[header.name.toLowerCase()] = header.value.slice(0, MAX_HEADER_VALUE_CHARS);
+  }
+  return collected;
+}
+
+/**
+ * What one dispatch observed, filled by the transport and read by the caller.
+ *
+ * Time-to-first-token has to be measured where the bytes arrive. Measuring it
+ * at the head frame would report the kernel's own round trip — a number near
+ * zero that says nothing about the provider — and measuring it at the first
+ * *decoded* chunk skips whatever leading SSE events produced no token, so the
+ * two disagree by however long the provider spent on `response.created`.
+ * The first body frame is the honest boundary, and only the transport sees it.
+ */
+export interface ConnectorStreamTelemetry {
+  /** HTTP status from the head frame, or the terminal receipt on old kernels. */
+  status: number | null;
+  /** Lowercased response headers from the head frame. */
+  responseHeaders: Readonly<Record<string, string>>;
+  /** `Date.now()` when the request was handed to the kernel. */
+  dispatchedAtMs: number | null;
+  /** `Date.now()` at the first body frame; null when none ever arrived. */
+  firstBodyAtMs: number | null;
+}
+
+export function createStreamTelemetry(): ConnectorStreamTelemetry {
+  return { status: null, responseHeaders: {}, dispatchedAtMs: null, firstBodyAtMs: null };
+}
+
+/** Dispatch → first body frame, in milliseconds. Null when never measured. */
+export function timeToFirstBodyMs(telemetry: ConnectorStreamTelemetry | undefined): number | null {
+  if (telemetry?.dispatchedAtMs == null || telemetry.firstBodyAtMs === null) return null;
+  return Math.max(0, telemetry.firstBodyAtMs - telemetry.dispatchedAtMs);
+}
+
+/**
+ * Turn teardown, as an error the loop already knows how to read.
+ *
+ * Cancelling the client side of the RPC is what tells the kernel to abort the
+ * upstream request, and the kernel answers by ending the stream with gRPC
+ * `CANCELLED`. Both directions used to surface as a bare `Error`, which
+ * `classifyLoopError` files under `internal`/`unknown` — so a turn the user
+ * interrupted was reported as a crash. `CancelledError`/`CANCELLED` is the
+ * shape that classifier already maps to the interrupted outcome.
+ */
+export class ConnectorCancelledError extends Error {
+  readonly code = "CANCELLED";
+  constructor(message = "provider request was cancelled") {
+    super(message);
+    this.name = "CancelledError";
+  }
+}
+
+/** gRPC status 1, however grpc-js chose to surface it. */
+export function isGrpcCancelled(error: unknown): boolean {
+  if (error instanceof ConnectorCancelledError) return true;
+  if (typeof error !== "object" || error === null) return false;
+  const record = error as { readonly code?: unknown; readonly message?: unknown };
+  if (record.code === 1 || record.code === "CANCELLED") return true;
+  return typeof record.message === "string" && /\b1 CANCELLED\b/.test(record.message);
+}
+
+/**
+ * Re-file a cancellation; anything else passes through untouched.
+ *
+ * An error that is already a `ConnectorCancelledError` is returned as-is: it
+ * was raised at the abort site and its message names where teardown happened,
+ * which a generic re-wrap would throw away.
+ */
+export function asCancellation(error: unknown, message: string): unknown {
+  if (error instanceof ConnectorCancelledError) return error;
+  return isGrpcCancelled(error) ? new ConnectorCancelledError(message) : error;
+}
+
+/**
+ * The `Retry-After` the provider sent, in milliseconds.
+ *
+ * Connector receipts carry the response headers the connector descriptor's
+ * allowlist admitted, `retry-after` among them. Every throw site below reads
+ * it, because the alternative — the state this replaced — was to discard the
+ * one number the provider gave us about when to come back and guess instead.
+ * Both header forms are accepted: delta-seconds and an HTTP date.
+ */
+export function retryAfterMsFromReceipt(
+  receipt: { readonly responseHeaders?: readonly ConnectorHeaderMessage[] | undefined } | undefined,
+  now: number = Date.now(),
+): number | null {
+  for (const header of receipt?.responseHeaders ?? []) {
+    if (header.name.toLowerCase() !== "retry-after") continue;
+    const raw = header.value.trim();
+    if (raw === "") continue;
+    if (/^\d+(?:\.\d+)?$/.test(raw)) return Math.ceil(Number.parseFloat(raw) * 1_000);
+    const at = Date.parse(raw);
+    if (Number.isFinite(at)) return Math.max(0, at - now);
+  }
+  return null;
+}
+
+/** The structured init for a non-2xx receipt, hint included. */
+export function transportErrorInit(
+  receipt: ConnectorReceiptMessage | undefined,
+  status: number | null,
+): { readonly status: number | null; readonly retryAfterMs?: number } {
+  const retryAfterMs = retryAfterMsFromReceipt(receipt);
+  return { status, ...(retryAfterMs === null ? {} : { retryAfterMs }) };
+}
 
 export function directEndpoint(configuration: DirectProviderConfiguration) {
   switch (configuration.vendor) {
@@ -57,6 +210,8 @@ export function directNetworkDestinations(): readonly string[] {
 }
 
 export interface DirectHttpRequest {
+  /** Filled in by the transport: head-frame status/headers and first-body time. */
+  readonly telemetry?: ConnectorStreamTelemetry | undefined;
   readonly method: "POST";
   readonly host: string;
   readonly port: number;
@@ -127,19 +282,50 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
     let fallbackToUnary = false;
     let observedStream = false;
     let streamed = false;
+    let headValidated = false;
+    const telemetry = input.telemetry;
+    if (telemetry !== undefined) telemetry.dispatchedAtMs = Date.now();
     try {
       for await (const chunk of this.eachChunk(request, input.signal)) {
         observedStream = true;
-        streamed = true;
-        if (chunk.bytes !== undefined) {
+        if (chunk.bytes !== undefined && chunk.bytes.byteLength > 0) {
+          // Only a non-empty body frame counts as "the provider answered".
+          // Receipts used to set this too, which made the empty-stream guard
+          // below dead code; the contract also promises no zero-length frame,
+          // and forwarding one would end an SSE decoder's event early.
+          if (!streamed && telemetry !== undefined) telemetry.firstBodyAtMs = Date.now();
+          streamed = true;
           yield chunk.bytes;
         } else if (chunk.receipt !== undefined) {
           const status = chunk.receipt.statusCode;
           const outcomeText = chunk.receipt.outcome ?? "";
-          if (status === undefined || status < 200 || status > 299) {
+          if (isHeadReceipt(chunk.receipt)) {
+            // Status and `retry-after` are readable before the body, which is
+            // the whole point of the head frame: a 429 no longer has to be
+            // waited out before its backoff hint can be read.
+            headValidated = true;
+            if (telemetry !== undefined) {
+              telemetry.status = status ?? null;
+              telemetry.responseHeaders = responseHeaderMap(chunk.receipt);
+            }
+            if (status === undefined || status < 200 || status > 299) {
+              throw new ProviderTransportError(
+                `direct provider returned HTTP ${status ?? 0}`,
+                transportErrorInit(chunk.receipt, status ?? null),
+              );
+            }
+            continue;
+          }
+          // Terminal receipt. A kernel that already sent a head frame has had
+          // its status checked; one that never did (pre-head kernels) is
+          // checked here, as before.
+          if (telemetry !== undefined && telemetry.status === null && status !== undefined) {
+            telemetry.status = status;
+          }
+          if (!headValidated && (status === undefined || status < 200 || status > 299)) {
             throw new ProviderTransportError(
               `direct provider returned HTTP ${status ?? 0}${outcomeText.length > 0 ? ` (${outcomeText})` : ""}`,
-              { status: status ?? null },
+              transportErrorInit(chunk.receipt, status ?? null),
             );
           }
         }
@@ -149,7 +335,7 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
         // Legacy kernel: buffered dispatch below.
         fallbackToUnary = true;
       } else {
-        throw error;
+        throw asCancellation(error, "direct provider request was cancelled");
       }
     }
     // ExecuteStream already performed the request when it produced a receipt
@@ -170,11 +356,9 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
       throw new Error(`direct provider dispatch did not settle: ${response.receipt?.outcome ?? "missing receipt"}`);
     }
     if (status < 200 || status > 299) {
-      // Connector receipts do not carry response headers yet; retry pacing
-      // falls back to exponential backoff with jitter in provider-retry.ts.
       throw new ProviderTransportError(
         `direct provider returned HTTP ${status}${providerErrorSuffix(response.body)}`,
-        { status },
+        transportErrorInit(response.receipt, status),
       );
     }
     yield* splitSseChunks(response.body);
@@ -202,6 +386,8 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
     /** Opaque secret capability binding; required for vendor connectors. */
     readonly credentialBindingId: string;
     readonly signal?: AbortSignal | null;
+    /** Filled in by the transport: head-frame status/headers, first-body time. */
+    readonly telemetry?: ConnectorStreamTelemetry | undefined;
   }): AsyncIterable<Uint8Array> {
     const effectId = randomUUID();
     assertNotAborted(input.signal, "direct provider request was aborted");
@@ -239,23 +425,47 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
         body: new TextEncoder().encode(input.body),
       },
     };
+    let sawReceipt: ConnectorReceiptMessage | undefined;
     let sawReceiptStatus: number | null = null;
+    let headValidated = false;
     let fallbackToUnary = false;
     let observedStream = false;
     let streamed = false;
+    const telemetry = input.telemetry;
+    if (telemetry !== undefined) telemetry.dispatchedAtMs = Date.now();
     try {
       for await (const chunk of this.eachChunk(request, input.signal)) {
         observedStream = true;
-        if (chunk.bytes !== undefined) {
+        if (chunk.bytes !== undefined && chunk.bytes.byteLength > 0) {
+          if (!streamed && telemetry !== undefined) telemetry.firstBodyAtMs = Date.now();
           streamed = true;
           yield chunk.bytes;
         } else if (chunk.receipt !== undefined) {
+          if (isHeadReceipt(chunk.receipt)) {
+            const status = chunk.receipt.statusCode;
+            headValidated = true;
+            if (telemetry !== undefined) {
+              telemetry.status = status ?? null;
+              telemetry.responseHeaders = responseHeaderMap(chunk.receipt);
+            }
+            if (status === undefined || status < 200 || status > 299) {
+              throw new ProviderTransportError(
+                `direct provider returned HTTP ${status ?? 0}`,
+                transportErrorInit(chunk.receipt, status ?? null),
+              );
+            }
+            continue;
+          }
+          sawReceipt = chunk.receipt;
           sawReceiptStatus = chunk.receipt.statusCode ?? null;
+          if (telemetry !== undefined && telemetry.status === null && sawReceiptStatus !== null) {
+            telemetry.status = sawReceiptStatus;
+          }
         }
       }
     } catch (error) {
       if (isUnimplemented(error) && !observedStream) fallbackToUnary = true;
-      else throw error;
+      else throw asCancellation(error, "direct provider request was cancelled");
     }
     if (fallbackToUnary) {
       // Legacy kernel: ExecuteStream was not implemented, so the request has
@@ -269,7 +479,7 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
       if (status === undefined || status < 200 || status > 299) {
         throw new ProviderTransportError(
           `direct provider returned HTTP ${status ?? 0}${providerErrorSuffix(response.body)}`,
-          { status: status ?? null },
+          transportErrorInit(response.receipt, status ?? null),
         );
       }
       yield* splitSseChunks(response.body);
@@ -277,9 +487,16 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
     }
     if (!observedStream) throw new Error("direct provider stream ended without a response");
     if (!streamed) throw new Error("direct provider stream settled without response bytes");
-    if (sawReceiptStatus === null) throw new Error("direct provider stream ended without a receipt");
-    if (sawReceiptStatus < 200 || sawReceiptStatus > 299) {
-      throw new ProviderTransportError(`direct provider returned HTTP ${sawReceiptStatus}`, { status: sawReceiptStatus });
+    // A head frame already carried the status, so a terminal receipt without
+    // one is no longer a missing-status failure.
+    if (sawReceiptStatus === null && !headValidated) {
+      throw new Error("direct provider stream ended without a receipt");
+    }
+    if (sawReceiptStatus !== null && (sawReceiptStatus < 200 || sawReceiptStatus > 299)) {
+      throw new ProviderTransportError(
+        `direct provider returned HTTP ${sawReceiptStatus}`,
+        transportErrorInit(sawReceipt, sawReceiptStatus),
+      );
     }
   }
 }
@@ -293,7 +510,7 @@ function connectorIdForRawPath(host: string, path: string): string {
 }
 
 function assertNotAborted(signal: AbortSignal | null | undefined, message: string): void {
-  if (signal?.aborted === true) throw new Error(message);
+  if (signal?.aborted === true) throw new ConnectorCancelledError(message);
 }
 
 function withAbortSignal<T>(
@@ -301,12 +518,12 @@ function withAbortSignal<T>(
   signal: AbortSignal | null | undefined,
   message: string,
 ): Promise<T> {
-  if (signal?.aborted === true) return Promise.reject(new Error(message));
+  if (signal?.aborted === true) return Promise.reject(new ConnectorCancelledError(message));
   if (signal === null || signal === undefined) return promise;
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => {
       signal.removeEventListener("abort", onAbort);
-      reject(new Error(message));
+      reject(new ConnectorCancelledError(message));
     };
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(
@@ -316,7 +533,7 @@ function withAbortSignal<T>(
       },
       (error: unknown) => {
         signal.removeEventListener("abort", onAbort);
-        reject(error);
+        reject(asCancellation(error, message));
       },
     );
   });
@@ -344,10 +561,16 @@ export function observableToAsyncIterable<T>(
       };
       const onAbort = (): void => {
         if (done) return;
-        failure = new Error(abortMessage);
+        // A shape `classifyLoopError` files as `cancelled`, so an interrupted
+        // turn is reported as interrupted rather than as an internal fault.
+        failure = new ConnectorCancelledError(abortMessage);
         done = true;
         queue.length = 0;
+        // Unsubscribing is what actually cancels the gRPC call, which is what
+        // tells the kernel to abort the upstream request. Without it the
+        // provider keeps generating (and billing) after the user has stopped.
         subscription?.unsubscribe();
+        signal?.removeEventListener("abort", onAbort);
         notify();
       };
       if (signal?.aborted === true) {
@@ -360,7 +583,9 @@ export function observableToAsyncIterable<T>(
           },
           error: (err: unknown) => {
             if (done) return;
-            failure = err;
+            // The kernel ends an aborted stream with gRPC CANCELLED; that is
+            // the teardown this client asked for, not a provider failure.
+            failure = asCancellation(err, abortMessage);
             done = true;
             signal?.removeEventListener("abort", onAbort);
             notify();
@@ -458,6 +683,20 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * `anthropic-beta`, or nothing at all.
+ *
+ * The header name is `anthropic-beta` exactly — that is the name the kernel
+ * connector allowlist admits, and a header the allowlist does not know is
+ * dropped rather than sent.
+ */
+function anthropicBetaHeaders(
+  body: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, string>> {
+  const value = anthropicBetaHeader(body);
+  return value === null ? {} : { "anthropic-beta": value };
+}
+
 export interface ExecuteDirectProviderInput {
   readonly rendered: RenderedProviderRequest;
   readonly configuration: DirectProviderConfiguration;
@@ -487,6 +726,11 @@ export async function executeDirectProviderRequest(
     "content-type": "application/json",
     accept: "text/event-stream",
     ...(configuration.vendor === "anthropic" ? { "anthropic-version": "2023-06-01" } : {}),
+    // Only when a field in this exact body needs one. Adaptive thinking,
+    // `output_config.effort`, interleaved thinking and strict tools are all
+    // GA; announcing a beta the request does not use opts the call into that
+    // beta's semantics for nothing.
+    ...(configuration.vendor === "anthropic" ? anthropicBetaHeaders(bodyObject) : {}),
   };
   const chunks: ProviderResponseChunk[] = [];
   const events = client.stream({
@@ -535,24 +779,65 @@ export async function executeDirectProviderRequest(
  * Chat Completions map straight onto the vendor renderer; the OpenAI
  * Responses API reuses the chat rendering converted to Responses input items.
  */
+export interface DirectRendererOptions {
+  readonly reasoningEffort?: ReasoningEffort | null | undefined;
+  /** Stable cache-routing key for the OpenAI-shaped protocols. */
+  readonly promptCacheKey?: string | null | undefined;
+  /** `text.verbosity` for the Responses protocol; `low` by default. */
+  readonly textVerbosity?: "low" | "medium" | "high" | undefined;
+  /**
+   * Reasoning chain to replay. Supplying a pre-seeded ledger is how a turn
+   * resumed after a restart still leads each replayed call with the reasoning
+   * that produced it; without one the renderer starts empty.
+   */
+  readonly reasoningReplay?: ReasoningReplayLedger | undefined;
+}
+
 export function createDirectRenderer(
   configuration: DirectProviderConfiguration,
-  options: { readonly reasoningEffort?: ReasoningEffort | null | undefined } = {},
+  options: DirectRendererOptions = {},
 ): ProviderRenderer {
-  // The Anthropic Messages renderer has no reasoning-depth control on this
-  // path; the effort is deliberately ignored rather than silently mapped.
-  if (configuration.vendor === "anthropic") return new AnthropicRenderer();
-  const rendererOptions = { reasoningEffort: options.reasoningEffort ?? null };
+  const reasoningEffort = options.reasoningEffort ?? null;
+  // Anthropic renders the depth as `output_config.effort`. It used to be
+  // dropped here — the comment claimed the path had no depth control, which
+  // stopped being true when `budget_tokens` was replaced by `effort`, and the
+  // effect was that a user's choice of Max on a direct Anthropic turn reached
+  // nothing at all.
+  const reasoningReplay = options.reasoningReplay ?? new ReasoningReplayLedger();
+  if (configuration.vendor === "anthropic") return new AnthropicRenderer({ reasoningEffort, reasoningReplay });
+  const rendererOptions = {
+    reasoningEffort,
+    ...(options.promptCacheKey === undefined || options.promptCacheKey === null
+      ? {}
+      : { promptCacheKey: options.promptCacheKey }),
+    ...(options.textVerbosity === undefined ? {} : { textVerbosity: options.textVerbosity }),
+  };
   if (configuration.protocol === "chat_completions") return new OpenAiRenderer(rendererOptions);
-  const delegate = new OpenAiRenderer(rendererOptions);
+  // One ledger for the life of this renderer: the control plane builds it once
+  // per turn, so an encrypted reasoning item captured on one attempt is
+  // replayed before its own tool call on the next — and a seeded one carries
+  // the calls made before a restart.
+  const responsesOptions = { ...rendererOptions, reasoningReplay };
+  const delegate = new OpenAiRenderer(responsesOptions);
   return {
     providerId: delegate.providerId,
     version: delegate.version,
     compatibility: (input: RenderCompatibilityInput): CompatibilityResult => delegate.compatibility(input),
     render: async (input: CanonicalRenderInput): Promise<RenderedProviderRequest> =>
-      renderResponsesRequest(input, rendererOptions),
+      renderResponsesRequest(input, responsesOptions),
     projectResponse: (response: ProviderResponse) => delegate.projectResponse(response),
     extractUsage: (response: ProviderResponse): UsageRecord => delegate.extractUsage(response),
-    continuationPolicy: (input: ContinuationInput): ContinuationDecision => delegate.continuationPolicy(input),
+    // `store: false` leaves the endpoint nothing to continue from, so this
+    // path never claims a native continuation; the prefix and the reasoning
+    // items are replayed instead.
+    continuationPolicy: (input: ContinuationInput): ContinuationDecision => ({
+      canContinue: !input.stablePrefixHashChanged,
+      reason: input.stablePrefixHashChanged
+        ? "OpenAI Responses replays the prefix and the stable prefix changed"
+        : "OpenAI Responses is stateless (store: false); the client replays the prefix",
+      requiresRerender: input.stablePrefixHashChanged,
+      requiresUserConsent: false,
+      newContinuationId: null,
+    }),
   };
 }

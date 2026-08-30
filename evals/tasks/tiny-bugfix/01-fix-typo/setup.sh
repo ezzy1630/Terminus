@@ -52,4 +52,23 @@ def test_typo_fixed_in_source():
     assert re.search(r"receives?\b", text), "no correct spelling 'receive' found"
 PY
 
+# The task tells the agent to run `pytest -q`, so pytest must exist in the
+# workspace the agent actually gets: the sandbox inherits the host PATH plus
+# the workspace's own `.venv/bin`, never a global site-packages. Provisioned
+# here (host side, before the agent starts) with uv's wheel cache, and kept
+# out of the fixture commit and the graded diff.
+cat > .gitignore <<'GI'
+.venv/
+__pycache__/
+.pytest_cache/
+GI
+# A pytest configuration file is the layout signal Terminus's verification
+# planner keys on for repositories without a pyproject.
+cat > pytest.ini <<'INI'
+[pytest]
+testpaths = .
+INI
+uv venv -q .venv
+uv pip install -q --python .venv/bin/python pytest
+
 echo "setup complete"

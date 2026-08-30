@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { defaultCriteriaNodes, resolvePredicateCommand } from "./verification-runtime.js";
+import {
+  defaultCriteriaNodes,
+  isNotAGitWorkspace,
+  resolveKernelEnvironmentDigest,
+  resolvePredicateCommand,
+  WORKSPACE_TREE_HASH_SCRIPT,
+} from "./verification-runtime.js";
 import type { VerificationRunnerCatalog } from "./agent/repository-signals.js";
 
 describe("verification runtime plan nodes", () => {
@@ -107,5 +113,65 @@ describe("H3 predicate command derivation", () => {
   test("governed UI verification is skipped, not run as a shell command", () => {
     const resolved = resolvePredicateCommand("ui_e2e", "terminus-predicate", ["ui_e2e"], {});
     expect(resolved.kind).toBe("skipped");
+  });
+});
+
+describe("F1/F6 verification budgets and environment binding", () => {
+  test("plan nodes carry runnable budgets, and the contract can raise them", () => {
+    const criteria = [{ id: "tests", statement: "the suite passes", verificationHint: "predicate: unit_test", required: true }];
+    const floors = defaultCriteriaNodes(criteria);
+    for (const node of floors) expect(node.timeout).toBeGreaterThanOrEqual(120_000);
+    expect(floors.some((node) => node.timeout >= 600_000)).toBe(true);
+    const raised = defaultCriteriaNodes(criteria, { timeoutSeconds: 1_200 });
+    expect(raised.some((node) => node.timeout === 1_200_000)).toBe(true);
+    // A short contract budget cannot restore a guaranteed timeout.
+    const clamped = defaultCriteriaNodes(criteria, { timeoutSeconds: 30 });
+    for (const node of clamped) expect(node.timeout).toBeGreaterThanOrEqual(120_000);
+  });
+
+  test("the environment digest ignores which kernel process answered", async () => {
+    // Including instanceId meant any kernel restart during VERIFYING
+    // permanently poisoned that task's plan.
+    const digestFor = async (instanceId: string): Promise<string> =>
+      resolveKernelEnvironmentDigest({
+        info: {
+          GetInfo: () => ({
+            protocolVersion: "1",
+            buildRevision: "abc123",
+            instanceId,
+            supportedBackends: ["seatbelt"],
+            supportedServices: ["files", "process"],
+          }),
+        },
+      } as unknown as Parameters<typeof resolveKernelEnvironmentDigest>[0]);
+    expect(await digestFor("instance-a")).toBe(await digestFor("instance-b"));
+    // A genuinely different environment still produces a different digest.
+    const otherBuild = await resolveKernelEnvironmentDigest({
+      info: {
+        GetInfo: () => ({
+          protocolVersion: "1",
+          buildRevision: "def456",
+          instanceId: "instance-a",
+          supportedBackends: ["seatbelt"],
+          supportedServices: ["files", "process"],
+        }),
+      },
+    } as unknown as Parameters<typeof resolveKernelEnvironmentDigest>[0]);
+    expect(await digestFor("instance-a")).not.toBe(otherBuild);
+  });
+});
+
+describe("resolveWorkspaceRevision fallback", () => {
+  test("recognises the git failure text that means 'no repository here'", () => {
+    expect(isNotAGitWorkspace("fatal: not a git repository (or any parent up to mount point /Volumes)")).toBe(true);
+    expect(isNotAGitWorkspace("fatal: this operation must be run in a work tree")).toBe(true);
+    expect(isNotAGitWorkspace("fatal: ambiguous argument 'HEAD': unknown revision")).toBe(false);
+    expect(isNotAGitWorkspace("")).toBe(false);
+  });
+
+  test("the tree hash script excludes .git and orders deterministically", () => {
+    expect(WORKSPACE_TREE_HASH_SCRIPT).toContain('-not -path "./.git/*"');
+    expect(WORKSPACE_TREE_HASH_SCRIPT).toContain("LC_ALL=C sort -z");
+    expect(WORKSPACE_TREE_HASH_SCRIPT).toContain("shasum -a 256");
   });
 });

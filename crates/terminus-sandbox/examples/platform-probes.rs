@@ -25,6 +25,13 @@ fn main() {
         Platform::Windows
     };
 
+    // Probes need a REAL workspace directory, not the OS temp dir itself:
+    // the workspace root is writable under every profile, and the escape
+    // probe targets its parent.
+    let workspace_root =
+        std::env::temp_dir().join(format!("terminus-probe-workspace-{}", std::process::id()));
+    std::fs::create_dir_all(&workspace_root).expect("probe workspace");
+
     let mut backends: Vec<Arc<dyn SandboxBackend>> = vec![Arc::new(LocalRestrictiveBackend::new())];
 
     #[cfg(target_os = "linux")]
@@ -39,7 +46,7 @@ fn main() {
         if macos.is_seatbelt_available() {
             backends.insert(
                 0,
-                Arc::new(macos.with_workspace_root(std::env::temp_dir()))
+                Arc::new(macos.with_workspace_root(workspace_root.clone()))
                     as Arc<dyn SandboxBackend>,
             );
         }
@@ -50,7 +57,7 @@ fn main() {
     // rather than fabricating results.
     let mut all_probes = Vec::new();
     for backend in &backends {
-        let probes = run_probes(backend.as_ref(), &std::env::temp_dir());
+        let probes = run_probes(backend.as_ref(), &workspace_root);
         println!(
             "backend {}: {}",
             backend.id(),

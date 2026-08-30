@@ -269,18 +269,36 @@ pub fn plan_mounts(
     // here (the kernel materializes them); anything remaining must be an
     // absolute host path or it is ignored. The host root itself ("/") is
     // NEVER bound — that legacy rule means "no ambient root".
-    for rule in &profile.filesystem {
-        if !rule.path.starts_with('/') || rule.path == "/" {
-            continue;
-        }
+    //
+    // Rules are applied least-specific-first so a nested read-only or Deny
+    // rule shadows the writable parent it narrows (bubblewrap applies
+    // mounts in argv order and later mounts win).
+    let mut rules: Vec<&terminus_sandbox::profile::FilesystemRule> = profile
+        .filesystem
+        .iter()
+        .filter(|rule| rule.path.starts_with('/') && rule.path != "/")
+        .collect();
+    rules.sort_by_key(|rule| Path::new(&rule.path).components().count());
+    for rule in rules {
         match rule.access {
             FilesystemAccess::ReadOnly => {
+                // bwrap ABORTS when a bind source does not exist. A rule for
+                // a path the workspace happens not to have (`.git/config` in
+                // a non-git checkout) must therefore be dropped, not
+                // planned — this is the defect the phantom `active-worktree`
+                // rule used to trigger on every single exec.
+                if !Path::new(&rule.path).exists() {
+                    continue;
+                }
                 plan.mounts
                     .push(MountOp::RoBind(rule.path.clone(), rule.path.clone()));
                 plan.workspace_ro_binds
                     .push((rule.path.clone(), rule.path.clone()));
             }
             FilesystemAccess::ReadWrite => {
+                if !Path::new(&rule.path).exists() {
+                    continue;
+                }
                 plan.mounts
                     .push(MountOp::Bind(rule.path.clone(), rule.path.clone()));
                 plan.workspace_rw_binds
@@ -288,8 +306,9 @@ pub fn plan_mounts(
             }
             FilesystemAccess::Deny => {
                 // Shadowed AFTER every bind below so a Deny path nested
-                // inside a bound parent (workspace/.git) is hidden even
-                // though the parent is mounted.
+                // inside a bound parent (workspace/.terminus) is hidden even
+                // though the parent is mounted. Emitted unconditionally: a
+                // tmpfs needs no source, and bwrap creates the mountpoint.
                 plan.deny_overlays.push(rule.path.clone());
             }
         }
@@ -347,8 +366,16 @@ pub fn plan_proven_features(plan: &MountPlan) -> Vec<terminus_sandbox::report::E
     if plan.minimal_root && !plan.workspace_rw_binds.is_empty() {
         features.push(EnforcementFeature::FilesystemIsolation);
     }
-    let git_protected = plan.deny_overlays.iter().any(|p| p.ends_with("/.git"));
-    if plan.minimal_root && git_protected {
+    // Git protection is either "the whole `.git` is hidden" (a Deny overlay)
+    // or "the execution-vector files inside `.git` are read-only" — the
+    // shape the default profile ships, so `git status`/`git add` keep
+    // working while `.git/hooks` and `.git/config` cannot be rewritten.
+    let git_hidden = plan.deny_overlays.iter().any(|p| p.ends_with("/.git"));
+    let git_write_protected = plan
+        .workspace_ro_binds
+        .iter()
+        .any(|(source, _)| source.ends_with("/.git/config") || source.ends_with("/.git/hooks"));
+    if plan.minimal_root && (git_hidden || git_write_protected) {
         features.push(EnforcementFeature::ProtectedGit);
     }
     if plan.clears_environment && plan.synthetic_home.is_some() {

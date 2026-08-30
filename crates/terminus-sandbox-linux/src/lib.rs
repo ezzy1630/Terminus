@@ -70,15 +70,19 @@ fn shared_empty_root() -> Option<&'static Path> {
 /// Reference materialization used for backend-wide feature claims. The
 /// enforcement report describes backend capability, so it plans against a
 /// real temporary workspace laid out like the kernel emits after
-/// `materialize_workspace_profile`: exact worktree bind plus `.git`,
-/// `.terminus`, and credentials Deny overlays. Claims stay derived from the
-/// resulting [`MountPlan`] rather than asserted.
+/// `materialize_workspace_profile`: the workspace root bound READ-WRITE,
+/// `.git/hooks` and `.git/config` bound read-only (so `git status` and
+/// `git commit` still work while the two execution-vector paths cannot be
+/// rewritten), and `.terminus*`/`credentials` shadowed by Deny overlays.
+/// Claims stay derived from the resulting [`MountPlan`] rather than
+/// asserted.
 fn reference_plan(layout: &HostLayout) -> Option<MountPlan> {
     static REF: OnceLock<PathBuf> = OnceLock::new();
     let ws = REF.get_or_init(|| {
         let dir =
             std::env::temp_dir().join(format!("terminus-sandbox-ref-ws-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(dir.join(".git"));
+        let _ = std::fs::create_dir_all(dir.join(".git/hooks"));
+        let _ = std::fs::write(dir.join(".git/config"), "[core]\n");
         let _ = std::fs::create_dir_all(dir.join(".terminus"));
         let _ = std::fs::create_dir_all(dir.join("credentials"));
         dir
@@ -92,8 +96,12 @@ fn reference_plan(layout: &HostLayout) -> Option<MountPlan> {
                 access: terminus_sandbox::profile::FilesystemAccess::ReadWrite,
             },
             FilesystemRule {
-                path: ws.join(".git").display().to_string(),
-                access: terminus_sandbox::profile::FilesystemAccess::Deny,
+                path: ws.join(".git/hooks").display().to_string(),
+                access: terminus_sandbox::profile::FilesystemAccess::ReadOnly,
+            },
+            FilesystemRule {
+                path: ws.join(".git/config").display().to_string(),
+                access: terminus_sandbox::profile::FilesystemAccess::ReadOnly,
             },
             FilesystemRule {
                 path: ws.join(".terminus").display().to_string(),
@@ -450,7 +458,8 @@ impl SandboxBackend for LinuxSandboxBackend {
                     "minimal-root mount plan: host root never bound; runtime trees read-only; \
                      workspace exact-bound; deny rules shadowed by tmpfs overlays"
                         .to_string(),
-                    "protected .git/.terminus/credentials via tmpfs overlays over the \
+                    "workspace root bound READ-WRITE; .git/hooks and .git/config bound \
+                     read-only; .terminus*/credentials shadowed by tmpfs overlays over the \
                      workspace bind"
                         .to_string(),
                     "process tree containment via PID namespace + --die-with-parent".to_string(),
@@ -897,8 +906,12 @@ mod tests {
 
     #[test]
     fn build_bwrap_argv_shadows_deny_rules_after_parent_bind() {
-        // Materialized profile like the kernel emits: absolute paths.
-        let ws = "/tmp/ws-under-test";
+        // Materialized profile like the kernel emits: absolute paths. The
+        // workspace must really exist — bwrap refuses to bind a missing
+        // source, so `plan_mounts` drops binds for paths that are not there.
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = ws_dir.path().display().to_string();
+        let ws = ws.as_str();
         let profile = SandboxProfile {
             id: "materialized".to_string(),
             filesystem: vec![
@@ -1053,10 +1066,12 @@ mod tests {
 
     #[test]
     fn readonly_rule_is_bound_read_only() {
+        let ro_dir = tempfile::tempdir().unwrap();
+        let ro_path = ro_dir.path().display().to_string();
         let profile = SandboxProfile {
             id: "test-abs-ro".to_string(),
             filesystem: vec![FilesystemRule {
-                path: "/etc/pki".to_string(),
+                path: ro_path.clone(),
                 access: FilesystemAccess::ReadOnly,
             }],
             network: NetworkAccess::Allow,
@@ -1073,7 +1088,121 @@ mod tests {
         );
         assert!(argv
             .windows(3)
-            .any(|w| w[0] == "--ro-bind" && w[1] == "/etc/pki" && w[2] == "/etc/pki"));
+            .any(|w| w[0] == "--ro-bind" && w[1] == ro_path && w[2] == ro_path));
+    }
+
+    #[test]
+    fn missing_bind_sources_are_dropped_instead_of_aborting_bwrap() {
+        // The phantom `workspace://active-worktree` rule became
+        // `--bind <ws>/active-worktree <ws>/active-worktree` of a directory
+        // nothing ever created, which makes bwrap exit before the payload
+        // runs. Any rule naming a path that is not on disk must be dropped.
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = ws_dir.path().display().to_string();
+        let missing = ws_dir.path().join("does-not-exist").display().to_string();
+        let profile = SandboxProfile {
+            id: "test-missing-source".to_string(),
+            filesystem: vec![
+                FilesystemRule {
+                    path: ws.clone(),
+                    access: FilesystemAccess::ReadWrite,
+                },
+                FilesystemRule {
+                    path: missing.clone(),
+                    access: FilesystemAccess::ReadOnly,
+                },
+            ],
+            network: NetworkAccess::Allow,
+            process: ProcessAccess::AllowWithLimits,
+            secrets: SecretsAccess::BrokeredCapabilities,
+            resources: ResourceLimits::default(),
+            plugins_ambient_authority: false,
+        };
+        let cmd = simple_command("ls");
+        let argv = LinuxSandboxBackend::build_bwrap_argv_with_layout(
+            &cmd,
+            &profile,
+            &HostLayout::merged_usr_reference(),
+        );
+        assert!(
+            argv.windows(3)
+                .any(|w| w[0] == "--bind" && w[1] == ws && w[2] == ws),
+            "the existing workspace root must still be bound"
+        );
+        assert!(
+            !argv.iter().any(|a| a == &missing),
+            "a bind of a nonexistent source aborts bwrap: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn default_profile_makes_the_workspace_root_writable_with_git_overlays() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = ws_dir.path();
+        std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
+        std::fs::write(ws.join(".git/config"), "[core]\n").unwrap();
+        std::fs::create_dir_all(ws.join(".terminus")).unwrap();
+        let mut profile = SandboxProfile::default_restrictive();
+        for rule in &mut profile.filesystem {
+            let Some(relative) = rule.path.strip_prefix("workspace://") else {
+                continue;
+            };
+            rule.path = if relative.is_empty() {
+                ws.display().to_string()
+            } else {
+                ws.join(relative).display().to_string()
+            };
+        }
+        let plan = plan_mounts(
+            &profile,
+            &HostLayout::merged_usr_reference(),
+            shared_empty_root(),
+            None,
+        );
+        let root = ws.display().to_string();
+        assert!(
+            plan.workspace_rw_binds
+                .iter()
+                .any(|(source, _)| source == &root),
+            "the workspace root must be the writable root: {plan:?}"
+        );
+        let hooks = ws.join(".git/hooks").display().to_string();
+        let config = ws.join(".git/config").display().to_string();
+        assert!(plan
+            .workspace_ro_binds
+            .iter()
+            .any(|(source, _)| source == &hooks));
+        assert!(plan
+            .workspace_ro_binds
+            .iter()
+            .any(|(source, _)| source == &config));
+        // `.git` itself is NOT shadowed: `git status` and `git commit` need
+        // to read and write the object database.
+        assert!(!plan
+            .deny_overlays
+            .iter()
+            .any(|p| p == &ws.join(".git").display().to_string()));
+        assert!(plan
+            .deny_overlays
+            .iter()
+            .any(|p| p == &ws.join(".terminus").display().to_string()));
+        // Ordering: the read-only overlays must follow the writable parent.
+        let rw_index = plan
+            .mounts
+            .iter()
+            .position(|op| matches!(op, mounts::MountOp::Bind(source, _) if source == &root))
+            .expect("rw bind");
+        let ro_index = plan
+            .mounts
+            .iter()
+            .position(|op| matches!(op, mounts::MountOp::RoBind(source, _) if source == &config))
+            .expect("ro bind");
+        assert!(rw_index < ro_index, "{:?}", plan.mounts);
+        assert!(
+            plan_proven_features(&plan)
+                .contains(&terminus_sandbox::report::EnforcementFeature::ProtectedGit),
+            "read-only .git/config + .git/hooks binds ARE git protection"
+        );
     }
 
     #[test]

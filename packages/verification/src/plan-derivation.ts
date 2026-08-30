@@ -53,6 +53,11 @@ export interface VerificationPlanDerivationInput {
   readonly riskClass: "low" | "normal" | "high" | "critical";
   readonly mode: VerificationPlanMode;
   readonly signals: VerificationDerivationSignals;
+  /**
+   * Wall-clock budget the suite or task contract allows a single check.
+   * Raises node timeouts above their class floor; never lowers them.
+   */
+  readonly timeoutSeconds?: number | undefined;
   readonly idSource: () => Uuid7;
 }
 
@@ -185,17 +190,47 @@ function predicateFromHint(hint: string, hasUiPaths: boolean): {
   return { predicateType: PredicateType.UNIT_TEST, command: undefined, reason: "criterion received the default native test predicate" };
 }
 
-function timeoutFor(predicateType: PredicateTypeName): number {
-  switch (predicateType) {
-    case PredicateType.SECURITY_SCANNER:
-    case PredicateType.INTEGRATION_TEST:
-    case PredicateType.E2E_TEST:
-    case PredicateType.UI_E2E:
-    case PredicateType.FUZZ_TEST:
-      return 180_000;
-    default:
-      return 30_000;
-  }
+/**
+ * Per-node wall-clock budgets.
+ *
+ * Every predicate used to get 30 s (180 s for a handful), while the plan
+ * routinely makes the repository's own `cargo test` / `bun run test` /
+ * `pytest` recipe a *required* node. Those do not finish in 30 s in any real
+ * repository, so admission was arithmetically impossible: the change was
+ * correct, the check timed out, the task failed verification.
+ *
+ * The floors below are what a check of that class actually needs. A
+ * suite/contract `timeoutSeconds` raises a node above its floor (bounded by
+ * the class ceiling) but can never lower it — an operator budget must not
+ * reintroduce a guaranteed timeout.
+ */
+export const TEST_PREDICATE_TIMEOUT_FLOOR_MS = 600_000;
+export const STATIC_PREDICATE_TIMEOUT_FLOOR_MS = 120_000;
+export const TEST_PREDICATE_TIMEOUT_CEILING_MS = 1_800_000;
+export const STATIC_PREDICATE_TIMEOUT_CEILING_MS = 600_000;
+
+/** Predicates that execute the repository's own suites. */
+const TEST_CLASS_PREDICATES: ReadonlySet<string> = new Set([
+  PredicateType.UNIT_TEST,
+  PredicateType.INTEGRATION_TEST,
+  PredicateType.E2E_TEST,
+  PredicateType.UI_E2E,
+  PredicateType.FUZZ_TEST,
+  PredicateType.PROPERTY_TEST,
+  PredicateType.SECURITY_SCANNER,
+  PredicateType.MIGRATION_DRY_RUN,
+  PredicateType.PERFORMANCE_THRESHOLD,
+]);
+
+export function timeoutFor(
+  predicateType: PredicateTypeName,
+  budgetSeconds?: number | undefined,
+): number {
+  const testClass = TEST_CLASS_PREDICATES.has(predicateType);
+  const floor = testClass ? TEST_PREDICATE_TIMEOUT_FLOOR_MS : STATIC_PREDICATE_TIMEOUT_FLOOR_MS;
+  const ceiling = testClass ? TEST_PREDICATE_TIMEOUT_CEILING_MS : STATIC_PREDICATE_TIMEOUT_CEILING_MS;
+  if (budgetSeconds === undefined || !Number.isFinite(budgetSeconds) || budgetSeconds <= 0) return floor;
+  return Math.min(ceiling, Math.max(floor, Math.round(budgetSeconds * 1_000)));
 }
 
 function makeNode(
@@ -244,7 +279,7 @@ function makeNode(
     required: draft.required,
     dependsOn: draft.dependsOn,
     specification,
-    timeout: timeoutFor(draft.predicateType),
+    timeout: timeoutFor(draft.predicateType, input.timeoutSeconds),
     retryPolicy: { maxAttempts: 1, backoffMs: 0, flakeIdentity: null },
     acceptanceCriterionId: draft.criterionId,
   };

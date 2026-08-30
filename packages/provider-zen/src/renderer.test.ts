@@ -12,6 +12,7 @@ import type {
   CanonicalRenderInput,
   ModelCapabilitySnapshot,
   ProviderCapabilitySnapshot,
+  ProviderResponse,
 } from "@terminus/provider-core";
 import { GatewayRenderer } from "./renderer.js";
 import { gatewayProfileBundles } from "./model_profiles.js";
@@ -149,13 +150,43 @@ describe("GatewayRenderer", () => {
     expect(messagesBody.messages).toBeArray();
   });
 
+  test("projects a chat-completions length stop as an incomplete response", async () => {
+    const chat = gatewayModel("chat_completions");
+    const renderer = new GatewayRenderer([chat]);
+    const response: ProviderResponse = {
+      providerId: chat.providerId,
+      model: chat.id as ModelKey,
+      observedAt: "2026-08-29T00:00:00Z",
+      chunks: [
+        { kind: "text", reasoning: "still working" },
+        { kind: "done", stopReason: "length" },
+      ],
+    };
+
+    await expect(renderer.projectResponse(response)).resolves.toMatchObject({
+      reasoning: "still working",
+      finishReason: "length",
+    });
+  });
+
   test("builds conservative, immutable routing profiles from discovery", () => {
     const free = gatewayModel("chat_completions");
     const [bundle] = gatewayProfileBundles([free]);
     expect(bundle?.model.adapterRef).toBe("open_code_zen");
     expect(bundle?.model.allowedConfidentiality).toEqual(["public"]);
-    expect(bundle?.model.capabilities.testedSafeContextTokens).toBe(32_768);
+    expect(bundle?.model.capabilities.testedSafeContextTokens).toBe(100_000);
     expect(bundle?.rendering.toolDialect).toBe("openai_chat_completions");
+  });
+
+  test("uses the shared family ceiling for large-context gateway models", () => {
+    const model = {
+      ...gatewayModel("responses"),
+      id: "gpt-5.6-sol",
+      contextTokens: 1_000_000,
+    };
+    const [bundle] = gatewayProfileBundles([model]);
+    expect(bundle?.model.capabilities.advertisedContextTokens).toBe(1_000_000);
+    expect(bundle?.model.capabilities.testedSafeContextTokens).toBe(270_000);
   });
 });
 
@@ -200,5 +231,43 @@ describe("H7 per-turn reasoning effort", () => {
     const renderer = new GatewayRenderer([chat], { reasoningEffort: "low" });
     const body = (await renderer.render(reasoningInput(chat))).body;
     expect(body.reasoning_effort).toBe("low");
+  });
+
+  test("the effort reaches the wire even with a zero reasoning reserve", async () => {
+    // The reserve is context accounting. Gating the wire field on it is what
+    // made the UI's effort setting dead on every transport but Codex.
+    const responses = gatewayModel("responses");
+    const renderer = new GatewayRenderer([responses], { reasoningEffort: "high" });
+    const body = (await renderer.render(renderInput(responses))).body;
+    expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
+  });
+});
+
+describe("gateway prompt cache key", () => {
+  test("every Responses turn carries a routing key", async () => {
+    const responses = gatewayModel("responses");
+    const renderer = new GatewayRenderer([responses]);
+    const body = (await renderer.render(renderInput(responses))).body;
+    // No explicit key was supplied, so the compiled prefix hash routes it.
+    expect(body.prompt_cache_key).toBe("sha256:prefix");
+  });
+
+  test("an explicit key wins over the prefix hash", async () => {
+    const responses = gatewayModel("responses");
+    const renderer = new GatewayRenderer([responses], { promptCacheKey: "session-77" });
+    const body = (await renderer.render(renderInput(responses))).body;
+    expect(body.prompt_cache_key).toBe("session-77");
+  });
+
+  test("chat_completions carries it only where the upstream reads it", async () => {
+    // The gateway fronts models that are not OpenAI's and has been observed
+    // to 400 rather than ignore a field its upstream does not know.
+    const openWeight = gatewayModel("chat_completions");
+    const openWeightBody = (await new GatewayRenderer([openWeight]).render(renderInput(openWeight))).body;
+    expect(openWeightBody.prompt_cache_key).toBeUndefined();
+
+    const sol = { ...gatewayModel("chat_completions"), id: "gpt-5.6-sol" };
+    const solBody = (await new GatewayRenderer([sol]).render(renderInput(sol))).body;
+    expect(solBody.prompt_cache_key).toBe("sha256:prefix");
   });
 });

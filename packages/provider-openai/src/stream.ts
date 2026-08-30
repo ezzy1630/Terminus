@@ -3,6 +3,7 @@
  */
 import type { ModelKey, TokenCount } from "@terminus/domain";
 import type {
+  ProviderReasoningItem,
   ProviderResponseChunk,
   UsageRecord,
 } from "@terminus/provider-core";
@@ -152,6 +153,15 @@ export async function* decodeOpenAiResponsesStream(
         });
         yield* flushTools(tools, index);
       }
+      // The whole point of `include: ["reasoning.encrypted_content"]`. Without
+      // this the blob was requested, paid for and dropped on the floor, and
+      // every attempt made the model re-derive the chain it had already built.
+      // Emitted in wire order so the consumer can tell which tool call it
+      // preceded.
+      if (item.type === "reasoning") {
+        const reasoningItem = reasoningItemFromOutputItem(item);
+        if (reasoningItem !== null) yield { kind: "text", reasoningItem };
+      }
       continue;
     }
     if (type === "response.completed") {
@@ -182,6 +192,7 @@ export async function* decodeOpenAiChatStream(
   const tools = new Map<number, ToolAccumulator>();
   let finalUsage: UsageRecord | undefined;
   let providerRequestId: string | null = null;
+  let stopReason: string | null = null;
   let done = false;
   for await (const event of events) {
     if (event.data === "[DONE]") {
@@ -190,6 +201,7 @@ export async function* decodeOpenAiChatStream(
         kind: "done",
         ...(finalUsage ? { usage: finalUsage } : {}),
         ...(providerRequestId === null ? {} : { providerRequestId }),
+        ...(stopReason === null ? {} : { stopReason }),
       };
       done = true;
       continue;
@@ -225,7 +237,10 @@ export async function* decodeOpenAiChatStream(
           });
         }
       }
-      if (choice.finish_reason === "tool_calls") yield* flushTools(tools);
+      if (typeof choice.finish_reason === "string" && choice.finish_reason !== "") {
+        stopReason = choice.finish_reason;
+        if (stopReason === "tool_calls") yield* flushTools(tools);
+      }
     }
   }
   if (!done) {
@@ -270,12 +285,62 @@ function* flushTools(
   }
 }
 
+/**
+ * Decode one completed `reasoning` output item.
+ *
+ * An item with no `encrypted_content` is not replayable — the endpoint only
+ * emits the blob when `include` asked for it — so it is dropped rather than
+ * replayed as an empty shell the API would reject.
+ */
+/**
+ * The replayable reasoning item carried by a Responses `output_item` of type
+ * `reasoning`, or `null` when the provider sent no `encrypted_content` (the
+ * blob is only present when the request asked for it via `include`).
+ * Exported because the gateway transport (provider-zen) normalizes the same
+ * wire format for ChatGPT-Codex and OpenAI-compatible endpoints.
+ */
+export function reasoningItemFromOutputItem(item: Readonly<Record<string, unknown>>): ProviderReasoningItem | null {
+  const encryptedContent = stringOrEmpty(item.encrypted_content);
+  const id = stringOrEmpty(item.id);
+  if (encryptedContent === "" || id === "") return null;
+  const summary: string[] = [];
+  if (Array.isArray(item.summary)) {
+    for (const part of item.summary) {
+      const text = stringOrEmpty(optionalRecord(part).text);
+      if (text !== "") summary.push(text);
+    }
+  }
+  return { id, encryptedContent, summary };
+}
+
+/**
+ * Seconds the provider asked the caller to wait, from whichever field the
+ * error payload used. Carried structurally so the retry layer never has to
+ * find it by parsing the message prose.
+ */
+function retryAfterMsFromErrorPayload(value: Readonly<Record<string, unknown>>): number | undefined {
+  for (const key of ["retry_after_ms", "retryAfterMs"]) {
+    const raw = value[key];
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) return Math.ceil(raw);
+  }
+  for (const key of ["retry_after", "retryAfter", "retry_after_seconds"]) {
+    const raw = value[key];
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) return Math.ceil(raw * 1_000);
+    if (typeof raw === "string" && /^\d+(?:\.\d+)?$/.test(raw.trim())) {
+      return Math.ceil(Number.parseFloat(raw.trim()) * 1_000);
+    }
+  }
+  return undefined;
+}
+
 function errorChunk(input: unknown): ProviderResponseChunk {
   const value = optionalRecord(input);
+  const retryAfterMs = retryAfterMsFromErrorPayload(value);
   return {
     kind: "error",
     errorCode: typeof value.code === "string" ? value.code : typeof value.type === "string" ? value.type : "PROVIDER_ERROR",
     errorMessage: typeof value.message === "string" ? value.message : "OpenAI request failed",
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
   };
 }
 

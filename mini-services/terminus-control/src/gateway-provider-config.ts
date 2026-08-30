@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Micros, ModelKey, Rfc3339Timestamp } from "@terminus/domain";
 import type { ProviderCapabilitySnapshot } from "@terminus/provider-core";
+import { resolveMaxOutputTokens, resolveTestedSafeContextTokens } from "@terminus/provider-core";
 import type { GatewayDeployment, GatewayModel, GatewayProtocol } from "@terminus/provider-zen";
 
 export const GATEWAY_PROVIDER_CONFIGURATION_ID = "default";
@@ -192,7 +193,16 @@ export function configuredGatewayProviderSnapshot(
     source: `terminus-control/opencode-gateway-config-v1:${digest}`,
     context: {
       advertisedTokens: model.contextTokens,
-      testedSafeTokens: Math.min(model.contextTokens, 32_768),
+      // Per-family, not a blanket 32,768. The gateway fronts several 1M and
+      // 262k models whose whole window the old clamp threw away.
+      testedSafeTokens: resolveTestedSafeContextTokens({
+        modelId: model.id,
+        contextTokens: model.contextTokens,
+      }),
+      maxOutputTokens: resolveMaxOutputTokens({
+        modelId: model.id,
+        outputTokens: model.outputTokens,
+      }),
       roleSupport: ["system", "user", "assistant", "tool"],
       imageInput: model.imageInput,
       toolCalling: model.toolCalling,

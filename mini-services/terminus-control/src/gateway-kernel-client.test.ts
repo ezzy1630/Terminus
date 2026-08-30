@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { Observable } from "rxjs";
 import { KernelGatewayClient, OPENCODE_GATEWAY_USER_AGENT } from "./gateway-kernel-client.js";
 import { isRetryableProviderError, ProviderTransportError } from "./providers/provider-retry.js";
+import { ConnectorCancelledError, HEAD_RECEIPT_OUTCOME } from "./direct-provider-transport.js";
+import { classifyLoopError } from "./agent/loop-contracts.js";
+import { CodexTurnState, chatGptCodexRequestHeaders } from "@terminus/provider-openai";
 import type {
   ConnectorChunk,
   ConnectorReceiptMessage,
@@ -530,5 +533,187 @@ describe("H9 the gateway path streams", () => {
     await expect(consume()).rejects.toThrow("gateway request was aborted");
     expect(decoded).toEqual(["data: 0\n\n"]);
     expect(unsubscribed).toBe(true);
+  });
+});
+
+describe("the gateway path reads the head frame", () => {
+  const inference = {
+    url: "https://opencode.ai/zen/v1/chat/completions",
+    method: "POST" as const,
+    headers: { accept: "text/event-stream", "content-type": "application/json" },
+    body: "{}",
+    credentialBindingId: "secret://opencode/zen",
+    authStyle: "bearer" as const,
+    signal: null,
+  };
+
+  /** Emits a head receipt, then the given frames, then a terminal receipt. */
+  function headThen(input: {
+    readonly head: ConnectorReceiptMessage;
+    readonly chunks?: readonly string[];
+    readonly terminal?: ConnectorReceiptMessage | null;
+    readonly bodyDelayMs?: number;
+  }): ConnectorService {
+    return {
+      MintGrant: async () => ({ encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 }),
+      Execute: async () => { throw new Error("buffered Execute must not be used"); },
+      ExecuteStream: () =>
+        new Observable<ConnectorChunk>((subscriber) => {
+          let stopped = false;
+          void (async () => {
+            subscriber.next({ bytes: undefined, receipt: input.head });
+            for (const chunk of input.chunks ?? []) {
+              if (input.bodyDelayMs !== undefined) {
+                await new Promise((resolve) => setTimeout(resolve, input.bodyDelayMs));
+              }
+              if (stopped) return;
+              subscriber.next({ bytes: new TextEncoder().encode(chunk), receipt: undefined });
+            }
+            if (stopped) return;
+            if (input.terminal !== null) {
+              subscriber.next({ bytes: undefined, receipt: input.terminal ?? receipt() });
+            }
+            subscriber.complete();
+          })();
+          return () => { stopped = true; };
+        }),
+    };
+  }
+
+  const head = (statusCode: number, headers: { name: string; value: string }[] = []): ConnectorReceiptMessage =>
+    receipt({ statusCode, outcome: HEAD_RECEIPT_OUTCOME, responseHeaders: headers });
+
+  test("a 2xx head is not terminal: the body still streams through", async () => {
+    const client = new KernelGatewayClient(
+      headThen({ head: head(200), chunks: ["data: one\n\n", "data: [DONE]\n\n"] }),
+      context,
+    );
+    const decoded: string[] = [];
+    for await (const chunk of client.stream(inference)) decoded.push(new TextDecoder().decode(chunk));
+    expect(decoded).toEqual(["data: one\n\n", "data: [DONE]\n\n"]);
+  });
+
+  test("a 429 head carries retry-after before any body byte is read", async () => {
+    const client = new KernelGatewayClient(
+      headThen({
+        head: head(429, [{ name: "Retry-After", value: "30" }]),
+        chunks: ['{"error":{"message":"slow down"}}'],
+      }),
+      context,
+    );
+    const decoded: string[] = [];
+    const caught = await (async () => {
+      try {
+        for await (const chunk of client.stream(inference)) decoded.push(new TextDecoder().decode(chunk));
+        return null;
+      } catch (error: unknown) { return error; }
+    })();
+    expect(caught).toBeInstanceOf(ProviderTransportError);
+    expect((caught as ProviderTransportError).status).toBe(429);
+    expect((caught as ProviderTransportError).retryAfterMs).toBe(30_000);
+    expect(isRetryableProviderError(caught as ProviderTransportError)).toBe(true);
+    expect(decoded).toEqual([]);
+  });
+
+  test("head headers survive a terminal receipt that carries none", async () => {
+    const client = new KernelGatewayClient(
+      headThen({
+        head: head(200, [
+          { name: "X-Codex-Turn-State", value: "turn-token-1" },
+          { name: "X-Models-Etag", value: 'W/"catalogue-7"' },
+        ]),
+        chunks: ["data: [DONE]\n\n"],
+      }),
+      context,
+    );
+    for await (const _ of client.stream(inference)) { /* drain */ }
+    expect(client.responseHeaders()["x-codex-turn-state"]).toBe("turn-token-1");
+    expect(client.responseHeaders()["x-models-etag"]).toBe('W/"catalogue-7"');
+  });
+
+  test("a header value longer than the old 256-byte cap is not truncated", async () => {
+    // A truncated `x-codex-turn-state` would be echoed corrupted, which is
+    // worse than echoing nothing at all.
+    const token = "t".repeat(1200);
+    const client = new KernelGatewayClient(
+      headThen({ head: head(200, [{ name: "x-codex-turn-state", value: token }]), chunks: ["data: [DONE]\n\n"] }),
+      context,
+    );
+    for await (const _ of client.stream(inference)) { /* drain */ }
+    expect(client.responseHeaders()["x-codex-turn-state"]).toBe(token);
+  });
+
+  test("a later request without headers does not inherit the previous one's", async () => {
+    const client = new KernelGatewayClient(
+      headThen({ head: head(200, [{ name: "x-codex-turn-state", value: "stale" }]), chunks: ["data: [DONE]\n\n"] }),
+      context,
+    );
+    for await (const _ of client.stream(inference)) { /* drain */ }
+    expect(client.responseHeaders()["x-codex-turn-state"]).toBe("stale");
+    const second = new KernelGatewayClient(headThen({ head: head(200), chunks: ["data: [DONE]\n\n"] }), context);
+    for await (const _ of second.stream(inference)) { /* drain */ }
+    expect(second.responseHeaders()["x-codex-turn-state"]).toBeUndefined();
+  });
+
+  test("time-to-first-token is measured to the body, not to the head frame", async () => {
+    const client = new KernelGatewayClient(
+      headThen({ head: head(200), chunks: ["data: [DONE]\n\n"], bodyDelayMs: 25 }),
+      context,
+    );
+    expect(client.timeToFirstBodyMs()).toBeNull();
+    for await (const _ of client.stream(inference)) { /* drain */ }
+    expect(client.timeToFirstBodyMs() ?? 0).toBeGreaterThanOrEqual(20);
+  });
+
+  test("a head frame supplies the status when the terminal receipt has none", async () => {
+    // "Last receipt wins" must still yield the terminal one; the head is only
+    // the fallback for a kernel that reports status once.
+    const client = new KernelGatewayClient(
+      headThen({
+        head: head(200),
+        chunks: ["data: [DONE]\n\n"],
+        terminal: receipt({ statusCode: undefined, outcome: "accepted" }),
+      }),
+      context,
+    );
+    const decoded: string[] = [];
+    for await (const chunk of client.stream(inference)) decoded.push(new TextDecoder().decode(chunk));
+    expect(decoded).toEqual(["data: [DONE]\n\n"]);
+  });
+
+  test("a head-frame turn-state token becomes the next request's echo header", async () => {
+    // The two halves of the Codex turn-state loop, composed: the transport
+    // captures the token off the head frame, the dialect echoes it back.
+    const turnState = new CodexTurnState();
+    const identity = { originator: "terminus", userAgent: "terminus/test", threadId: "thread-1" } as const;
+    expect(chatGptCodexRequestHeaders({ ...identity, turnState })["x-codex-turn-state"]).toBeUndefined();
+
+    const client = new KernelGatewayClient(
+      headThen({
+        head: head(200, [{ name: "X-Codex-Turn-State", value: "opaque-turn-token" }]),
+        chunks: ["data: [DONE]\n\n"],
+      }),
+      context,
+    );
+    for await (const _ of client.stream(inference)) { /* drain */ }
+    turnState.observe(client.responseHeaders());
+    expect(chatGptCodexRequestHeaders({ ...identity, turnState })["x-codex-turn-state"])
+      .toBe("opaque-turn-token");
+  });
+
+  test("teardown mid-stream surfaces as cancellation, not a provider fault", async () => {
+    const controller = new AbortController();
+    const client = new KernelGatewayClient(
+      headThen({ head: head(200), chunks: ["data: 0\n\n", "data: 1\n\n", "data: 2\n\n"], bodyDelayMs: 5 }),
+      context,
+    );
+    const caught = await (async () => {
+      try {
+        for await (const _ of client.stream({ ...inference, signal: controller.signal })) controller.abort();
+        return null;
+      } catch (error: unknown) { return error; }
+    })();
+    expect(caught).toBeInstanceOf(ConnectorCancelledError);
+    expect(classifyLoopError(caught).kind).toBe("cancelled");
   });
 });

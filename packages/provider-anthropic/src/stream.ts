@@ -75,18 +75,36 @@ interface ToolAccumulator {
   argumentsJson: string;
 }
 
+/**
+ * A thinking block being assembled.
+ *
+ * The signature arrives in its own `signature_delta` at the end of the block,
+ * so text and signature have to be held together until `content_block_stop`.
+ * Anthropic rejects an assistant turn whose thinking blocks were dropped,
+ * edited or reordered, so both halves are kept exactly as received — including
+ * an empty `thinking` text, which is what `display: "omitted"` returns.
+ */
+interface ThinkingAccumulator {
+  id: string;
+  thinking: string;
+  signature: string;
+}
+
 export async function* decodeAnthropicMessagesStream(
   chunks: AsyncIterable<string | Uint8Array>,
   model: ModelKey = "anthropic/claude-3-5-sonnet" as ModelKey,
 ): AsyncIterable<ProviderResponseChunk> {
   const events = decodeSse(chunks);
   const tools = new Map<number, ToolAccumulator>();
+  const thinkingBlocks = new Map<number, ThinkingAccumulator>();
   let inputTokens = 0;
   let cacheReadTokens = 0;
   let cacheWriteTokens = 0;
   let outputTokens = 0;
   let reasoningTokens = 0;
   let providerRequestId: string | null = null;
+  let stopReason: string | null = null;
+  let stopDetail: string | null = null;
   let done = false;
 
   for await (const event of events) {
@@ -110,11 +128,18 @@ export async function* decodeAnthropicMessagesStream(
 
     if (type === "content_block_start") {
       const block = optionalRecord(value.content_block);
+      const index = integerOrZero(value.index);
       if (block.type === "tool_use") {
-        tools.set(integerOrZero(value.index), {
+        tools.set(index, {
           id: stringOrEmpty(block.id),
           name: stringOrEmpty(block.name),
           argumentsJson: Object.keys(optionalRecord(block.input)).length > 0 ? JSON.stringify(block.input) : "",
+        });
+      } else if (block.type === "thinking" || block.type === "redacted_thinking") {
+        thinkingBlocks.set(index, {
+          id: stringOrEmpty(block.id) || `thinking:${index}`,
+          thinking: stringOrEmpty(block.thinking),
+          signature: stringOrEmpty(block.signature) || stringOrEmpty(block.data),
         });
       }
       continue;
@@ -122,12 +147,21 @@ export async function* decodeAnthropicMessagesStream(
 
     if (type === "content_block_delta") {
       const delta = optionalRecord(value.delta);
+      const index = integerOrZero(value.index);
       if (delta.type === "text_delta" && typeof delta.text === "string") {
         yield { kind: "text", text: delta.text };
       } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
+        const current = thinkingBlocks.get(index);
+        if (current !== undefined) current.thinking += delta.thinking;
         yield { kind: "text", reasoning: delta.thinking };
+      } else if (delta.type === "signature_delta") {
+        // The signature is what makes the block replayable; without it the
+        // next request cannot include the thinking block and Anthropic
+        // rejects the assistant turn that follows it.
+        const current = thinkingBlocks.get(index) ?? { id: `thinking:${index}`, thinking: "", signature: "" };
+        current.signature += stringOrEmpty(delta.signature);
+        thinkingBlocks.set(index, current);
       } else if (delta.type === "input_json_delta") {
-        const index = integerOrZero(value.index);
         const current = tools.get(index) ?? { id: "", name: "", argumentsJson: "" };
         current.argumentsJson += stringOrEmpty(delta.partial_json);
         tools.set(index, current);
@@ -136,7 +170,22 @@ export async function* decodeAnthropicMessagesStream(
     }
 
     if (type === "content_block_stop") {
-      yield* flushTools(tools, integerOrZero(value.index));
+      const index = integerOrZero(value.index);
+      const thinkingBlock = thinkingBlocks.get(index);
+      if (thinkingBlock !== undefined) {
+        thinkingBlocks.delete(index);
+        if (thinkingBlock.signature !== "") {
+          yield {
+            kind: "text",
+            reasoningItem: {
+              id: thinkingBlock.id,
+              encryptedContent: thinkingBlock.signature,
+              summary: [thinkingBlock.thinking],
+            },
+          };
+        }
+      }
+      yield* flushTools(tools, index);
       continue;
     }
 
@@ -145,6 +194,15 @@ export async function* decodeAnthropicMessagesStream(
       if (usage.output_tokens !== undefined) {
         outputTokens = numberOrZero(usage.output_tokens);
       }
+      const delta = optionalRecord(value.delta);
+      if (typeof delta.stop_reason === "string" && delta.stop_reason !== "") {
+        stopReason = delta.stop_reason;
+      }
+      const details = optionalRecord(delta.stop_details);
+      const explanation = [details.category, details.explanation]
+        .filter((part): part is string => typeof part === "string" && part !== "")
+        .join(": ");
+      if (explanation !== "") stopDetail = explanation;
       continue;
     }
 
@@ -154,6 +212,8 @@ export async function* decodeAnthropicMessagesStream(
         kind: "done",
         usage: anthropicUsage(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens),
         ...(providerRequestId === null ? {} : { providerRequestId }),
+        ...(stopReason === null ? {} : { stopReason }),
+        ...(stopDetail === null ? {} : { stopDetail }),
       };
       done = true;
     }

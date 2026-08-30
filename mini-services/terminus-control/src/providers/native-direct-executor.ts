@@ -16,6 +16,7 @@ import type { Micros } from "@terminus/domain";
 import {
   KernelDirectConnectorClient,
   directEndpoint,
+  type ConnectorStreamTelemetry,
 } from "../direct-provider-transport.js";
 import type { DirectProviderConfiguration } from "../direct-provider-config.js";
 import { anthropicTransportDeps, dispatchAnthropic } from "./anthropic-runtime.js";
@@ -32,6 +33,13 @@ export interface NativeDirectExecutorOptions {
   readonly promptCacheKey?: string | undefined;
   /** Inline stream observer (client streaming); invoked as chunks arrive. */
   readonly onChunk?: ((chunk: import("@terminus/provider-core").ProviderResponseChunk) => void | Promise<void>) | undefined;
+  /**
+   * Filled by the transport with the head-frame status/headers and the
+   * first-body timestamp. Only the transport can see the first body frame,
+   * so time-to-first-token has to be collected here rather than inferred
+   * from the first decoded chunk.
+   */
+  readonly telemetry?: ConnectorStreamTelemetry | undefined;
 }
 
 export function createNativeDirectExecutor(options: NativeDirectExecutorOptions) {
@@ -62,6 +70,7 @@ export function createNativeDirectExecutor(options: NativeDirectExecutorOptions)
         context,
         credentialBindingId: options.configuration.secretUri,
         signal: input.signal,
+        ...(options.telemetry === undefined ? {} : { telemetry: options.telemetry }),
       });
     };
 

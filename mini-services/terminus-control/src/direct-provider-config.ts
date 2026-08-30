@@ -10,7 +10,12 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Micros, ModelKey, Rfc3339Timestamp } from "@terminus/domain";
-import { loadOfflineCatalogSnapshot, type ProviderCapabilitySnapshot } from "@terminus/provider-core";
+import {
+  loadOfflineCatalogSnapshot,
+  resolveMaxOutputTokens,
+  resolveTestedSafeContextTokens,
+  type ProviderCapabilitySnapshot,
+} from "@terminus/provider-core";
 
 export const DIRECT_PROVIDER_CONFIGURATION_ENV = "TERMINUS_DIRECT_PROVIDER_JSON";
 
@@ -145,18 +150,30 @@ export function configuredDirectProviderSnapshot(
     source: `terminus-control/direct-provider-config-v1:${digest}`,
     context: {
       advertisedTokens: model.contextTokens,
-      testedSafeTokens: Math.min(model.contextTokens, 32_768),
+      // Per-family, not a blanket 32,768: GPT-5.6 is capped at the 272K
+      // billing cliff and Claude 5 gets its whole 1M window.
+      testedSafeTokens: resolveTestedSafeContextTokens({
+        modelId: model.id,
+        contextTokens: model.contextTokens,
+      }),
+      maxOutputTokens: resolveMaxOutputTokens({
+        modelId: model.id,
+        outputTokens: model.outputTokens,
+      }),
       roleSupport: model.vendor === "anthropic"
         ? ["system", "user", "assistant", "tool"]
         : ["system", "user", "assistant", "tool", "developer"],
       imageInput: model.imageInput,
       toolCalling: model.toolCalling,
-      parallelToolCalls: false,
+      parallelToolCalls: model.vendor === "openai" || model.vendor === "anthropic",
       structuredOutput: model.structuredOutput,
     },
     continuation: {
-      nativeId: model.vendor === "openai" && model.protocol === "responses",
-      crossRequest: model.vendor === "openai" && model.protocol === "responses",
+      // Responses requests are rendered with `store: false`, so the endpoint
+      // keeps nothing to continue from: the client replays the prefix and the
+      // encrypted reasoning items instead of naming a previous response.
+      nativeId: false,
+      crossRequest: false,
       compaction: true,
       compatibilityKey: `direct-${model.vendor}-${model.protocol}-${model.id}`,
     },

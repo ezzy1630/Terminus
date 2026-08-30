@@ -55,7 +55,12 @@ capability. Models.dev provides provider-owned protocol and capability metadata.
    requires both `workspace_access: true` and a persisted admission record for
    the current provider terms. The record contains the deployment-specific
    terms identity (`opencode-zen-privacy-v1` or `opencode-go-privacy-v1`), and
-   routing fails closed when it is absent or stale.
+   routing fails closed when it is absent or stale. One narrow local-delegation
+   exception applies: when the kernel positively detects the standard installed
+   OpenCode executable, Terminus may synthesize an anonymous Zen account with
+   provenance `installed_opencode` and use its catalogued free models for
+   workspace tasks. That provenance is created only from the kernel probe; it
+   cannot be supplied by a client or inferred from an unconfigured gateway row.
 9. Free-model status and provider privacy claims are routing inputs, not trust
    guarantees. Models whose terms allow training or non-zero retention are
    restricted by confidentiality policy until separately admitted.

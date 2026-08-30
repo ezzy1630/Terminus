@@ -61,7 +61,7 @@ import type {
   ProviderToolSchema,
 } from "@terminus/provider-core";
 import { filterByConfidentiality } from "@terminus/provider-core";
-import { resolveTokenizer } from "./tokenizer.js";
+import { estimateMessageTokens, resolveTokenizer } from "./tokenizer.js";
 import type { ModelTokenizer, TokenEstimator } from "./tokenizer.js";
 import { compactContext, type CompactionTransform } from "./compaction.js";
 import { buildCacheEpochDebugData } from "./cache-debug.js";
@@ -108,10 +108,20 @@ export type {
 export {
   CalibratedModelTokenizer,
   DEFAULT_CALIBRATION_POLICY,
+  MESSAGE_ENVELOPE_TOKENS,
+  PROSE_BYTES_PER_TOKEN,
+  STRUCTURED_BYTES_PER_TOKEN,
+  STRUCTURED_DENSITY_THRESHOLD,
   TOKEN_CALIBRATION_VERSION,
   TOKEN_ESTIMATOR_CONTRACT_VERSION,
+  estimateMessageTokens,
+  observeAttemptUsage,
+  processCalibrationSeed,
+  promptTokensFromUsage,
   reconcileUsage,
+  resetProcessCalibration,
   resolveTokenizer,
+  structuralDensity,
 } from "./tokenizer.js";
 
 export {
@@ -240,8 +250,11 @@ export type {
 export {
   DEFAULT_INSTRUCTION_FILENAMES,
   DEFAULT_MAX_INSTRUCTION_BYTES,
+  EXCLUDED_INSTRUCTION_DIRECTORY_SEGMENTS,
   discoverInstructions,
+  instructionCandidateDirectories,
   instructionsToFragments,
+  isExcludedInstructionPath,
   resolveInstructionPrecedence,
 } from "./project-instructions.js";
 export type {
@@ -595,7 +608,7 @@ export async function collectRequiredFragments(
       freshness: { observedAt: now, sourceVersion: "v1", stale: false, staleReason: null },
       dependencies: documentIndex === 0 ? [] : [`${"required:authority:"}${authorityDocuments[0]!.id}`],
       invalidation: [{ kind: "policy_changed" as const, selector: document.sourceUri }],
-      estimatedTokens: { [modelKey]: tokenizer.estimateTextTokens(document.text) } as Readonly<Record<string, number>>,
+      estimatedTokens: { [modelKey]: estimateMessageTokens(tokenizer, document.text) } as Readonly<Record<string, number>>,
       selectionFeatures: emptyFeatures,
     };
   });
@@ -604,6 +617,12 @@ export async function collectRequiredFragments(
 
   // 2. Task contract fragment: objective, non-goals, acceptance criteria.
   const contract = input.task.contract;
+  // The contract's version identity must be the one the world-state producer
+  // publishes for `task://<id>`, otherwise `deduplicateAndExplain` reads the
+  // fragment as stale and silently drops the objective from every prompt.
+  // The world state is authoritative; `v<version>` remains the fallback for
+  // callers that publish no version at all.
+  const contractSourceVersion = taskContractSourceVersion(input);
   const contractLines: string[] = [
     `# Task Contract (v${contract.version})`,
     "",
@@ -643,7 +662,7 @@ export async function collectRequiredFragments(
     contentRef: makeArtifactRef("task_contract", contractText),
     textContent: contractText,
     source: makeSource(`task://${input.task.taskId}`, "task-runtime", now),
-    sourceVersion: `v${contract.version}`,
+    sourceVersion: contractSourceVersion,
     authority: 95,
     priority: 95,
     trust: "trusted",
@@ -651,10 +670,10 @@ export async function collectRequiredFragments(
     injectionRisk: "none",
     exactness: "exact",
     scope,
-    freshness: { observedAt: now, sourceVersion: `v${contract.version}`, stale: false, staleReason: null },
+    freshness: { observedAt: now, sourceVersion: contractSourceVersion, stale: false, staleReason: null },
     dependencies: [],
     invalidation: [{ kind: "policy_changed", selector: `task://${input.task.taskId}` }],
-    estimatedTokens: { [modelKey]: tokenizer.estimateTextTokens(contractText) } as Readonly<Record<string, number>>,
+    estimatedTokens: { [modelKey]: estimateMessageTokens(tokenizer, contractText) } as Readonly<Record<string, number>>,
     selectionFeatures: emptyFeatures,
   };
 
@@ -677,7 +696,7 @@ export async function collectRequiredFragments(
     freshness: { observedAt: now, sourceVersion: "v1", stale: false, staleReason: null },
     dependencies: [primaryAuthorityId],
     invalidation: [{ kind: "policy_changed", selector: "terminus://policy/command" }],
-    estimatedTokens: { [modelKey]: tokenizer.estimateTextTokens(policyText) } as Readonly<Record<string, number>>,
+    estimatedTokens: { [modelKey]: estimateMessageTokens(tokenizer, policyText) } as Readonly<Record<string, number>>,
     selectionFeatures: emptyFeatures,
   };
 
@@ -695,7 +714,7 @@ export async function collectRequiredFragments(
       contentRef: makeArtifactRef(`ac:${ac.id}`, acText),
       textContent: acText,
       source: makeSource(`task://${input.task.taskId}/criterion/${ac.id}`, "task-runtime", now),
-      sourceVersion: `v${contract.version}`,
+      sourceVersion: contractSourceVersion,
       authority: 92,
       priority: 92,
       trust: "trusted",
@@ -703,10 +722,10 @@ export async function collectRequiredFragments(
       injectionRisk: "none",
       exactness: "exact",
       scope,
-      freshness: { observedAt: now, sourceVersion: `v${contract.version}`, stale: false, staleReason: null },
+      freshness: { observedAt: now, sourceVersion: contractSourceVersion, stale: false, staleReason: null },
       dependencies: [`required:task_contract:${input.task.taskId}`],
       invalidation: [{ kind: "policy_changed", selector: `task://${input.task.taskId}/criterion/${ac.id}` }],
-      estimatedTokens: { [modelKey]: tokenizer.estimateTextTokens(acText) } as Readonly<Record<string, number>>,
+      estimatedTokens: { [modelKey]: estimateMessageTokens(tokenizer, acText) } as Readonly<Record<string, number>>,
       selectionFeatures: emptyFeatures,
     });
   }
@@ -724,6 +743,23 @@ export async function collectRequiredFragments(
     instructionConflicts: resolvedInstructions.conflicts,
     acceptanceCriteria,
   };
+}
+
+/**
+ * The version identity of the task-contract fragment.
+ *
+ * `deduplicateAndExplain` compares a fragment's `sourceVersion` against the
+ * world state's `sourceVersions[source.uri]`. When the two producers disagree
+ * on the encoding — the control plane publishes the contract row's content
+ * hash for `task://<id>` while the compiler minted `v<version>` — every
+ * compiled manifest drops the contract as stale and the model never sees the
+ * objective. The published version wins; `v<version>` remains the fallback.
+ */
+export function taskContractSourceVersion(input: CompileInput): string {
+  const published = input.worldState.sourceVersions[`task://${input.task.taskId}`];
+  return published !== undefined && published.length > 0
+    ? published
+    : `v${input.task.contract.version}`;
 }
 
 /** Build an ArtifactRef with a stable, content-derived hash. */
@@ -760,6 +796,168 @@ function makeSource(uri: string, producer: string, observedAt: Rfc3339Timestamp)
  * compiler owns the invariant that incomplete tool episodes never enter the
  * candidate set.
  */
+/** Stable fragment id for an episode, keyed on the episode's own kind. */
+export function episodeFragmentId(episode: Episode): string {
+  if (episode.kind === "tool_call") return `runtime:episode:${episode.id}:tool_call`;
+  if (episode.kind === "tool_result") return `runtime:episode:${episode.id}:tool_result`;
+  return `runtime:episode:${episode.id}`;
+}
+
+/**
+ * World state ships as TWO messages, split on how often it changes.
+ *
+ * Measured on a live GPT-5.6 Codex run (5 attempts, request bodies read back
+ * from the kernel artifacts): a single merged block sat at input position #2,
+ * ahead of the entire transcript, and its bytes moved twice mid-turn —
+ * `repository_signals.repository_map.index_revision` changed after the model's
+ * patch, then a `last_command` section appeared. Each move invalidated the
+ * cache for everything behind it: attempt 4 reported `cached_input_tokens: 0`,
+ * and the common JSON prefix between attempts 3 and 4 was 1,481 characters of
+ * roughly 15,000. Attempts whose world state happened not to move cached
+ * 1,536–2,560 tokens.
+ *
+ * So: the per-task facts stay in front of the transcript where they are cheap
+ * and cacheable, and everything that moves within a turn is emitted as the
+ * LAST input item, behind the newest transcript entry, where a change costs
+ * only its own bytes.
+ */
+export const WORLD_STATE_FRAGMENT_ID = "runtime:world_state";
+export const WORLD_STATE_SOURCE_URI = "world://state";
+export const VOLATILE_WORLD_STATE_FRAGMENT_ID = "runtime:world_state:latest";
+export const VOLATILE_WORLD_STATE_SOURCE_URI = "world://state/latest";
+
+/**
+ * Sections that are fixed for the whole turn and may therefore sit inside the
+ * cached region, immediately after the task contract.
+ *
+ * The list is an allowlist, not a denylist: the control plane builds `task`,
+ * `workspace` and `environment` once per turn, before the attempt loop, so
+ * they are the same object on every attempt by construction. Anything else —
+ * including a section a future producer adds — is treated as volatile, which
+ * is the failure-safe direction for a cache.
+ */
+export const STABLE_WORLD_STATE_SECTIONS: ReadonlySet<string> = new Set([
+  "task",
+  "workspace",
+  "environment",
+]);
+
+/**
+ * Sections that describe a mechanism this harness does not have, or that
+ * duplicate a message the model already receives. Emitting them costs tokens
+ * and teaches the model to reach for capabilities that will be refused.
+ *
+ * - `memory`: no memory tool, no writer, no reader (`@terminus/memory` has
+ *   zero production imports); the section only ever says "disabled".
+ * - `tool_capabilities`: the tool schemas on the request are the declaration.
+ * - `request`: the user's turn input is already delivered as the
+ *   `user_message` episode, which now renders with `role: user`.
+ * - `request_phase`: byte-for-byte the `phase` field of the `task` section.
+ *   Two copies of a lifecycle field that can move mid-turn is one copy too
+ *   many in front of a cache.
+ */
+export const SUPPRESSED_WORLD_STATE_SECTIONS: ReadonlySet<string> = new Set([
+  "memory",
+  "tool_capabilities",
+  "request",
+  "request_phase",
+]);
+
+/**
+ * Fixed emission order for the world-state sections. A stable key order is
+ * what makes the block byte-identical across turns when nothing changed —
+ * `Object.entries` order is an accident of how the caller built the object.
+ * Unlisted sections follow in lexicographic order so a new producer can never
+ * reorder the existing ones.
+ */
+const WORLD_STATE_SECTION_ORDER: readonly string[] = [
+  "task",
+  "workspace",
+  "environment",
+  "changes",
+  "last_command",
+  "verification",
+  "repository_signals",
+  "scout_brief",
+  "recent_history",
+];
+
+export type WorldStateTier = "stable" | "volatile";
+
+interface RenderedWorldState {
+  readonly tier: WorldStateTier;
+  readonly text: string;
+  readonly sections: readonly string[];
+  readonly trust: ContextFragment["trust"];
+  readonly confidentiality: ContextFragment["confidentiality"];
+  readonly injectionRisk: ContextFragment["injectionRisk"];
+  readonly evidenceRefs: readonly ArtifactRef[];
+}
+
+/** True for a section whose value carries no information worth a token. */
+function worldStateSectionIsEmpty(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === "object") return Object.keys(value as object).length === 0;
+  if (typeof value === "string") return value.length === 0;
+  return false;
+}
+
+/**
+ * Render one tier of the world state into ONE message.
+ *
+ * The eleven separate `# World State: <section>` user messages cost a message
+ * envelope each, and — because allocation used to sort them by token size —
+ * reordered themselves on every attempt, which invalidated the provider cache
+ * for the whole suffix. One message per tier with a fixed key order is
+ * byte-identical whenever the underlying state is.
+ *
+ * Returns `null` when the tier has nothing to say, so an absent tier costs no
+ * message at all.
+ */
+export function renderWorldStateBlock(
+  worldState: WorldStateSnapshot,
+  tier: WorldStateTier,
+): RenderedWorldState | null {
+  const present = Object.keys(worldState.sections)
+    .filter((section) => !SUPPRESSED_WORLD_STATE_SECTIONS.has(section))
+    .filter((section) => STABLE_WORLD_STATE_SECTIONS.has(section) === (tier === "stable"))
+    .filter((section) => !worldStateSectionIsEmpty(worldState.sections[section]));
+  const ordered = [
+    ...WORLD_STATE_SECTION_ORDER.filter((section) => present.includes(section)),
+    ...present.filter((section) => !WORLD_STATE_SECTION_ORDER.includes(section)).sort(),
+  ];
+  if (ordered.length === 0) return null;
+  const lines: string[] = [tier === "stable" ? "# World state" : "# Latest observations"];
+  const evidenceRefs: ArtifactRef[] = [];
+  let confidentiality: ContextFragment["confidentiality"] = "workspace";
+  for (const section of ordered) {
+    const value = worldState.sections[section];
+    if (section === "secrets" || section === "credentials") confidentiality = "secret_adjacent";
+    lines.push("", `## ${section}`, safeWorldStateJson(section, value));
+    for (const ref of worldStateEvidenceRefs(value)) evidenceRefs.push(ref);
+  }
+  return {
+    tier,
+    text: lines.join("\n"),
+    sections: ordered,
+    trust: "derived",
+    confidentiality,
+    injectionRisk: "low",
+    evidenceRefs,
+  };
+}
+
+/** Both world-state tiers, in emission order. */
+export function renderWorldStateBlocks(
+  worldState: WorldStateSnapshot,
+): { readonly stable: RenderedWorldState | null; readonly volatile: RenderedWorldState | null } {
+  return {
+    stable: renderWorldStateBlock(worldState, "stable"),
+    volatile: renderWorldStateBlock(worldState, "volatile"),
+  };
+}
+
 function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[] {
   const modelKey = input.model.modelKey;
   const tokenizer = input.tokenEstimator
@@ -782,40 +980,45 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
   };
   const results: RetrievalResult[] = [];
 
-  for (const [section, value] of Object.entries(input.worldState.sections)) {
-    const text = `# World State: ${section}\n\n${safeWorldStateJson(section, value)}`;
-    const sourceUri = `world://${section}`;
-    const version = input.worldState.sourceVersions[sourceUri]
-      ?? input.worldState.sourceVersions[section]
-      ?? input.worldState.observedAt;
-    const evidenceRefs = worldStateEvidenceRefs(value);
+  const worldStateTiers = renderWorldStateBlocks(input.worldState);
+  for (const worldState of [worldStateTiers.stable, worldStateTiers.volatile]) {
+    if (worldState === null) continue;
+    const isVolatile = worldState.tier === "volatile";
     const fragment = makeRuntimeFragment({
-      id: `runtime:world_state:${section}`,
+      id: isVolatile ? VOLATILE_WORLD_STATE_FRAGMENT_ID : WORLD_STATE_FRAGMENT_ID,
       kind: "world_state",
-      uri: sourceUri,
-      text,
-      sourceVersion: version,
-      authority: 70,
-      priority: 70,
-      trust: section === "request" ? "untrusted" : "derived",
-      confidentiality: section === "secrets" ? "secret_adjacent" : "workspace",
-      injectionRisk: section === "request" ? "medium" : "low",
-      exactness: section === "request" ? "recoverable_by_reference" : "semantics_preserving",
+      uri: isVolatile ? VOLATILE_WORLD_STATE_SOURCE_URI : WORLD_STATE_SOURCE_URI,
+      text: worldState.text,
+      // Content-derived: identical world state across two attempts yields an
+      // identical version, so the block is byte-stable for the cache.
+      sourceVersion: computeContentHash(worldState.text),
+      // The volatile tier sits behind the transcript and must never be
+      // evicted ahead of an old tool result: it is the only statement of what
+      // the workspace looks like right now.
+      authority: isVolatile ? 72 : 70,
+      priority: isVolatile ? 72 : 70,
+      trust: worldState.trust,
+      confidentiality: worldState.confidentiality,
+      injectionRisk: worldState.injectionRisk,
+      exactness: "semantics_preserving",
       scope,
       modelKey,
       tokenizer,
       features,
       observedAt: input.worldState.observedAt,
-      evidenceRefs,
-      invalidation: [{ kind: "ttl", selector: `world://${section}` }],
+      evidenceRefs: worldState.evidenceRefs,
+      invalidation: [{
+        kind: "ttl",
+        selector: isVolatile ? VOLATILE_WORLD_STATE_SOURCE_URI : WORLD_STATE_SOURCE_URI,
+      }],
     });
     results.push({
       fragment,
       method: "exact_user_reference",
       rawScore: 1,
       rerankedScore: 1,
-      sourceVersion: version,
-      reason: `authoritative world state: ${section}`,
+      sourceVersion: fragment.sourceVersion,
+      reason: `authoritative world state (${worldState.tier}): ${worldState.sections.join(", ")}`,
     });
   }
 
@@ -823,8 +1026,8 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
   for (const episode of input.recentEpisodes) {
     if (episode.toolCallId === null) continue;
     const pair = toolEpisodeIds.get(episode.toolCallId) ?? { callId: null, resultId: null };
-    if (episode.kind === "tool_call") pair.callId = `runtime:episode:${episode.id}:tool_call`;
-    if (episode.kind === "tool_result") pair.resultId = `runtime:episode:${episode.id}:tool_result`;
+    if (episode.kind === "tool_call") pair.callId = episodeFragmentId(episode);
+    if (episode.kind === "tool_result") pair.resultId = episodeFragmentId(episode);
     toolEpisodeIds.set(episode.toolCallId, pair);
   }
   for (const episode of input.recentEpisodes) {
@@ -852,21 +1055,29 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
       episode.toolCallId === null ? null : `tool_call: ${episode.toolCallId}`,
       episode.contentRef === null ? "content: unavailable" : `content: ${episode.contentRef}`,
     ].filter((line): line is string => line !== null).join("\n");
+    // The rendered role follows the episode kind, never the fragment's
+    // position in the message array: a `user_message` episode that renders as
+    // `assistant` teaches the model that it said what the user said.
+    const isUserSideEpisode = episode.kind === "user_message"
+      || episode.kind === "steering_message";
     const fragment = makeRuntimeFragment({
-      id: episode.kind === "tool_call"
-        ? `runtime:episode:${episode.id}:tool_call`
-        : episode.kind === "tool_result"
-          ? `runtime:episode:${episode.id}:tool_result`
-          : `runtime:episode:${episode.id}`,
-      kind: episode.kind === "tool_result" ? "tool_result" : "recent_episode",
+      id: episodeFragmentId(episode),
+      kind: episode.kind === "tool_result"
+        ? "tool_result"
+        : isUserSideEpisode
+          ? "user_attachment"
+          : "recent_episode",
       uri: `episode://${episode.id}`,
       text,
       sourceVersion: episode.contentRef,
-      authority: 45,
-      priority: 45,
-      trust: "derived",
+      // The user's own words are the task. They stay selectable ahead of tool
+      // chatter without becoming hard-required (which would pin them into the
+      // cache-stable prefix and invalidate it on every turn).
+      authority: isUserSideEpisode ? 60 : 45,
+      priority: isUserSideEpisode ? 60 : 45,
+      trust: isUserSideEpisode ? "untrusted" : "derived",
       confidentiality: "workspace",
-      injectionRisk: "low",
+      injectionRisk: isUserSideEpisode ? "medium" : "low",
       exactness: hydratedText === undefined ? "recoverable_by_reference" : "exact",
       scope,
       modelKey,
@@ -990,7 +1201,7 @@ function makeRuntimeFragment(input: RuntimeFragmentInput): ContextFragment {
     dependencies: input.dependencies ?? [],
     invalidation: input.invalidation,
     estimatedTokens: {
-      [input.modelKey]: input.tokenizer.estimateTextTokens(input.text),
+      [input.modelKey]: estimateMessageTokens(input.tokenizer, input.text),
     },
     selectionFeatures: input.features,
   };
@@ -1436,26 +1647,171 @@ export function allocateBudget(
   };
 }
 
+// ────────────────────────── Emission order ───────────────────────────────────
+
+/**
+ * Emission rank per fragment kind (SPEC §38.7 canonical prefix order).
+ *
+ * Allocation decides *which* fragments survive the budget; it must never
+ * decide *where* they appear. Utility order (smallest-first) shuffled the
+ * whole message array on every attempt, which broke prompt caching, and it
+ * placed tool results before the calls that produced them.
+ *
+ * Everything at rank {@link EPISODE_EMISSION_RANK} is a transcript entry and
+ * is emitted in strict episode-sequence order.
+ */
+const EMISSION_RANK: Readonly<Record<ContextFragment["kind"], number>> = {
+  authority: 0,
+  tool_schema: 1,
+  project_rule: 2,
+  task_contract: 3,
+  memory: 4,
+  world_state: 5,
+  checkpoint: 6,
+  documentation: 7,
+  code: 7,
+  test: 7,
+  user_attachment: 8,
+  recent_episode: 8,
+  tool_result: 8,
+};
+
+const EPISODE_EMISSION_RANK = 8;
+
+/**
+ * The volatile world state is emitted after everything else, including the
+ * newest transcript entry. It is the one block guaranteed to differ between
+ * two attempts of the same turn, so nothing cacheable may sit behind it.
+ */
+const VOLATILE_EMISSION_RANK = 9;
+
+/** Fragment kinds that render into the provider's system/developer prefix. */
+const CACHE_PREFIX_KINDS: ReadonlySet<ContextFragment["kind"]> = new Set([
+  "authority",
+  "tool_schema",
+  "project_rule",
+  "task_contract",
+]);
+
+/** Emission rank of one fragment: id first (tiers), then kind. */
+function emissionRankOf(fragment: ContextFragment): number {
+  if (fragment.id === VOLATILE_WORLD_STATE_FRAGMENT_ID) return VOLATILE_EMISSION_RANK;
+  return EMISSION_RANK[fragment.kind] ?? EPISODE_EMISSION_RANK;
+}
+
+/** True for the one block that is expected to move on every attempt. */
+export function isVolatileTailFragment(fragment: ContextFragment): boolean {
+  return fragment.id === VOLATILE_WORLD_STATE_FRAGMENT_ID;
+}
+
+/**
+ * Reorder an allocation for emission: stable prefix, then the per-turn block,
+ * then the transcript in episode-sequence order.
+ *
+ * `episodeSequence` maps a fragment id to the sequence of the episode it was
+ * projected from. Fragments with no episode sort after the ones that have
+ * one, keeping their relative selection order.
+ */
+export function orderSelectionForEmission(
+  selected: readonly ScoredCandidate[],
+  episodeSequence: ReadonlyMap<string, number>,
+): readonly ScoredCandidate[] {
+  return selected
+    .map((candidate, index) => {
+      const fragment = candidate.result.fragment;
+      const rank = emissionRankOf(fragment);
+      const sequence = episodeSequence.get(fragment.id);
+      return {
+        candidate,
+        rank,
+        // A tool_call and its tool_result always carry distinct sequences;
+        // the kind tiebreak only matters for a caller that reuses one.
+        sequence: sequence ?? Number.MAX_SAFE_INTEGER,
+        kindTiebreak: fragment.kind === "tool_result" ? 1 : 0,
+        index,
+      };
+    })
+    .sort((left, right) =>
+      left.rank - right.rank
+      || left.sequence - right.sequence
+      || left.kindTiebreak - right.kindTiebreak
+      || left.index - right.index)
+    .map((entry) => entry.candidate);
+}
+
+/** Fragment-id → episode-sequence projection for {@link orderSelectionForEmission}. */
+export function episodeSequenceIndex(
+  episodes: readonly Episode[],
+): ReadonlyMap<string, number> {
+  const index = new Map<string, number>();
+  for (const episode of episodes) index.set(episodeFragmentId(episode), episode.sequence);
+  return index;
+}
+
 // ────────────────────────── Cache epoch plan ─────────────────────────────────
 
+/**
+ * Plan the cache epoch over the *emission-ordered* selection.
+ *
+ * Two breakpoints, both expressed as indices into the rendered fragment array
+ * (which is the array every renderer iterates, so the index means the same
+ * thing on every provider):
+ *
+ *  1. the last fragment of the stable prefix — system/developer blocks plus
+ *     the tool schemas and the task contract, everything that does not change
+ *     between turns of the same task;
+ *  2. the last fragment that is NOT the volatile world-state tail, so the
+ *     next attempt can reuse the whole transcript instead of only the prefix.
+ *
+ * The tail breakpoint deliberately stops short of the volatile block. That
+ * block changes on every attempt by definition (`index_revision` after a
+ * patch, a new `last_command`), so a breakpoint on it would write a cache
+ * entry that the next attempt can never read. Putting the marker on the last
+ * transcript item instead keeps the marker itself byte-stable and caches
+ * everything up to it.
+ *
+ * A breakpoint below the provider's minimum cacheable prefix is not emitted:
+ * it would cost a cache write that can never be read.
+ */
 export function planCacheEpoch(
   input: CompileInput,
   selected: readonly ScoredCandidate[],
 ): ContextCachePlan {
   const stable: ScoredCandidate[] = [];
   for (const candidate of selected) {
-    if (candidate.result.fragment.exactness !== "exact") break;
+    if (!CACHE_PREFIX_KINDS.has(candidate.result.fragment.kind)) break;
     stable.push(candidate);
   }
   const stableHash = computeStablePrefixHash(stable.map((s) => s.result.fragment));
   const volatileBoundary = stable.length;
-  const breakpoints = stable.length > 0 ? [stable.length - 1] : [];
   const modelKey = input.model.modelKey;
   const providerId = input.provider.providerId;
-  const predicted = stable.reduce(
+  const cost = (candidates: readonly ScoredCandidate[]): number => candidates.reduce(
     (sum, s) => sum + tokenCostFor(s.result.fragment, modelKey, providerId, input.tokenEstimator),
     0,
   );
+  const predicted = cost(stable);
+  const minimumCacheableTokens = input.provider.caching.minimumTokens ?? 0;
+  const toolSchemaTokens = input.toolSchemas === undefined || input.toolSchemas.length === 0
+    ? 0
+    : (input.tokenEstimator ?? resolveTokenizer(providerId, modelKey))
+      .estimateToolSchemaTokens(input.toolSchemas);
+  const breakpoints: number[] = [];
+  if (stable.length > 0 && predicted + toolSchemaTokens >= minimumCacheableTokens) {
+    breakpoints.push(stable.length - 1);
+  }
+  // The last cacheable item: everything except the volatile tail.
+  let cacheableEnd = selected.length - 1;
+  while (cacheableEnd >= 0 && isVolatileTailFragment(selected[cacheableEnd]!.result.fragment)) {
+    cacheableEnd -= 1;
+  }
+  if (
+    cacheableEnd >= 0
+    && !breakpoints.includes(cacheableEnd)
+    && cost(selected.slice(0, cacheableEnd + 1)) + toolSchemaTokens >= minimumCacheableTokens
+  ) {
+    breakpoints.push(cacheableEnd);
+  }
   return {
     stablePrefixHash: stableHash,
     volatileSuffixBoundary: volatileBoundary,
@@ -1598,15 +1954,27 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     preserveCompleteEpisodes: true,
     hardIncludeRequired: true,
   }, input.model.modelKey, input.provider.providerId, tokenizer);
-  // 8. Cache plan.
-  const cachePlan = planCacheEpoch(input, allocation.selected);
-  // Confidentiality filter.
+  // 7b. Emission order. Allocation chose the survivors on utility; the wire
+  // order is canonical (prefix → per-turn block → transcript in episode
+  // sequence). Scoring must never reorder the messages.
+  const emissionOrdered = orderSelectionForEmission(
+    allocation.selected,
+    episodeSequenceIndex(input.recentEpisodes),
+  );
+  // Confidentiality filter. It runs before the cache plan because the plan's
+  // breakpoints are indices into the fragment array the renderer receives.
   const confFiltered = filterByConfidentiality(
     input.confidentialityPolicy,
     input.provider.providerId,
-    allocation.selected.map((s) => s.result.fragment),
+    emissionOrdered.map((s) => s.result.fragment),
   );
   const selectedFragments = confFiltered.admitted;
+  // 8. Cache plan, over exactly the fragments that will be rendered.
+  const renderedSelectionIds = new Set(selectedFragments.map((fragment) => fragment.id));
+  const cachePlan = planCacheEpoch(
+    input,
+    emissionOrdered.filter((candidate) => renderedSelectionIds.has(candidate.result.fragment.id)),
+  );
   const hardSelectedIds = new Set(
     allocation.selected
       .filter((candidate) => candidate.hardRequired)

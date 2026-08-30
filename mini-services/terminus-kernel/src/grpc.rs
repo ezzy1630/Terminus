@@ -122,6 +122,7 @@ impl GrpcKernel {
             }
         }
         let lease_token = manager.get(&job_id).await.map(|record| record.lease_token);
+        let job_streams = std::sync::Arc::clone(&self.job_streams);
         tasks.spawn(async move {
             let mut sequence = 0_u64;
             let mut saw_exit = false;
@@ -192,7 +193,29 @@ impl GrpcKernel {
                 drop(state);
                 stream.changed.notify_waiters();
             }
+            remove_completed_job_stream(&job_streams, &job_id, &stream).await;
         });
+    }
+}
+
+/// Release the registry's strong reference once the live receiver settles.
+/// Existing stream consumers retain their own `Arc`; later consumers replay
+/// the same events from the durable job record instead of retaining an 8 MiB
+/// in-memory buffer for every completed job.
+async fn remove_completed_job_stream(
+    job_streams: &std::sync::Arc<
+        tokio::sync::Mutex<HashMap<String, std::sync::Arc<JobStreamBuffer>>>,
+    >,
+    job_id: &str,
+    completed: &std::sync::Arc<JobStreamBuffer>,
+) {
+    let mut streams = job_streams.lock().await;
+    let is_current = streams
+        .get(job_id)
+        .map(|current| std::sync::Arc::ptr_eq(current, completed))
+        .unwrap_or(false);
+    if is_current {
+        streams.remove(job_id);
     }
 }
 
@@ -647,7 +670,10 @@ impl KernelInfoServiceRpc for GrpcKernel {
         Ok(Response::new(KernelInfo {
             version: string(&value, "version", ""),
             protocol_version: "terminus.kernel.v1".to_string(),
-            build_revision: string(&value, "build_revision", "dev"),
+            // Read straight off the service rather than round-tripping
+            // through the JSON with a `"dev"` default: the placeholder that
+            // used to identify every build can no longer be reached.
+            build_revision: self.kernel.info.build_revision().to_string(),
             supported_backends,
             supported_services,
             instance_id: self.kernel.info.instance_id().to_string(),
@@ -1350,7 +1376,8 @@ impl SecretServiceRpc for GrpcKernel {
         let metadata = self
             .kernel
             .secrets
-            .request_metadata(&ctx, &request.capability_uri, &ctx.actor_id)
+            .request_metadata_async(&ctx, &request.capability_uri, &ctx.actor_id)
+            .await
             .map_err(status)?;
         let requested_expiry = if request.ttl_seconds == 0 {
             metadata.expires_at_unix
@@ -1523,7 +1550,10 @@ impl ConnectorServiceRpc for GrpcKernel {
         let grant = self
             .kernel
             .connectors
-            .mint_grant(
+            // Async variant: the credential resolve runs on the blocking pool
+            // under a deadline, so a pending OS keychain prompt cannot park a
+            // tokio worker until the control plane's unary deadline fires.
+            .mint_grant_async(
                 &ctx,
                 &request.capability_uri,
                 terminus_secrets::GrantBinding {
@@ -1542,6 +1572,7 @@ impl ConnectorServiceRpc for GrpcKernel {
                 request.ttl_seconds,
                 1,
             )
+            .await
             .map_err(status)?;
         let encoded_grant = grant
             .encode()
@@ -1595,13 +1626,44 @@ impl ConnectorServiceRpc for GrpcKernel {
             body: operation.body,
         };
 
-        // The dispatch runs in a supervised task whose JoinHandle is joined
-        // by the tail of the returned stream — no detached work, and errors
-        // surface as terminal stream items.
+        // The dispatch runs in a supervised task whose JoinHandle is held by
+        // the returned stream: it is joined when the channel closes and
+        // ABORTED when the consumer drops the stream, so a cancelled RPC
+        // never leaves a detached provider request running to completion.
+        //
+        // The sink emits a metadata frame first (a receipt frame carrying
+        // `outcome = "head"`, the HTTP status, and the allowlisted response
+        // headers), then body frames, then the terminal accounting receipt.
         struct ReceiptSink {
             tx: tokio::sync::mpsc::Sender<Result<protocol::ConnectorChunk, Status>>,
+            identity: ConnectorStreamIdentity,
         }
         impl terminus_connector::ChunkSink for ReceiptSink {
+            fn on_head(
+                &mut self,
+                head: terminus_connector::ResponseHead,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<(), terminus_connector::ConnectorError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                let frame = self.identity.head_frame(&head);
+                let tx = self.tx.clone();
+                Box::pin(async move {
+                    tx.send(Ok(protocol::ConnectorChunk {
+                        payload: Some(protocol::connector_chunk::Payload::Receipt(frame)),
+                    }))
+                    .await
+                    .map_err(|_| {
+                        terminus_connector::ConnectorError::Protocol(
+                            "stream consumer dropped".into(),
+                        )
+                    })
+                })
+            }
+
             fn on_chunk(
                 &mut self,
                 bytes: &[u8],
@@ -1628,12 +1690,35 @@ impl ConnectorServiceRpc for GrpcKernel {
             }
         }
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<protocol::ConnectorChunk, Status>>(64);
+        let identity = ConnectorStreamIdentity {
+            grant_id: grant.claims.grant_id.clone(),
+            task_id: grant.claims.workload.task_id.clone(),
+            effect_id: grant.claims.binding.effect_id.clone(),
+            connector_id: grant.claims.binding.connector_id.clone(),
+            method: canonical.method.clone(),
+            path: canonical.path.clone(),
+            destination: format!(
+                "{}://{}:{}",
+                canonical.scheme, canonical.host, canonical.port
+            ),
+        };
+        // Bounded in-flight window: a slow consumer parks the sink send,
+        // which parks the dispatch loop, which stops reading the socket —
+        // backpressure reaches the provider instead of growing kernel heap.
+        // Each item is one aligned SSE flush, so this is bytes-bounded too.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<protocol::ConnectorChunk, Status>>(
+            CONNECTOR_STREAM_CHANNEL_DEPTH,
+        );
         let connectors = self.kernel.connectors.clone();
+        let cancel = terminus_connector::CancelToken::new();
+        let dispatch_cancel = cancel.clone();
         let pump = tokio::spawn(async move {
-            let mut sink = ReceiptSink { tx: tx.clone() };
+            let mut sink = ReceiptSink {
+                tx: tx.clone(),
+                identity,
+            };
             let result = connectors
-                .execute_streaming(&ctx, &canonical, &grant, &mut sink)
+                .execute_streaming(&ctx, &canonical, &grant, &mut sink, &dispatch_cancel)
                 .await;
             match result {
                 Ok(response) => {
@@ -1664,12 +1749,14 @@ impl ConnectorServiceRpc for GrpcKernel {
                         .await;
                 }
                 Err(error) => {
-                    let _ = tx.send(Err(status(error))).await;
+                    let _ = tx
+                        .send(Err(connector_stream_status(&dispatch_cancel, error)))
+                        .await;
                 }
             }
         });
 
-        let stream = PumpStream { rx, pump };
+        let stream = PumpStream { rx, pump, cancel };
         Ok(Response::new(Box::pin(stream) as Self::ExecuteStreamStream))
     }
 
@@ -1749,6 +1836,69 @@ fn connector_response_headers(
         .into_iter()
         .map(|(name, value)| protocol::ConnectorHeaderMessage { name, value })
         .collect()
+}
+
+/// In-flight frames a stream consumer may lag behind by. Each frame is one
+/// event-boundary-aligned flush (bounded by the connector's pending-event
+/// cap), so the window bounds kernel memory as well as frame count.
+const CONNECTOR_STREAM_CHANNEL_DEPTH: usize = 16;
+
+/// Identity fields repeated on every receipt frame of one connector stream.
+/// The leading metadata frame reuses `ConnectorReceiptMessage` — no proto
+/// change — and is distinguished by `outcome == "head"`.
+#[derive(Clone, Debug)]
+struct ConnectorStreamIdentity {
+    grant_id: String,
+    task_id: String,
+    effect_id: String,
+    connector_id: String,
+    method: String,
+    path: String,
+    destination: String,
+}
+
+/// Marks the leading metadata frame. Body/accounting frames always carry one
+/// of the four `Outcome` names, so this value is unambiguous.
+pub const CONNECTOR_STREAM_HEAD_OUTCOME: &str = "head";
+
+impl ConnectorStreamIdentity {
+    /// The metadata frame: HTTP status and the connector's allowlisted
+    /// response headers (`retry-after`, `x-ratelimit-*`, `x-codex-*`, …),
+    /// delivered before the first body byte. Hash and redaction accounting
+    /// are only known at settlement and stay on the terminal frame.
+    fn head_frame(
+        &self,
+        head: &terminus_connector::ResponseHead,
+    ) -> protocol::ConnectorReceiptMessage {
+        protocol::ConnectorReceiptMessage {
+            grant_id: self.grant_id.clone(),
+            task_id: self.task_id.clone(),
+            effect_id: self.effect_id.clone(),
+            connector_id: self.connector_id.clone(),
+            method: self.method.clone(),
+            path: self.path.clone(),
+            destination: self.destination.clone(),
+            request_sha256: String::new(),
+            status_code: Some(u32::from(head.status_code)),
+            response_sha256: None,
+            response_redactions: 0,
+            outcome: CONNECTOR_STREAM_HEAD_OUTCOME.to_string(),
+            response_headers: connector_response_headers(head.headers.clone()),
+        }
+    }
+}
+
+/// Terminal status for a failed connector stream. A dispatch the caller tore
+/// down answers `CANCELLED` so a consumer can tell "we stopped this" from
+/// "the provider or the policy refused it".
+fn connector_stream_status(
+    cancel: &terminus_connector::CancelToken,
+    error: terminus_kernel_protocol::KernelError,
+) -> Status {
+    if cancel.is_cancelled() {
+        return Status::cancelled("connector stream cancelled by the caller");
+    }
+    status(error)
 }
 
 fn connector_outcome(outcome: terminus_connector::Outcome) -> &'static str {
@@ -3567,6 +3717,20 @@ impl PumpStream {
 struct PumpStream {
     rx: tokio::sync::mpsc::Receiver<Result<protocol::ConnectorChunk, Status>>,
     pump: tokio::task::JoinHandle<()>,
+    cancel: terminus_connector::CancelToken,
+}
+
+/// A gRPC client that goes away — cancelled RPC, dropped stream, closed
+/// connection — drops the response stream. Before, the JoinHandle went with
+/// it and the dispatch task ran on detached: the provider kept generating
+/// (and billing) a completion nobody would read, for up to the connector's
+/// 300 s total bound. Now the drop cancels the dispatch (which tears the
+/// HTTPS connection down at the next await point) and aborts the task.
+impl Drop for PumpStream {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.pump.abort();
+    }
 }
 
 impl tokio_stream::Stream for PumpStream {
@@ -3617,6 +3781,31 @@ mod tests {
                 String::new()
             },
         }
+    }
+
+    #[tokio::test]
+    async fn completed_job_stream_releases_only_its_registry_entry() {
+        let streams = std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let completed = std::sync::Arc::new(JobStreamBuffer::default());
+        streams
+            .lock()
+            .await
+            .insert("job-1".to_string(), std::sync::Arc::clone(&completed));
+
+        remove_completed_job_stream(&streams, "job-1", &completed).await;
+        assert!(!streams.lock().await.contains_key("job-1"));
+
+        let replacement = std::sync::Arc::new(JobStreamBuffer::default());
+        streams
+            .lock()
+            .await
+            .insert("job-1".to_string(), std::sync::Arc::clone(&replacement));
+        remove_completed_job_stream(&streams, "job-1", &completed).await;
+        let current = streams.lock().await.get("job-1").cloned();
+        assert!(current
+            .as_ref()
+            .map(|stream| std::sync::Arc::ptr_eq(stream, &replacement))
+            .unwrap_or(false));
     }
 
     fn bootstrap_request(principal: &str) -> Request<protocol::BootstrapControlRequest> {
@@ -4718,6 +4907,15 @@ mod tests {
             response.instance_id.starts_with("kernel:"),
             "instance_id must be kernel-prefixed for remote identity binding"
         );
+        // Build identity survives the wire: the control plane's health
+        // endpoint reads this instead of deriving a digest from the version
+        // and service list.
+        assert!(
+            !response.build_revision.is_empty() && response.build_revision != "dev",
+            "build_revision must identify a real build, got {:?}",
+            response.build_revision
+        );
+        assert!(!response.version.is_empty(), "version must be reported");
 
         let workspace = WorkspaceServiceClient::new(channel.clone())
             .register(protocol::RegisterWorkspaceRequest {
@@ -5310,5 +5508,128 @@ mod tests {
             Some(protocol::job_event::Event::Exited(ref exit))
                 if exit.exit_code == 0
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // Connector stream cancellation (harness audit Phase 0 item 8).
+    // -----------------------------------------------------------------
+
+    /// The defect: the dispatch JoinHandle went out of scope with the
+    /// stream and the task ran on detached, so a stopped turn still paid
+    /// for a full provider completion. Dropping the stream must cancel the
+    /// token AND abort the task.
+    #[tokio::test]
+    async fn dropping_the_connector_stream_cancels_and_aborts_the_dispatch() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<protocol::ConnectorChunk, Status>>(4);
+        let cancel = terminus_connector::CancelToken::new();
+        let alive = std::sync::Arc::new(());
+        let held = alive.clone();
+        let pump = tokio::spawn(async move {
+            // Stands in for an in-flight provider dispatch: never finishes
+            // on its own, and keeps `held` alive while it runs.
+            let _held = held;
+            let _tx = tx;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(std::sync::Arc::strong_count(&alive), 2);
+
+        let stream = PumpStream {
+            rx,
+            pump,
+            cancel: cancel.clone(),
+        };
+        drop(stream);
+
+        assert!(cancel.is_cancelled(), "drop must cancel the dispatch token");
+        for _ in 0..200 {
+            if std::sync::Arc::strong_count(&alive) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            std::sync::Arc::strong_count(&alive),
+            1,
+            "the dispatch task must be aborted, not left running detached"
+        );
+    }
+
+    /// A torn-down dispatch answers CANCELLED; everything else keeps its
+    /// own mapping so a permission denial is never mistaken for a stop.
+    #[test]
+    fn a_cancelled_connector_stream_terminates_with_the_cancelled_status() {
+        let cancel = terminus_connector::CancelToken::new();
+        let denial = terminus_kernel_protocol::KernelError::new(
+            terminus_kernel_protocol::ErrorCode::PermissionDenied,
+            terminus_kernel_protocol::ErrorCategory::Permission,
+            "denied".to_string(),
+            false,
+        );
+        assert_eq!(
+            connector_stream_status(&cancel, denial).code(),
+            tonic::Code::PermissionDenied
+        );
+
+        cancel.cancel();
+        let cancelled = terminus_kernel_protocol::KernelError::new(
+            terminus_kernel_protocol::ErrorCode::Cancelled,
+            terminus_kernel_protocol::ErrorCategory::Cancelled,
+            "cancelled".to_string(),
+            false,
+        );
+        assert_eq!(
+            connector_stream_status(&cancel, cancelled).code(),
+            tonic::Code::Cancelled
+        );
+
+        // Even without the token, the kernel error code alone maps through.
+        let fresh = terminus_connector::CancelToken::new();
+        let coded = terminus_kernel_protocol::KernelError::new(
+            terminus_kernel_protocol::ErrorCode::Cancelled,
+            terminus_kernel_protocol::ErrorCategory::Cancelled,
+            "cancelled".to_string(),
+            false,
+        );
+        assert_eq!(
+            connector_stream_status(&fresh, coded).code(),
+            tonic::Code::Cancelled
+        );
+    }
+
+    /// The leading metadata frame is a receipt frame marked `head`, so an
+    /// existing consumer that only reads `bytes`/`receipt` keeps working and
+    /// a new one can tell it from the terminal accounting frame.
+    #[test]
+    fn the_leading_metadata_frame_carries_status_and_allowlisted_headers() {
+        let identity = ConnectorStreamIdentity {
+            grant_id: "grant-1".to_string(),
+            task_id: "task-1".to_string(),
+            effect_id: "eff-1".to_string(),
+            connector_id: "chatgpt-codex".to_string(),
+            method: "POST".to_string(),
+            path: "/backend-api/codex/responses".to_string(),
+            destination: "https://chatgpt.com:443".to_string(),
+        };
+        let frame = identity.head_frame(&terminus_connector::ResponseHead {
+            status_code: 429,
+            content_type: Some("text/event-stream".to_string()),
+            headers: vec![
+                ("x-codex-turn-state".to_string(), "shard-7".to_string()),
+                ("retry-after".to_string(), "12".to_string()),
+            ],
+        });
+        assert_eq!(frame.outcome, CONNECTOR_STREAM_HEAD_OUTCOME);
+        assert_eq!(frame.status_code, Some(429));
+        assert_eq!(frame.response_sha256, None);
+        assert_eq!(frame.response_redactions, 0);
+        assert_eq!(frame.connector_id, "chatgpt-codex");
+        let names = frame
+            .response_headers
+            .iter()
+            .map(|header| header.name.clone())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"x-codex-turn-state".to_string()));
+        assert!(names.contains(&"retry-after".to_string()));
     }
 }

@@ -23,6 +23,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Micros, Rfc3339Timestamp } from "@terminus/domain";
 import type { ProviderCapabilitySnapshot } from "@terminus/provider-core";
+import { resolveMaxOutputTokens, resolveTestedSafeContextTokens } from "@terminus/provider-core";
 import type { CredentialBoundGatewayClient, GatewayModel, GatewayProtocol } from "@terminus/provider-zen";
 import { ProviderTransportError } from "./providers/provider-retry.js";
 import {
@@ -293,7 +294,11 @@ export function decodeCodexCatalog(raw: unknown): {
       structuredOutput: true,
       imageInput: Array.isArray(entry.input_modalities) && entry.input_modalities.includes("image"),
       contextTokens: positiveInteger(entry.context_window),
-      outputTokens: 0,
+      // The Codex catalogue reports no output limit. Serving 0 made every
+      // consumer of /v1/provider-models (the desktop, the eval record) fall
+      // back to its own guess; the family ceiling is what the turn engine
+      // already applies, so the catalogue states it too.
+      outputTokens: resolveMaxOutputTokens({ modelId: slug, outputTokens: positiveInteger(entry.max_output_tokens) }),
       inputMicrosPerMillion: 0,
       cachedInputMicrosPerMillion: 0,
       outputMicrosPerMillion: 0,
@@ -336,11 +341,26 @@ export async function discoverAccountModels(
       throw new Error("zen account discovery requires the gateway discovery function");
     }
     const discovered = await input.discoverZen();
+    const anonymous = input.account.authKind === "anonymous";
+    const admitted = anonymous
+      ? discovered.models.filter((model) => model.free)
+      : discovered.models;
+    const rejected = anonymous
+      ? [
+          ...discovered.rejected,
+          ...discovered.models
+            .filter((model) => !model.free)
+            .map((model) => ({
+              modelId: model.id,
+              reason: "anonymous OpenCode Zen accounts admit free models only",
+            })),
+        ].sort((left, right) => left.modelId.localeCompare(right.modelId))
+      : discovered.rejected;
     return {
       accountId: input.account.id,
       observedAt: input.observedAt,
-      models: discovered.models.map(fromGatewayModel),
-      rejected: discovered.rejected,
+      models: admitted.map(fromGatewayModel),
+      rejected,
       reachable: true,
       reachabilityDetail: "",
     };
@@ -495,7 +515,6 @@ export function providerAccountCapabilitySnapshot(input: {
   readonly observedAt: Rfc3339Timestamp;
   readonly workspaceAccess: boolean;
 }): ProviderCapabilitySnapshot {
-  const profile = input.account.renderProfile as ProviderRenderProfile;
   const protocol = input.account.protocol as GatewayProtocol;
   const digest = createHash("sha256")
     .update(JSON.stringify({
@@ -504,17 +523,30 @@ export function providerAccountCapabilitySnapshot(input: {
       model: input.model,
     }), "utf8")
     .digest("hex");
-  // ChatGPT Codex rejects `store: true`, so the endpoint keeps nothing to
-  // continue from even though the protocol is Responses: every turn replays
-  // its own prefix.
-  const nativeContinuation = protocol === "responses" && profile !== "chatgpt_codex";
+  // Terminus renders every Responses request with `store: false`, so the
+  // endpoint keeps nothing to continue from on any account: each turn replays
+  // its own prefix and its own encrypted reasoning items. ChatGPT Codex
+  // additionally rejects `store: true` outright.
+  const nativeContinuation = false;
   return {
     providerId: input.providerId,
     observedAt: input.observedAt,
     source: `terminus-control/provider-account-v1:${digest}`,
     context: {
       advertisedTokens: input.model.contextTokens,
-      testedSafeTokens: Math.min(input.model.contextTokens, 32_768),
+      // Per-family, not a blanket 32,768: the Codex catalogue reports a
+      // 1,050,000-token window for GPT-5.6 and the old clamp handed the model
+      // 3% of it.
+      testedSafeTokens: resolveTestedSafeContextTokens({
+        modelId: input.model.id,
+        contextTokens: input.model.contextTokens,
+      }),
+      // The Codex catalogue reports no output limit at all, so the family
+      // ceiling is the only source for it on the subscription path.
+      maxOutputTokens: resolveMaxOutputTokens({
+        modelId: input.model.id,
+        outputTokens: input.model.outputTokens,
+      }),
       roleSupport: protocol === "messages"
         ? ["system", "user", "assistant", "tool"]
         : ["system", "user", "assistant", "tool", "developer"],
@@ -642,8 +674,8 @@ export function providerAccountModelsWire(
         ? ""
         : foldReasoningEffort(model.defaultReasoningEffort) ?? "",
       // USD micros per million tokens. A subscription account has no
-      // per-token price at all, so the fields are absent rather than zero —
-      // "$0.00/M" would be a claim about a plan Terminus cannot see.
+      // per-token price at all, so the rate fields stay absent rather than
+      // zero — "$0.00/M" would be a claim about a plan Terminus cannot see.
       ...(account.billing === "subscription"
         ? {}
         : {
@@ -651,7 +683,25 @@ export function providerAccountModelsWire(
             output_cost_micros: model.outputMicrosPerMillion,
             input_micros_per_million: model.inputMicrosPerMillion,
             output_micros_per_million: model.outputMicrosPerMillion,
+            // Cache reads are billed at a fraction of fresh input and the
+            // catalogue has always known the number; omitting it forced every
+            // consumer to assume cached input costs full price, which
+            // overstates the bill of a well-cached agent turn by ~10x on the
+            // cached portion.
+            cached_input_micros_per_million: model.cachedInputMicrosPerMillion,
           }),
+      // Why there is no price, said once and explicitly. Absent fields alone
+      // cannot distinguish "this plan has no per-token rate" from "discovery
+      // has not reported one yet", and a consumer that guesses wrong either
+      // invents a cost or discards a real one.
+      pricing: account.billing === "subscription"
+        ? null
+        : {
+            input_micros_per_million: model.inputMicrosPerMillion,
+            cached_input_micros_per_million: model.cachedInputMicrosPerMillion,
+            output_micros_per_million: model.outputMicrosPerMillion,
+          },
+      pricing_source: account.billing === "subscription" ? "subscription" : "catalog",
     })),
   );
   const rejected = entries.flatMap(({ account, result }) =>

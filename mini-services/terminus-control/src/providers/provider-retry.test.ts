@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   abortableSleep,
   backoffDelayMs,
+  DEFAULT_MAX_DELAY_MS,
+  MAX_HINTED_DELAY_MS,
   isRetryableProviderError,
   providerCodeFromError,
   ProviderTransportError,
@@ -29,6 +31,7 @@ describe("R6 provider retry classification", () => {
       new Error("connect ECONNRESET"),
       new Error("dispatch timed out"),
       new Error("kernel returned an empty connector grant"),
+      new Error("TRUNCATED_STREAM: chat-completions stream ended before data: [DONE]"),
     ]) {
       expect(isRetryableProviderError(good)).toBe(true);
     }
@@ -133,6 +136,25 @@ describe("H2 structured transport errors", () => {
     expect(isRetryableProviderError(
       new ProviderTransportError("invalid_request_error: bad tool schema", { providerCode: "invalid_request_error" }),
     )).toBe(false);
+    expect(isRetryableProviderError(
+      new ProviderTransportError("TRUNCATED_STREAM: missing terminal marker", { providerCode: "TRUNCATED_STREAM" }),
+    )).toBe(true);
+  });
+
+  test("the exact live truncated-stream failure consumes the bounded retry budget", async () => {
+    let attempts = 0;
+    const failure = await withProviderRetry(
+      async () => {
+        attempts += 1;
+        throw new ProviderTransportError(
+          "TRUNCATED_STREAM: chat-completions stream ended before data: [DONE]",
+          { providerCode: "TRUNCATED_STREAM" },
+        );
+      },
+      { maxAttempts: 3, jitter: () => 0, sleep: async () => undefined },
+    ).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(RetryBudgetExhaustedError);
+    expect(attempts).toBe(3);
   });
 
   test("4xx stays terminal even when the code looks transient", () => {
@@ -202,5 +224,90 @@ describe("H2 structured transport errors", () => {
     controller.abort();
     await pending;
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+});
+
+describe("an explicit Retry-After is obeyed, not clamped to the blind ceiling", () => {
+  test("a 60s hint is slept in full instead of being cut to the 8s backoff cap", async () => {
+    const delays: number[] = [];
+    await expect(withProviderRetry(
+      async () => {
+        throw new ProviderTransportError("rate_limit_error: slow down", {
+          status: 429,
+          retryAfterMs: 60_000,
+          providerCode: "rate_limit_error",
+        });
+      },
+      { maxAttempts: 2, jitter: () => 0, sleep: async (ms) => { delays.push(ms); } },
+    )).rejects.toBeInstanceOf(RetryBudgetExhaustedError);
+    // Previously clamped to DEFAULT_MAX_DELAY_MS (8_000), which spent the rest
+    // of the budget being told the same thing before failing the turn.
+    expect(delays).toEqual([60_000]);
+  });
+
+  test("the hint is still bounded, at two minutes", async () => {
+    const delays: number[] = [];
+    await expect(withProviderRetry(
+      async () => {
+        throw new ProviderTransportError("rate_limit_error: come back tomorrow", {
+          status: 429,
+          retryAfterMs: 6 * 60 * 60 * 1_000,
+          providerCode: "rate_limit_error",
+        });
+      },
+      { maxAttempts: 2, jitter: () => 0, sleep: async (ms) => { delays.push(ms); } },
+    )).rejects.toBeInstanceOf(RetryBudgetExhaustedError);
+    expect(delays).toEqual([MAX_HINTED_DELAY_MS]);
+    expect(MAX_HINTED_DELAY_MS).toBe(120_000);
+  });
+
+  test("the ceiling is configurable per call site", async () => {
+    const delays: number[] = [];
+    await expect(withProviderRetry(
+      async () => {
+        throw new ProviderTransportError("rate_limit_error: slow down", {
+          status: 429,
+          retryAfterMs: 60_000,
+          providerCode: "rate_limit_error",
+        });
+      },
+      { maxAttempts: 2, jitter: () => 0, maxHintedDelayMs: 5_000, sleep: async (ms) => { delays.push(ms); } },
+    )).rejects.toBeInstanceOf(RetryBudgetExhaustedError);
+    expect(delays).toEqual([5_000]);
+  });
+
+  test("a hintless failure still uses the short invented backoff", async () => {
+    const delays: number[] = [];
+    await expect(withProviderRetry(
+      async () => { throw new ProviderTransportError("server_error: boom", { status: 503 }); },
+      { maxAttempts: 2, jitter: () => 1, sleep: async (ms) => { delays.push(ms); } },
+    )).rejects.toBeInstanceOf(RetryBudgetExhaustedError);
+    expect(delays[0]).toBeLessThanOrEqual(DEFAULT_MAX_DELAY_MS);
+  });
+});
+
+describe("a refusal is terminal, not transient", () => {
+  test("a refusal is never retried even when it arrives with a 5xx", async () => {
+    let attempts = 0;
+    // Retrying a safety refusal buys the same refusal at full input cost.
+    expect(isRetryableProviderError(
+      new ProviderTransportError("refusal: I can't help with that", { providerCode: "refusal" }),
+    )).toBe(false);
+    expect(isRetryableProviderError(
+      new ProviderTransportError("refusal: I can't help with that", { status: 503, providerCode: "refusal" }),
+    )).toBe(false);
+    await expect(withProviderRetry(
+      async () => {
+        attempts += 1;
+        throw new ProviderTransportError("refusal: I can't help with that", { providerCode: "refusal" });
+      },
+      { maxAttempts: 5, sleep: async () => undefined },
+    )).rejects.toThrow(/after 1 attempt/);
+    expect(attempts).toBe(1);
+  });
+
+  test("a refusal is recognised from bare prose too", () => {
+    expect(providerCodeFromError(new Error("refusal: I can't help with that"))).toBe("refusal");
+    expect(isRetryableProviderError(new Error("refusal: I can't help with that"))).toBe(false);
   });
 });

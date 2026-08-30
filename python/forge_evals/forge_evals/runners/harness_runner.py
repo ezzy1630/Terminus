@@ -41,6 +41,7 @@ __all__ = [
     "HarnessRunner",
     "ModelCapabilitySnapshot",
     "RunRequest",
+    "apply_metrics_to_record",
     "build_evaluation_identity",
 ]
 
@@ -169,6 +170,22 @@ class RunRequest:
     random_seed: int
     budgets: Budgets = field(default_factory=Budgets)
     experiment_assignments: list[dict[str, Any]] = field(default_factory=list)
+    # Live steering. `reasoning_effort` is one of low|medium|high|max and maps
+    # to the control plane's `reasoning_effort` / `default_reasoning_effort`;
+    # `provider_account_id` pins which discovered account serves the model.
+    # Both are None for fixture harnesses, which have nothing to steer.
+    reasoning_effort: str | None = None
+    provider_account_id: str | None = None
+    # An instruction supplied by the caller rather than by a `prompt.md` in the
+    # task package. External harnesses (Harbor) hand the instruction over as a
+    # string, and writing it into the workspace would pollute the very tree the
+    # benchmark's own tests inspect.
+    instruction: str | None = None
+    # The task package directory, when it differs from the workspace. Internal
+    # fixtures are built by `setup.sh` into a scratch workspace, so the prompt,
+    # acceptance criteria, grader and `task.yaml` identity all live here while
+    # `task_dir` is what the agent may edit.
+    task_package_dir: Path | None = None
     # Optional identity inputs. Missing policy/config inputs are recorded as
     # explicit markers and make paired promotion ineligible.
     task_version: str | None = None
@@ -189,6 +206,7 @@ def build_evaluation_identity(
     request: RunRequest,
     *,
     environment_digest: str,
+    model_snapshot: Mapping[str, Any] | None = None,
 ) -> EvaluationIdentity:
     """Derive the locked identity used by the runner's actual run path.
 
@@ -197,7 +215,13 @@ def build_evaluation_identity(
     supplied are marked as missing instead of being replaced with guessed
     values, so the resulting record cannot qualify for promotion by accident.
     """
-    source_commit = _read_or(request.task_dir / "task.yaml", "source_commit")
+    package_dir = request.task_package_dir or request.task_dir
+    resolved_model_snapshot = (
+        dict(model_snapshot)
+        if model_snapshot is not None
+        else request.model_snapshot.to_dict()
+    )
+    source_commit = _read_or(package_dir / "task.yaml", "source_commit")
     if source_commit.startswith("source_commit="):
         source_commit = "missing:task_source_commit"
     task_version = request.task_version or source_commit
@@ -213,10 +237,11 @@ def build_evaluation_identity(
         or _stable_hash(
             {"harness_id": request.harness_id, "assignments": request.experiment_assignments}
         ),
-        provider=request.model_snapshot.provider,
-        model=request.model_snapshot.model,
-        model_version=request.model_version or request.model_snapshot.api_version,
-        model_capability_snapshot_hash=_stable_hash(request.model_snapshot.to_dict()),
+        provider=str(resolved_model_snapshot.get("provider") or request.model_snapshot.provider),
+        model=str(resolved_model_snapshot.get("model") or request.model_snapshot.model),
+        model_version=request.model_version
+        or str(resolved_model_snapshot.get("api_version") or request.model_snapshot.api_version),
+        model_capability_snapshot_hash=_stable_hash(resolved_model_snapshot),
         random_seed=request.random_seed,
         sampling_config_hash=request.sampling_config_hash
         or _stable_hash(request.experiment_assignments),
@@ -261,6 +286,10 @@ class HarnessResult:
     context_manifests: list[dict[str, Any]]
     grader_outcomes: list[GraderOutcome]
     notes: str = ""
+    # Reconciled first-class metrics (tokens, steps, tool errors, repairs,
+    # TTFT, stop reason, verification verdict). The runner lifts these onto
+    # the run record's own columns; they are never left to `notes`.
+    metrics: dict[str, Any] = field(default_factory=dict)
     # External harnesses may replace the task-package fallback with a digest
     # resolved from the actual image/environment they executed.
     environment_digest: str | None = None
@@ -427,6 +456,7 @@ class HarnessRunner:
             for g in result.grader_outcomes
         ]
         record.notes = result.notes
+        apply_metrics_to_record(record, result.metrics)
         record.evidence_class = result.evidence_class
         record.independently_verified = result.independently_verified
         record.provider_receipts = list(result.provider_receipts)
@@ -542,6 +572,43 @@ class HarnessRunner:
             risk_class=self.risk_class,
             metadata=metadata,
         )
+
+
+
+
+def apply_metrics_to_record(record: RunRecord, metrics: Mapping[str, Any] | None) -> None:
+    """Lift a harness's reconciled metrics onto the run record's own columns.
+
+    Values the harness could not measure stay absent so that "not measured"
+    and "measured as zero" remain distinguishable.
+    """
+    if not isinstance(metrics, Mapping) or not metrics:
+        return
+    for field_name in (
+        "tokens_input_fresh",
+        "tokens_input_cached",
+        "tokens_output",
+        "tokens_reasoning",
+        "steps",
+        "repair_turns",
+    ):
+        value = metrics.get(field_name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            setattr(record, field_name, int(value))
+    for field_name in ("cache_hit_ratio", "tool_error_rate"):
+        value = metrics.get(field_name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            setattr(record, field_name, float(value))
+    for field_name in ("ttft_ms", "wall_clock_ms"):
+        value = metrics.get(field_name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            setattr(record, field_name, int(value))
+    stop_reason = metrics.get("stop_reason")
+    if isinstance(stop_reason, str) and stop_reason:
+        record.stop_reason = stop_reason
+    verdict = metrics.get("verdict")
+    if isinstance(verdict, Mapping):
+        record.harness_verdict = dict(verdict)
 
 
 # ──────────────────────────── fake harness (for tests) ────────────────────

@@ -106,7 +106,10 @@ pub struct AppState {
     background_tasks: BackgroundTaskSupervisor,
     /// RFC3339 timestamp captured at startup.
     pub started_at: String,
-    /// Build commit (best-effort, from env or "dev").
+    /// Build identity: `TERMINUS_BUILD_COMMIT` when a release pipeline sets
+    /// it, otherwise the revision `terminus-kernel`'s build script compiled
+    /// in (git commit, or `<version>+src.<hash>` outside a checkout). Same
+    /// value the gRPC `KernelInfo.build_revision` reports.
     pub build_commit: String,
     /// Data dir under which artifacts/state live.
     pub data_dir: PathBuf,
@@ -250,7 +253,15 @@ impl AppState {
         };
 
         let started_at = chrono::Utc::now().to_rfc3339();
-        let build_commit = env::var("TERMINUS_BUILD_COMMIT").unwrap_or_else(|_| "dev".to_string());
+        // Same build identity the gRPC `KernelInfo.build_revision` reports.
+        // An explicit `TERMINUS_BUILD_COMMIT` still wins (release pipelines
+        // stamp their own), but the fallback is now the revision `build.rs`
+        // compiled in rather than the literal placeholder `"dev"`.
+        let build_commit = env::var("TERMINUS_BUILD_COMMIT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| kernel.info.build_revision().to_string());
 
         info!(%started_at, %build_commit, data_dir = %data_dir.display(), "kernel mini-service initialized");
         // Never log credential bytes. Point operators at where the values

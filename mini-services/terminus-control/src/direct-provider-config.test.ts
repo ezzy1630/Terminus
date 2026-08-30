@@ -94,6 +94,47 @@ describe("direct provider configuration (audit P0-2)", () => {
     expect(snapshot.continuation.nativeId).toBe(false);
   });
 
+  test("the context ceiling is per-family, not a blanket 32,768", () => {
+    const gpt = parseDirectProviderConfiguration(JSON.stringify({
+      vendor: "openai", protocol: "responses", model: "gpt-5.6-sol",
+    }));
+    if (gpt === null) throw new Error("expected config");
+    const gptSnapshot = configuredDirectProviderSnapshot(gpt, "2026-08-24T00:00:00Z" as never);
+    expect(gptSnapshot.context.advertisedTokens).toBe(1_050_000);
+    // The 272K billing cliff, not a capability limit.
+    expect(gptSnapshot.context.testedSafeTokens).toBe(270_000);
+    expect(gptSnapshot.context.maxOutputTokens).toBe(128_000);
+    expect(gptSnapshot.context.parallelToolCalls).toBe(true);
+
+    const claude = parseDirectProviderConfiguration(JSON.stringify({
+      vendor: "anthropic", protocol: "messages", model: "claude-opus-5",
+    }));
+    if (claude === null) throw new Error("expected config");
+    const claudeSnapshot = configuredDirectProviderSnapshot(claude, "2026-08-24T00:00:00Z" as never);
+    // Claude 5 gets its whole window: 1M is the default *and* the maximum.
+    expect(claudeSnapshot.context.testedSafeTokens).toBe(1_000_000);
+    expect(claudeSnapshot.context.maxOutputTokens).toBe(128_000);
+
+    // Everything else keeps its catalog window, capped at 200k.
+    const legacy = parseDirectProviderConfiguration(JSON.stringify({
+      vendor: "openai", protocol: "responses", model: "gpt-4o",
+    }));
+    if (legacy === null) throw new Error("expected config");
+    const legacySnapshot = configuredDirectProviderSnapshot(legacy, "2026-08-24T00:00:00Z" as never);
+    expect(legacySnapshot.context.testedSafeTokens).toBe(128_000);
+  });
+
+  test("Responses accounts are stateless: no continuation id to resume from", () => {
+    const config = parseDirectProviderConfiguration(JSON.stringify({
+      vendor: "openai", protocol: "responses", model: "gpt-5.6-sol",
+    }));
+    if (config === null) throw new Error("expected config");
+    const snapshot = configuredDirectProviderSnapshot(config, "2026-08-24T00:00:00Z" as never);
+    // `store: false` means there is no server-side response to point at.
+    expect(snapshot.continuation.nativeId).toBe(false);
+    expect(snapshot.continuation.crossRequest).toBe(false);
+  });
+
   test("env variable name is exported for documentation and ops", () => {
     expect(DIRECT_PROVIDER_CONFIGURATION_ENV).toBe("TERMINUS_DIRECT_PROVIDER_JSON");
   });

@@ -241,6 +241,22 @@ jobs:
       - name: Phase 4 effective-control platform probes
         run: just platform-probes
 
+  # The non-bypassability suite proves the kernel boundary holds. It used to
+  # run on Linux only, so the macOS Seatbelt backend — the live target for
+  # desktop users — had no adversarial coverage at all in CI: the writable
+  # workspace, the ambient-secret denials, and the network verdict were
+  # verified on bwrap and merely assumed on Seatbelt.
+  security-macos:
+    name: Security tests (macOS Seatbelt)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: ./.github/actions/setup-terminus
+      - name: Path traversal / secret redaction tests
+        run: cargo test --workspace --test capability_token_e2e --test non_bypassability --test policy_wiring --test path_properties --test redaction_properties --test secret_canary_e2e
+      - name: Phase 4 effective-control platform probes
+        run: just platform-probes
+
   # ---------- Real public-path E2E ----------
   e2e:
     name: End-to-end public path

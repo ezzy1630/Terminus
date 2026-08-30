@@ -258,6 +258,7 @@ export function discoveryHints(
   const installed = (tool: string): boolean => discovery.installed_tools.includes(tool);
   const hasCodex = accounts.some((account) => account.source === "codex-chatgpt");
   const hasVendorKeys = accounts.some((account) => account.source.startsWith("opencode:"));
+  const hasZen = accounts.some((account) => account.source === "zen");
   if (!installed("codex")) {
     hints.push("Codex CLI not installed — no ChatGPT login was found to import.");
   } else if (!hasCodex) {
@@ -265,7 +266,7 @@ export function discoveryHints(
   }
   if (!installed("opencode")) {
     hints.push("OpenCode not installed — no API keys were found to import.");
-  } else if (!hasVendorKeys) {
+  } else if (!hasVendorKeys && !hasZen) {
     hints.push("OpenCode is installed but its auth store holds no usable key — run `opencode auth login`.");
   }
   return hints;

@@ -10,6 +10,12 @@ import yaml
 from forge_evals.evidence import EvidenceClass
 from forge_evals.run_record import Outcome
 from forge_evals.runners import (
+    TERMINAL_BENCH_DATASET,
+    TERMINAL_BENCH_DATASET_VERSION,
+    TERMINAL_BENCH_HARBOR_COMMIT,
+    TERMINAL_BENCH_HARBOR_VERSION,
+    TERMINAL_BENCH_TASK_COMMIT,
+    TERMINAL_BENCH_TASK_COUNT,
     BenchmarkAdapterError,
     BenchmarkExecution,
     BenchmarkInvocation,
@@ -20,6 +26,7 @@ from forge_evals.runners import (
     LiveHarnessContract,
     ModelCapabilitySnapshot,
     RunRequest,
+    SweBenchProAdapter,
     SweBenchVerifiedAdapter,
     TerminusFullAdapter,
     TerminusMinimalAdapter,
@@ -74,7 +81,7 @@ class _StubLiveHarness:
     contract = ExternalHarnessContract(
         harness_id="harbor-test",
         repository="https://github.com/harbor-framework/harbor.git",
-        commit="72f7dd0134162c5b7229f6a31286e05a49c0f8a4",
+        commit=TERMINAL_BENCH_HARBOR_COMMIT,
         runner_version="test-runner-v1",
         pin_verified=True,
     )
@@ -127,7 +134,7 @@ def test_harbor_translation_uses_pinned_dataset_and_task_filter(tmp_path: Path) 
         "harbor",
         "run",
         "--dataset",
-        "terminal-bench@2.0",
+        f"{TERMINAL_BENCH_DATASET}@{TERMINAL_BENCH_DATASET_VERSION}",
         "--agent",
         "terminus-2",
         "--model",
@@ -137,9 +144,25 @@ def test_harbor_translation_uses_pinned_dataset_and_task_filter(tmp_path: Path) 
         "--include-task-name",
         "chess-best-move",
     )
-    assert invocation.task_manifest.dataset_revision.startswith("72f7dd0")
-    assert invocation.task_manifest.task_commit is not None
-    assert invocation.task_manifest.task_commit.startswith("69671fba")
+    assert invocation.task_manifest.dataset_revision == TERMINAL_BENCH_HARBOR_COMMIT
+    assert invocation.task_manifest.task_commit == TERMINAL_BENCH_TASK_COMMIT
+    assert adapter.manifest.task_count == TERMINAL_BENCH_TASK_COUNT
+
+
+def test_terminal_bench_adapter_constants_match_manifest_identity() -> None:
+    manifest = yaml.safe_load(
+        (SUITES_DIR / "terminal-bench.yaml").read_text(encoding="utf-8")
+    )
+    suite = manifest["suite"]
+    adapter = suite["adapter"]
+
+    assert adapter["dataset"] == TERMINAL_BENCH_DATASET
+    assert adapter["dataset_version"] == TERMINAL_BENCH_DATASET_VERSION
+    assert adapter["task_count"] == TERMINAL_BENCH_TASK_COUNT
+    assert adapter["harness"]["version"] == TERMINAL_BENCH_HARBOR_VERSION
+    assert adapter["harness"]["commit"] == TERMINAL_BENCH_HARBOR_COMMIT
+    assert adapter["registry"]["commit"] == TERMINAL_BENCH_HARBOR_COMMIT
+    assert adapter["task_source"]["commit"] == TERMINAL_BENCH_TASK_COMMIT
 
 
 def test_swebench_translation_does_not_invent_a_patch_command(tmp_path: Path) -> None:
@@ -305,4 +328,30 @@ def test_zero_digest_in_suite_manifest_is_rejected(tmp_path: Path) -> None:
     manifest_path.write_text(yaml.safe_dump(source), encoding="utf-8")
 
     with pytest.raises(ValueError, match="suite-wide pinned_image_digest"):
+        adapter_for_suite(manifest_path)
+
+
+def test_swe_bench_pro_manifest_uses_its_own_adapter_and_pins(tmp_path: Path) -> None:
+    """SWE-bench Pro must not be validated with the Verified rules."""
+    adapter = adapter_for_suite(SUITES_DIR / "swe-bench-pro.yaml")
+    assert isinstance(adapter, SweBenchProAdapter)
+    assert adapter.manifest.dataset == "ScaleAI/SWE-bench_Pro"
+    assert adapter.manifest.task_count == 731
+    assert adapter.manifest.language == "multi"
+    assert adapter.manifest.image_digest_policy == "per_instance_required"
+
+    invocation = adapter.translate(_request(tmp_path, suite="swe-bench-pro", task="instance-1"))
+    # The official evaluator consumes an agent-produced patch, so there is no
+    # argv until one exists; the executable path lives in swebench_pro.py.
+    assert invocation.argv is None
+    assert "swe_bench_pro_eval.py" in invocation.notes
+
+
+def test_swe_bench_pro_rejects_a_python_only_language_scope(tmp_path: Path) -> None:
+    source = yaml.safe_load((SUITES_DIR / "swe-bench-pro.yaml").read_text(encoding="utf-8"))
+    source["suite"]["adapter"]["language"] = "python"
+    manifest_path = tmp_path / "swe-bench-pro.yaml"
+    manifest_path.write_text(yaml.safe_dump(source), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be 'multi'"):
         adapter_for_suite(manifest_path)

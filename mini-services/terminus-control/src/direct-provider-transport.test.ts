@@ -11,12 +11,24 @@ import type {
 } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import type { DirectHttpRequest } from "./direct-provider-transport.js";
 import {
+  ConnectorCancelledError,
+  HEAD_RECEIPT_OUTCOME,
   KernelDirectConnectorClient,
+  asCancellation,
   createDirectRenderer,
+  createStreamTelemetry,
   directEndpoint,
   directNetworkDestinations,
   executeDirectProviderRequest,
+  isGrpcCancelled,
+  isHeadReceipt,
+  responseHeaderMap,
+  retryAfterMsFromReceipt,
+  timeToFirstBodyMs,
 } from "./direct-provider-transport.js";
+import { classifyLoopError } from "./agent/loop-contracts.js";
+import { ProviderTransportError } from "./providers/provider-retry.js";
+import { ReasoningReplayLedger, parseReasoningReplay } from "@terminus/provider-core";
 import { configuredDirectProviderSnapshot, parseDirectProviderConfiguration } from "./direct-provider-config.js";
 
 const anthropicConfig = parseDirectProviderConfiguration(JSON.stringify({
@@ -278,6 +290,27 @@ function makeCanonicalInput(modelKey: string): CanonicalRenderInput {
   };
 }
 
+/** An assistant tool call as the compiler emits it into the fragment array. */
+function toolCallFragment(callId: string): CanonicalRenderInput["fragments"][number] {
+  const text = JSON.stringify({
+    protocol: "terminus.tool-call.v1",
+    provider_call_id: callId,
+    tool_name: "read",
+    arguments: { path: "a.ts" },
+  });
+  return {
+    id: `episode:${callId}`,
+    kind: "recent_episode",
+    uri: `prompt://${callId}`,
+    textContent: text,
+    contentRef: { hash: `sha256:${"1".repeat(64)}`, uri: "artifact://sha256/1", mediaType: "text/plain", bytes: BigInt(text.length) },
+    confidentiality: "public",
+    trust: "trusted",
+    exactness: "exact",
+    estimatedTokens: { "gpt-5.6-sol": 20 },
+  } as never;
+}
+
 function makeContext(): RequestContext {
   return {
     requestId: "00000000-0000-7000-8000-000000000001",
@@ -295,7 +328,7 @@ function makeContext(): RequestContext {
   };
 }
 
-function makeReceipt(statusCode: number) {
+function makeReceipt(statusCode: number, responseHeaders: { name: string; value: string }[] = []) {
   return {
     grantId: "grant-1",
     taskId: "task-1",
@@ -309,7 +342,7 @@ function makeReceipt(statusCode: number) {
     responseSha256: "sha256:response",
     responseRedactions: 0,
     outcome: "ok",
-    responseHeaders: [],
+    responseHeaders,
   };
 }
 
@@ -335,3 +368,320 @@ function makeDirectRequest(): DirectHttpRequest {
     credentialBindingId: "secret://direct/anthropic",
   };
 }
+
+describe("the provider's own Retry-After reaches the retry policy", () => {
+  test("both header forms parse; anything else yields no hint", () => {
+    const now = Date.parse("2026-08-29T12:00:00Z");
+    // delta-seconds
+    expect(retryAfterMsFromReceipt(makeReceipt(429, [{ name: "retry-after", value: "45" }]), now)).toBe(45_000);
+    expect(retryAfterMsFromReceipt(makeReceipt(429, [{ name: "Retry-After", value: " 1.5 " }]), now)).toBe(1_500);
+    // HTTP-date
+    expect(retryAfterMsFromReceipt(
+      makeReceipt(503, [{ name: "retry-after", value: "Sat, 29 Aug 2026 12:00:30 GMT" }]),
+      now,
+    )).toBe(30_000);
+    // A date already in the past means "now", never a negative sleep.
+    expect(retryAfterMsFromReceipt(
+      makeReceipt(503, [{ name: "retry-after", value: "Sat, 29 Aug 2026 11:59:00 GMT" }]),
+      now,
+    )).toBe(0);
+    // Absent, blank, and unparseable all mean "no hint" — never a fabricated one.
+    expect(retryAfterMsFromReceipt(makeReceipt(429), now)).toBeNull();
+    expect(retryAfterMsFromReceipt(makeReceipt(429, [{ name: "retry-after", value: "  " }]), now)).toBeNull();
+    expect(retryAfterMsFromReceipt(makeReceipt(429, [{ name: "retry-after", value: "soon" }]), now)).toBeNull();
+    expect(retryAfterMsFromReceipt(undefined, now)).toBeNull();
+  });
+
+  test("a 429 receipt on the streaming path throws a hint-carrying transport error", async () => {
+    const connectors = makeConnectorService({
+      Execute: async () => ({ receipt: makeReceipt(200), body: new Uint8Array() }),
+      ExecuteStream: () => new Observable<ConnectorChunk>((subscriber) => {
+        subscriber.next({ receipt: makeReceipt(429, [{ name: "retry-after", value: "30" }]) });
+        subscriber.complete();
+      }),
+    });
+    const client = new KernelDirectConnectorClient(connectors, makeContext());
+    const failure = await (async () => {
+      try {
+        for await (const _ of client.stream(makeDirectRequest())) { /* drain */ }
+        return null;
+      } catch (error: unknown) { return error; }
+    })();
+    expect(failure).toBeInstanceOf(ProviderTransportError);
+    expect((failure as ProviderTransportError).status).toBe(429);
+    // Without this the retry policy invents an 8s backoff and burns the turn.
+    expect((failure as ProviderTransportError).retryAfterMs).toBe(30_000);
+  });
+
+  test("a 429 receipt on the unary fallback path carries the hint too", async () => {
+    const connectors = makeConnectorService({
+      Execute: async () => ({
+        receipt: makeReceipt(429, [{ name: "retry-after", value: "17" }]),
+        body: new TextEncoder().encode("rate limited"),
+      }),
+      ExecuteStream: undefined,
+    });
+    const client = new KernelDirectConnectorClient(connectors, makeContext());
+    const failure = await (async () => {
+      try {
+        for await (const _ of client.stream(makeDirectRequest())) { /* drain */ }
+        return null;
+      } catch (error: unknown) { return error; }
+    })();
+    expect(failure).toBeInstanceOf(ProviderTransportError);
+    expect((failure as ProviderTransportError).retryAfterMs).toBe(17_000);
+  });
+});
+
+describe("renderer options reach the wire", () => {
+  test("the requested reasoning effort survives into the Anthropic body", async () => {
+    const renderer = createDirectRenderer(anthropicConfig, { reasoningEffort: "max" });
+    const body = (await renderer.render(makeCanonicalInput("claude-opus-5"))).body as Record<string, unknown>;
+    // Previously constructed as `new AnthropicRenderer()`, which dropped the
+    // turn's effort on the floor.
+    expect(body.output_config).toEqual({ effort: "max" });
+    expect(body.thinking).toEqual({ type: "adaptive" });
+    // Sampling parameters are rejected alongside thinking.
+    expect(body.temperature).toBeUndefined();
+    expect(body.top_p).toBeUndefined();
+  });
+
+  test("a seeded ledger replays reasoning for a call made before this process started", async () => {
+    // The resume case: the tool call is still in `episodes` and gets rendered
+    // again, but the renderer that captured its reasoning is gone.
+    const ledger = new ReasoningReplayLedger();
+    ledger.seed(parseReasoningReplay(JSON.stringify([{
+      call_id: "call_a",
+      items: [{ id: "rs_1", encrypted_content: "gAAAAA-opaque", summary: ["checking the file first"] }],
+    }])));
+    const renderer = createDirectRenderer(openaiResponsesConfig, { reasoningEffort: "high", reasoningReplay: ledger });
+    const input = makeCanonicalInput("gpt-5.6-sol");
+    const body = (await renderer.render({
+      ...input,
+      fragments: [
+        ...input.fragments,
+        toolCallFragment("call_a"),
+      ],
+    })).body as Record<string, unknown>;
+    const items = body.input as Array<Record<string, unknown>>;
+    const callIndex = items.findIndex((item) => item.type === "function_call");
+    expect(callIndex).toBeGreaterThan(0);
+    // Immediately before, not merely present.
+    expect(items[callIndex - 1]).toEqual({
+      type: "reasoning",
+      id: "rs_1",
+      encrypted_content: "gAAAAA-opaque",
+      summary: [{ type: "summary_text", text: "checking the file first" }],
+    });
+  });
+
+  test("an unseeded renderer renders the same call with no reasoning in front of it", async () => {
+    const renderer = createDirectRenderer(openaiResponsesConfig, { reasoningEffort: "high" });
+    const input = makeCanonicalInput("gpt-5.6-sol");
+    const body = (await renderer.render({
+      ...input,
+      fragments: [...input.fragments, toolCallFragment("call_a")],
+    })).body as Record<string, unknown>;
+    const items = body.input as Array<Record<string, unknown>>;
+    expect(items.some((item) => item.type === "reasoning")).toBe(false);
+  });
+
+  test("the Responses body carries the stateless-replay fields", async () => {
+    const renderer = createDirectRenderer(openaiResponsesConfig, { reasoningEffort: "high", promptCacheKey: "session-9" });
+    const body = (await renderer.render(makeCanonicalInput("gpt-5.6-sol"))).body as Record<string, unknown>;
+    expect(body.store).toBe(false);
+    expect(body.include).toEqual(["reasoning.encrypted_content"]);
+    expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
+    expect(body.truncation).toBe("auto");
+    expect(body.prompt_cache_key).toBe("session-9");
+    expect(body.instructions).toBe("system rules");
+  });
+});
+
+/** A head receipt: status + headers, emitted before any body byte. */
+function makeHead(statusCode: number, responseHeaders: { name: string; value: string }[] = []) {
+  return { ...makeReceipt(statusCode, responseHeaders), outcome: HEAD_RECEIPT_OUTCOME };
+}
+
+const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
+
+describe("the head frame is read before the body", () => {
+  test("a head receipt is distinguished from a terminal one", () => {
+    expect(isHeadReceipt(makeHead(200))).toBe(true);
+    expect(isHeadReceipt(makeReceipt(200))).toBe(false);
+    // An older kernel emits no outcome at all; that is not a head frame.
+    expect(isHeadReceipt({ outcome: undefined })).toBe(false);
+    expect(isHeadReceipt(undefined)).toBe(false);
+  });
+
+  test("header names are lowercased and values are bounded", () => {
+    const map = responseHeaderMap(makeHead(200, [
+      { name: "X-Codex-Turn-State", value: "opaque-token" },
+      { name: "Retry-After", value: "12" },
+      { name: "oversized", value: "z".repeat(9000) },
+    ]));
+    expect(map["x-codex-turn-state"]).toBe("opaque-token");
+    expect(map["retry-after"]).toBe("12");
+    expect(map.oversized?.length).toBe(4096);
+  });
+
+  test("a 2xx head does not end the stream; the body still arrives", async () => {
+    const telemetry = createStreamTelemetry();
+    const connectors = makeConnectorService({
+      Execute: async () => { throw new Error("buffered Execute must not be used"); },
+      ExecuteStream: () => new Observable<ConnectorChunk>((subscriber) => {
+        subscriber.next({ receipt: makeHead(200, [{ name: "X-Request-Id", value: "req-1" }]) });
+        subscriber.next({ bytes: encode("data: one\n\n") });
+        subscriber.next({ bytes: encode("data: [DONE]\n\n") });
+        subscriber.next({ receipt: makeReceipt(200) });
+        subscriber.complete();
+      }),
+    });
+    const client = new KernelDirectConnectorClient(connectors, makeContext());
+    const decoded: string[] = [];
+    for await (const chunk of client.stream({ ...makeDirectRequest(), telemetry })) {
+      decoded.push(new TextDecoder().decode(chunk));
+    }
+    expect(decoded).toEqual(["data: one\n\n", "data: [DONE]\n\n"]);
+    expect(telemetry.status).toBe(200);
+    expect(telemetry.responseHeaders["x-request-id"]).toBe("req-1");
+  });
+
+  test("a 429 head fails before a single body byte is forwarded", async () => {
+    let bodyFramesSent = 0;
+    const connectors = makeConnectorService({
+      Execute: async () => { throw new Error("buffered Execute must not be used"); },
+      ExecuteStream: () => new Observable<ConnectorChunk>((subscriber) => {
+        subscriber.next({ receipt: makeHead(429, [{ name: "retry-after", value: "30" }]) });
+        bodyFramesSent += 1;
+        subscriber.next({ bytes: encode('{"error":{"message":"slow down"}}') });
+        subscriber.next({ receipt: makeReceipt(429) });
+        subscriber.complete();
+      }),
+    });
+    const client = new KernelDirectConnectorClient(connectors, makeContext());
+    const decoded: string[] = [];
+    const failure = await (async () => {
+      try {
+        for await (const chunk of client.stream(makeDirectRequest())) {
+          decoded.push(new TextDecoder().decode(chunk));
+        }
+        return null;
+      } catch (error: unknown) { return error; }
+    })();
+    expect(failure).toBeInstanceOf(ProviderTransportError);
+    expect((failure as ProviderTransportError).status).toBe(429);
+    // The whole point of the head frame: the backoff hint is honoured without
+    // waiting the error body out first.
+    expect((failure as ProviderTransportError).retryAfterMs).toBe(30_000);
+    expect(decoded).toEqual([]);
+    expect(bodyFramesSent).toBe(1);
+  });
+
+  test("streamRaw reports first-body TTFT, not the head frame's arrival", async () => {
+    const telemetry = createStreamTelemetry();
+    const connectors = makeConnectorService({
+      Execute: async () => { throw new Error("buffered Execute must not be used"); },
+      ExecuteStream: () => new Observable<ConnectorChunk>((subscriber) => {
+        void (async () => {
+          subscriber.next({ receipt: makeHead(200) });
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          subscriber.next({ bytes: encode("data: hi\n\n") });
+          subscriber.next({ receipt: makeReceipt(200) });
+          subscriber.complete();
+        })();
+        return () => { /* no teardown needed */ };
+      }),
+    });
+    const client = new KernelDirectConnectorClient(connectors, makeContext());
+    for await (const _ of client.streamRaw({
+      host: "api.anthropic.com", port: 443, path: "/v1/messages",
+      headers: { "content-type": "application/json" }, body: "{}",
+      context: makeContext(), credentialBindingId: "secret://direct/anthropic",
+      signal: null, telemetry,
+    })) { /* drain */ }
+    const ttft = timeToFirstBodyMs(telemetry);
+    expect(ttft).not.toBeNull();
+    // The head frame arrived immediately; only the body waited.
+    expect(ttft ?? 0).toBeGreaterThanOrEqual(20);
+    expect(timeToFirstBodyMs(createStreamTelemetry())).toBeNull();
+  });
+
+  test("a head-only stream with no body is still an explicit failure", async () => {
+    const connectors = makeConnectorService({
+      Execute: async () => { throw new Error("buffered Execute must not be used"); },
+      ExecuteStream: () => new Observable<ConnectorChunk>((subscriber) => {
+        subscriber.next({ receipt: makeHead(200) });
+        subscriber.next({ receipt: makeReceipt(200) });
+        subscriber.complete();
+      }),
+    });
+    const client = new KernelDirectConnectorClient(connectors, makeContext());
+    const consume = async (): Promise<void> => {
+      for await (const _ of client.stream(makeDirectRequest())) { /* drain */ }
+    };
+    await expect(consume()).rejects.toThrow("settled without response bytes");
+  });
+});
+
+describe("caller teardown reads as cancellation, not a provider fault", () => {
+  test("gRPC CANCELLED is recognised in every shape the runtime produces", () => {
+    expect(isGrpcCancelled({ code: 1 })).toBe(true);
+    expect(isGrpcCancelled({ code: "CANCELLED" })).toBe(true);
+    expect(isGrpcCancelled(new Error("1 CANCELLED: Call cancelled"))).toBe(true);
+    // Not cancellation: UNIMPLEMENTED (12) is the legacy-kernel fallback.
+    expect(isGrpcCancelled({ code: 12 })).toBe(false);
+    expect(isGrpcCancelled(new Error("boom"))).toBe(false);
+  });
+
+  test("asCancellation rewrites CANCELLED and leaves real failures alone", () => {
+    const rewritten = asCancellation({ code: 1 }, "turn was cancelled");
+    expect(rewritten).toBeInstanceOf(ConnectorCancelledError);
+    expect((rewritten as Error).name).toBe("CancelledError");
+    const untouched = new Error("upstream reset");
+    expect(asCancellation(untouched, "turn was cancelled")).toBe(untouched);
+  });
+
+  test("the loop classifies a cancelled stream as cancelled, not internal", () => {
+    // Before this mapping a user-interrupted turn was filed as a crash.
+    expect(classifyLoopError(new ConnectorCancelledError()).kind).toBe("cancelled");
+    expect(classifyLoopError({ code: 1 }).kind).toBe("cancelled");
+    expect(classifyLoopError(new Error("upstream reset")).kind).not.toBe("cancelled");
+  });
+
+  test("aborting mid-stream unsubscribes the gRPC call", async () => {
+    const controller = new AbortController();
+    let unsubscribed = false;
+    const connectors = makeConnectorService({
+      Execute: async () => { throw new Error("buffered Execute must not be used"); },
+      ExecuteStream: () => new Observable<ConnectorChunk>((subscriber) => {
+        let stopped = false;
+        void (async () => {
+          subscriber.next({ receipt: makeHead(200) });
+          for (let index = 0; index < 20 && !stopped; index += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            if (stopped) return;
+            subscriber.next({ bytes: encode(`data: ${index}\n\n`) });
+          }
+        })();
+        return () => { stopped = true; unsubscribed = true; };
+      }),
+    });
+    const client = new KernelDirectConnectorClient(connectors, makeContext());
+    const decoded: string[] = [];
+    const failure = await (async () => {
+      try {
+        for await (const chunk of client.stream({ ...makeDirectRequest(), signal: controller.signal })) {
+          decoded.push(new TextDecoder().decode(chunk));
+          controller.abort();
+        }
+        return null;
+      } catch (error: unknown) { return error; }
+    })();
+    expect(failure).toBeInstanceOf(ConnectorCancelledError);
+    // Dropping the subscription is what tells the kernel to abort upstream.
+    expect(unsubscribed).toBe(true);
+    expect(classifyLoopError(failure).kind).toBe("cancelled");
+    expect(decoded).toHaveLength(1);
+  });
+});

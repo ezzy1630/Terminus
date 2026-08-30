@@ -167,6 +167,23 @@ def records_to_dataframe(records: list[RunRecord]) -> pl.DataFrame:
             "trajectory": d["trajectory"],
             "evaluation_identity": d["evaluation_identity"],
             "notes": r.notes,
+            # First-class run metrics (Phase 0 item 11).
+            "success": r.success,
+            "harness_verdict": d["harness_verdict"],
+            "harness_grader_disagreement": r.harness_grader_disagreement,
+            "attempts": d["attempts"],
+            "workspace_base_commit": r.workspace_base_commit,
+            "tokens_input_fresh": r.tokens_input_fresh,
+            "tokens_input_cached": r.tokens_input_cached,
+            "tokens_output": r.tokens_output,
+            "tokens_reasoning": r.tokens_reasoning,
+            "cache_hit_ratio": r.cache_hit_ratio,
+            "steps": r.steps,
+            "tool_error_rate": r.tool_error_rate,
+            "repair_turns": r.repair_turns,
+            "ttft_ms": r.ttft_ms,
+            "wall_clock_ms": r.wall_clock_ms,
+            "stop_reason": r.stop_reason,
         }
         if r.cost is not None:
             row["provider_reported_usd"] = r.cost.provider_reported_usd
@@ -178,6 +195,7 @@ def records_to_dataframe(records: list[RunRecord]) -> pl.DataFrame:
             row["cache_write_tokens"] = r.cost.cache_write_tokens
             row["cache_read_tokens"] = r.cost.cache_read_tokens
             row["cost_reconciliation_flagged"] = r.cost.reconciliation_flagged
+            row["cost_source"] = r.cost.source
         else:
             row["provider_reported_usd"] = None
             row["computed_usd"] = None
@@ -188,6 +206,7 @@ def records_to_dataframe(records: list[RunRecord]) -> pl.DataFrame:
             row["cache_write_tokens"] = 0
             row["cache_read_tokens"] = 0
             row["cost_reconciliation_flagged"] = False
+            row["cost_source"] = None
         rows.append(row)
     if not rows:
         return _empty_schema()
@@ -201,6 +220,8 @@ def records_to_dataframe(records: list[RunRecord]) -> pl.DataFrame:
             "artifacts",
             "context_manifests",
             "trajectory",
+            "harness_verdict",
+            "attempts",
         ):
             row[k] = json.dumps(row[k], sort_keys=True, default=str)
     return pl.DataFrame(rows)
@@ -240,6 +261,23 @@ def _empty_schema() -> pl.DataFrame:
             "cache_write_tokens": pl.Int64,
             "cache_read_tokens": pl.Int64,
             "cost_reconciliation_flagged": pl.Boolean,
+            "cost_source": pl.Utf8,
+            "success": pl.Boolean,
+            "harness_verdict": pl.Utf8,
+            "harness_grader_disagreement": pl.Boolean,
+            "attempts": pl.Utf8,
+            "workspace_base_commit": pl.Utf8,
+            "tokens_input_fresh": pl.Int64,
+            "tokens_input_cached": pl.Int64,
+            "tokens_output": pl.Int64,
+            "tokens_reasoning": pl.Int64,
+            "cache_hit_ratio": pl.Float64,
+            "steps": pl.Int64,
+            "tool_error_rate": pl.Float64,
+            "repair_turns": pl.Int64,
+            "ttft_ms": pl.Int64,
+            "wall_clock_ms": pl.Int64,
+            "stop_reason": pl.Utf8,
         }
     )
 
@@ -249,10 +287,16 @@ def _row_to_record(row: dict[str, object]) -> RunRecord:
     # Parse nested JSON string columns.
     graders_raw = _json_dict_list(row.get("grader_results"))
     cost: CostBreakdown | None = None
+    # Keyed on the *computed* cost: a subscription run has a real estimated
+    # cost and no provider-reported one, and keying on the latter used to drop
+    # the whole cost record for exactly those runs.
+    computed = row.get("computed_usd")
     provider_reported = row.get("provider_reported_usd")
-    if provider_reported is not None:
-        provider_reported_usd = _as_float(provider_reported)
-        computed_usd = _as_float(row.get("computed_usd"))
+    if computed is not None or provider_reported is not None:
+        computed_usd = _as_float(computed)
+        provider_reported_usd = (
+            _as_float(provider_reported) if provider_reported is not None else None
+        )
         cost = CostBreakdown(
             provider_reported_usd=provider_reported_usd,
             computed_usd=computed_usd,
@@ -262,8 +306,13 @@ def _row_to_record(row: dict[str, object]) -> RunRecord:
             reasoning_tokens=_as_int(row.get("reasoning_tokens")),
             cache_write_tokens=_as_int(row.get("cache_write_tokens")),
             cache_read_tokens=_as_int(row.get("cache_read_tokens")),
-            reconciliation_delta_usd=provider_reported_usd - computed_usd,
+            reconciliation_delta_usd=(
+                provider_reported_usd - computed_usd
+                if provider_reported_usd is not None
+                else None
+            ),
             reconciliation_flagged=bool(row.get("cost_reconciliation_flagged", False)),
+            source=str(row.get("cost_source") or "provider_reported"),
         )
     graders = [GraderResult(**g) for g in graders_raw]
     identity_raw = _json_value(row.get("evaluation_identity"))
@@ -294,8 +343,40 @@ def _row_to_record(row: dict[str, object]) -> RunRecord:
         context_manifests=_json_dict_list(row.get("context_manifests")),
         trajectory=_json_dict_list(row.get("trajectory")),
         notes=str(row.get("notes", "")),
+        tokens_input_fresh=_as_int(row.get("tokens_input_fresh")),
+        tokens_input_cached=_as_int(row.get("tokens_input_cached")),
+        tokens_output=_as_int(row.get("tokens_output")),
+        tokens_reasoning=_as_int(row.get("tokens_reasoning")),
+        cache_hit_ratio=_as_float_or_none(row.get("cache_hit_ratio")),
+        steps=_as_int(row.get("steps")),
+        tool_error_rate=_as_float_or_none(row.get("tool_error_rate")),
+        repair_turns=_as_int(row.get("repair_turns")),
+        ttft_ms=_as_int_or_none(row.get("ttft_ms")),
+        wall_clock_ms=_as_int_or_none(row.get("wall_clock_ms")),
+        stop_reason=str(row["stop_reason"]) if row.get("stop_reason") is not None else None,
+        harness_verdict=_json_dict(row.get("harness_verdict")),
+        attempts=_json_dict_list(row.get("attempts")),
+        workspace_base_commit=(
+            str(row["workspace_base_commit"])
+            if row.get("workspace_base_commit") is not None
+            else None
+        ),
         evaluation_identity=evaluation_identity,
     )
+
+
+def _as_float_or_none(value: object) -> float | None:
+    """Coerce an optional ratio column, preserving "not measured" as None."""
+    if value is None:
+        return None
+    return _as_float(value)
+
+
+def _as_int_or_none(value: object) -> int | None:
+    """Coerce an optional counter column, preserving "not measured" as None."""
+    if value is None:
+        return None
+    return _as_int(value)
 
 
 def _json_value(value: object) -> object:

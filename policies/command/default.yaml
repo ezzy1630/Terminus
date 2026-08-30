@@ -1,3 +1,16 @@
+# Command policy (SPEC §13.5, §27.3).
+#
+# `match:` semantics — READ THIS BEFORE EDITING:
+#   * Clauses inside ONE match mapping are ANDed. Every populated clause
+#     must hold for the rule to fire.
+#   * Values inside one clause are alternatives (the `_any` suffix), except
+#     `shell_script_contains_all`, where every fragment must occur.
+#   * A match SEQUENCE (a YAML list of mappings) lists alternatives: the
+#     rule fires when any one mapping matches in full.
+#
+# This file must stay identical to `sample_rule_set_yaml()` in
+# `crates/terminus-policy/src/rules_yaml.rs` — a test asserts it.
+
 rules:
   - id: allow-local-tests
     description: Allow common local test runners in the workspace
@@ -19,10 +32,25 @@ rules:
     effect:
       kind: allow
 
+  - id: allow-workspace-tree-hash
+    description: Allow the exact read-only non-Git workspace revision probe
+    priority: 15
+    match:
+      executable_any: ["sh"]
+      effects_any: ["EXECUTE_LOCAL"]
+      argv_contains_any: ['find . -type f -not -path "./.git/*" -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256']
+    effect:
+      kind: allow_with_constraints
+      constraint:
+        max_runtime_ms: 600000
+        max_output_bytes: 1024
+        disallowed_env: ["AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN"]
+
   - id: prompt-git-push
     description: Prompt before any git push
     priority: 20
     match:
+      executable_any: ["git"]
       argv_contains_any: ["push"]
     effect:
       kind: prompt
@@ -31,18 +59,31 @@ rules:
     description: Deny curl|bash style installation
     priority: 30
     match:
-      executable_any: ["curl", "wget"]
-      argv_contains_any: ["|", "bash", "sh", "python", "perl"]
-      effects_any: ["NETWORK_READ", "EXECUTE_LOCAL"]
+      # Direct exec: `curl <url> | bash` arrives as program=curl with the
+      # pipe and interpreter in argv.
+      - executable_any: ["curl", "wget"]
+        argv_contains_any: ["|", "bash", "sh", "python", "perl"]
+      # Shell dialect: the script text must BOTH download AND pipe into an
+      # interpreter. Either half alone is legitimate.
+      - shell_script_contains_all: ["curl", "| bash"]
+      - shell_script_contains_all: ["curl", "| sh"]
+      - shell_script_contains_all: ["curl", "|bash"]
+      - shell_script_contains_all: ["curl", "|sh"]
+      - shell_script_contains_all: ["wget", "| bash"]
+      - shell_script_contains_all: ["wget", "| sh"]
+      - shell_script_contains_all: ["wget", "|bash"]
+      - shell_script_contains_all: ["wget", "|sh"]
     effect:
       kind: deny
 
   - id: deny-protected-path-write
-    description: Deny writes to .git, .terminus, credentials, .env
+    description: Deny writes from inside .git, .terminus, credentials, .env
     priority: 50
     match:
       effects_any: ["WRITE_LOCAL"]
-      working_directory_glob: ["**/.git/**", "**/.terminus/**", "**/credentials/**", "**/.env*"]
+      working_directory_glob:
+        ["**/.git", "**/.git/**", "**/.terminus", "**/.terminus/**",
+         "**/credentials", "**/credentials/**", "**/.env*"]
     effect:
       kind: deny
 

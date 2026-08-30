@@ -18,6 +18,7 @@ import {
   probeStandaloneControlHealth,
   runtimeEnvironments,
   StandaloneRuntimeSupervisor,
+  userToolchainPath,
   verifyPackagedRuntime,
 } from "../electron/runtime-supervisor";
 
@@ -221,6 +222,7 @@ describe("packaged standalone runtime", () => {
     await expect(StandaloneRuntimeSupervisor.start({
       resourcesPath: fixture.resources,
       userDataPath: userData,
+      userHomePath: fixture.temporaryRoot,
       platform: "darwin",
       architecture: "arm64",
       expectedVersion: VERSION,
@@ -236,6 +238,7 @@ describe("packaged standalone runtime", () => {
     await expect(StandaloneRuntimeSupervisor.start({
       resourcesPath: fixture.resources,
       userDataPath: userData,
+      userHomePath: fixture.temporaryRoot,
       platform: "darwin",
       architecture: "arm64",
       expectedVersion: VERSION,
@@ -248,6 +251,8 @@ describe("packaged standalone runtime", () => {
   it("isolates migration, kernel, and control environments", () => {
     const environments = runtimeEnvironments({
       userDataPath: "/tmp/terminus-user-data",
+      userHomePath: "/Users/example",
+      inheritedPath: "/custom/bin:/usr/bin:relative-bin",
       database: "/tmp/terminus-user-data/runtime/control.db",
       kernelData: "/tmp/terminus-user-data/runtime/kernel-data",
       kernelSocket: "/tmp/terminus-user-data/runtime/kernel.sock",
@@ -267,6 +272,16 @@ describe("packaged standalone runtime", () => {
     expect(environments.control.TERMINUS_CONTROL_READY_FD).toBe("3");
     expect(environments.kernel).not.toHaveProperty("TERMINUS_CONTROL_TOKEN");
     expect(environments.kernel).not.toHaveProperty("TERMINUS_KERNEL_CAPABILITY_SECRET");
+    expect(environments.kernel.TERMINUS_USER_HOME).toBe("/Users/example");
+    expect(environments.control.TERMINUS_USER_HOME).toBe("/Users/example");
+    expect(environments.control.TERMINUS_USER_PATH).toBe(userToolchainPath(
+      "/Users/example",
+      "/custom/bin:/usr/bin:relative-bin",
+    ));
+    expect(environments.control.TERMINUS_USER_PATH).toContain("/Users/example/.cargo/bin");
+    expect(environments.control.TERMINUS_USER_PATH).toContain("/opt/homebrew/bin");
+    expect(environments.control.TERMINUS_USER_PATH).toContain("/custom/bin");
+    expect(environments.control.TERMINUS_USER_PATH).not.toContain("relative-bin");
     expect(environments.kernel.TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN).toBe("b".repeat(43));
     expect(environments.control.TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN).toBe("b".repeat(43));
   });

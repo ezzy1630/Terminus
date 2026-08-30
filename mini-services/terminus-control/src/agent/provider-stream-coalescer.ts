@@ -15,14 +15,22 @@ import type { ProviderResponseChunk, UsageRecord } from "@terminus/provider-core
 /**
  * Flush thresholds. Text is written out at the first of the two.
  *
- * The previous rule was size-only at 512 characters, which made a slow or
- * terse model look frozen: a short answer produced no delta at all until the
- * attempt settled, and a 20 tok/s model produced roughly one delta every 25
- * seconds. 64 characters or 50 ms keeps the event count bounded while making
- * the first delta arrive within a frame of the first tokens.
+ * Every flush is a durable event: `emit` writes a `turn.provider_text_delta`
+ * row inside the agent-state mutation mutex, and the UI reads those rows back
+ * over SSE. So the delta rate is a *database transaction rate*, not a render
+ * rate. At 64 characters a 5,000 char/s response opened roughly 78
+ * transactions per second under a process-global mutex, which is what made a
+ * fast turn contend with its own tool calls.
+ *
+ * Because the UI is fed from those rows rather than from memory, the latency
+ * bound has to come from the timer, not from the byte threshold: 250 ms is the
+ * worst case a user waits for the next chunk of text, and 2 KiB caps the
+ * transaction rate at roughly 2-4/s however fast the model streams. Both
+ * numbers are an order of magnitude better than 64 characters and still well
+ * inside the ~400 ms at which streaming stops reading as streaming.
  */
-export const PROVIDER_DELTA_FLUSH_CHARS = 64;
-export const PROVIDER_DELTA_FLUSH_MS = 50;
+export const PROVIDER_DELTA_FLUSH_CHARS = 2_048;
+export const PROVIDER_DELTA_FLUSH_MS = 250;
 
 export interface TextDeltaCoalescer {
   /** Accumulates a provider chunk; may write a delta. */
@@ -37,6 +45,38 @@ export interface TextDeltaCoalescerOptions {
   /** Injectable for tests; defaults to the global timer. */
   readonly setTimer?: (fn: () => void, ms: number) => unknown;
   readonly clearTimer?: (handle: unknown) => void;
+}
+
+export interface ProviderDeltaSinks {
+  readonly text: (value: string) => Promise<void>;
+  readonly reasoning: (value: string) => Promise<void>;
+}
+
+/**
+ * Preserve the provider's two human-readable streams independently.
+ * Reasoning is never folded into answer text, and opaque replay items are
+ * ignored because they are not user-visible model output.
+ */
+export function createProviderDeltaCoalescer(
+  sinks: ProviderDeltaSinks,
+  options: TextDeltaCoalescerOptions = {},
+): TextDeltaCoalescer {
+  const answer = createTextDeltaCoalescer(sinks.text, options);
+  const reasoning = createTextDeltaCoalescer(sinks.reasoning, options);
+  return {
+    onChunk: async (chunk) => {
+      if (chunk.kind === "text" && chunk.reasoning !== undefined) {
+        await reasoning.onChunk({ kind: "text", text: chunk.reasoning });
+      }
+      await answer.onChunk(chunk);
+    },
+    flush: async () => {
+      // The provider emits reasoning before the answer. Preserve that order
+      // when both buffers are shorter than the timer/size thresholds.
+      await reasoning.flush();
+      await answer.flush();
+    },
+  };
 }
 
 /**

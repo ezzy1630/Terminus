@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { STANDALONE_ALWAYS_ON_TOOL_IDS } from "../agent-tools.js";
 import {
+  TERMINUS_DECLARABLE_TOOL_IDS,
   TERMINUS_MINIMAL_TOOL_IDS,
   buildEvidenceIdentity,
   createTerminusMinimalProfile,
@@ -14,13 +16,45 @@ describe("terminus-minimal profile", () => {
       modelKey: "local/test",
       configuration: { transport: "fixture", toolsEnabled: true },
     });
-    expect(profile.toolIds).toEqual([...TERMINUS_MINIMAL_TOOL_IDS]);
+    expect(profile.toolIds).toEqual([...TERMINUS_MINIMAL_TOOL_IDS].sort());
     expect(profile.routerEnabled).toBe(false);
     expect(profile.memoryEnabled).toBe(false);
     expect(profile.workflowEnabled).toBe(false);
     expect(profile.subagentsEnabled).toBe(false);
     expect(terminusMinimalProfileSchema.safeParse(profile).success).toBe(true);
     expect(validateTerminusMinimalProfile(profile)).toEqual(profile);
+  });
+
+  test("the declared set is the executable set", () => {
+    // Three inventories used to disagree: the profile declared
+    // read/patch/exec, the prompt documented grep/glob/exec_poll, and the
+    // dispatch guard rejected anything outside the profile. They are now the
+    // same list, and every id in it has a real schema.
+    expect([...TERMINUS_MINIMAL_TOOL_IDS].sort()).toEqual([...STANDALONE_ALWAYS_ON_TOOL_IDS].sort());
+    expect(TERMINUS_DECLARABLE_TOOL_IDS).toContain("capability");
+    expect(TERMINUS_DECLARABLE_TOOL_IDS).toContain("web_fetch");
+  });
+
+  test("an activated tool widens the declared set; direct replies may declare none; unknown tools are refused", () => {
+    const withFetch = createTerminusMinimalProfile({
+      providerId: "local",
+      modelKey: "local/test",
+      toolIds: [...TERMINUS_MINIMAL_TOOL_IDS, "web_fetch"],
+    });
+    expect(withFetch.toolIds).toContain("web_fetch");
+    expect(validateTerminusMinimalProfile(withFetch)).toEqual(withFetch);
+    expect(() => createTerminusMinimalProfile({
+      providerId: "local",
+      modelKey: "local/test",
+      toolIds: ["read", "rm_rf"],
+    })).toThrow(/unknown tool/);
+    const direct = createTerminusMinimalProfile({
+      providerId: "local",
+      modelKey: "local/test",
+      toolIds: [],
+    });
+    expect(direct.toolIds).toEqual([]);
+    expect(validateTerminusMinimalProfile(direct)).toEqual(direct);
   });
 
   test("rejects credential-bearing configuration and forged profile identity", () => {

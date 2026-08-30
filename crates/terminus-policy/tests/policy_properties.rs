@@ -19,7 +19,8 @@ fn allow_rule(id: &str, executable: &str, priority: u32) -> Rule {
         r#match: RuleMatch {
             executable_any: vec![executable.into()],
             ..Default::default()
-        },
+        }
+        .into(),
         effect: RuleEffect::Allow,
     }
 }
@@ -32,7 +33,8 @@ fn deny_rule(id: &str, executable: &str, priority: u32) -> Rule {
         r#match: RuleMatch {
             executable_any: vec![executable.into()],
             ..Default::default()
-        },
+        }
+        .into(),
         effect: RuleEffect::Deny,
     }
 }

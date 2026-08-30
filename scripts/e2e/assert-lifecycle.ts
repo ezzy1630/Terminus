@@ -453,33 +453,44 @@ const artifactInventory = await api("GET", `/v1/tasks/${encodeURIComponent(taskI
 if (!Array.isArray(artifactInventory.artifacts)) {
   throw new Error(`task artifact inventory was malformed: ${JSON.stringify(artifactInventory)}`);
 }
-const providerResponseEntry = artifactInventory.artifacts
+const providerResponseEntries = artifactInventory.artifacts
   .map((entry) => asObject(entry, "task artifact"))
-  .find((entry) => entry.purpose === "provider_response");
-if (!providerResponseEntry) {
+  .filter((entry) => entry.purpose === "provider_response");
+if (providerResponseEntries.length === 0) {
   throw new Error(`completed provider attempt had no response artifact: ${JSON.stringify(artifactInventory)}`);
 }
-const providerResponseHash = stringField(providerResponseEntry, "hash", "provider response artifact");
-const providerResponse = await fetch(
-  `${baseUrl}/v1/artifacts/${encodeURIComponent(providerResponseHash)}?task_id=${encodeURIComponent(taskId)}`,
-  { headers: { authorization: `Bearer ${token}` } },
-);
-if (!providerResponse.ok) {
-  throw new Error(`provider response artifact fetch failed (${providerResponse.status})`);
-}
-const persistedProviderText = await providerResponse.text();
-const parsedProviderResponse = (() => {
-  try {
-    return JSON.parse(persistedProviderText) as JsonObject;
-  } catch {
-    return null;
+let matchedProviderResponse = false;
+let matchedProviderResponseHash: string | null = null;
+const observedProviderResponses: string[] = [];
+for (const entry of providerResponseEntries) {
+  const providerResponseHash = stringField(entry, "hash", "provider response artifact");
+  const providerResponse = await fetch(
+    `${baseUrl}/v1/artifacts/${encodeURIComponent(providerResponseHash)}?task_id=${encodeURIComponent(taskId)}`,
+    { headers: { authorization: `Bearer ${token}` } },
+  );
+  if (!providerResponse.ok) {
+    throw new Error(`provider response artifact fetch failed (${providerResponse.status})`);
   }
-})();
-const extractedText = Array.isArray(parsedProviderResponse?.chunks)
-  ? (parsedProviderResponse.chunks as readonly JsonObject[]).find((chunk) => chunk.kind === "text")?.text
-  : persistedProviderText;
-if (persistedProviderText !== providerResponseText && extractedText !== providerResponseText) {
-  throw new Error(`provider response artifact changed: ${JSON.stringify(persistedProviderText)}`);
+  const persistedProviderText = await providerResponse.text();
+  observedProviderResponses.push(persistedProviderText);
+  const parsedProviderResponse = (() => {
+    try {
+      return JSON.parse(persistedProviderText) as JsonObject;
+    } catch {
+      return null;
+    }
+  })();
+  const extractedText = Array.isArray(parsedProviderResponse?.chunks)
+    ? (parsedProviderResponse.chunks as readonly JsonObject[]).find((chunk) => chunk.kind === "text")?.text
+    : persistedProviderText;
+  if (persistedProviderText === providerResponseText || extractedText === providerResponseText) {
+    matchedProviderResponse = true;
+    matchedProviderResponseHash = providerResponseHash;
+    break;
+  }
+}
+if (!matchedProviderResponse) {
+  throw new Error(`provider response artifacts changed: ${JSON.stringify(observedProviderResponses)}`);
 }
 
 const interruptTask = await api("POST", "/v1/tasks", {
@@ -690,7 +701,10 @@ const restartTask = await api("POST", "/v1/tasks", {
     verification_hint: "command:/bin/ls -d .",
     required: true,
   }],
-  allowed_scope: { read_paths: ["."], write_paths: [], external_systems: [] },
+  // `.` is the provider job's working-directory authority; the exact file is
+  // the model-facing read authority. Keeping both makes the two effect scopes
+  // explicit instead of treating provider execution as ambient workspace read.
+  allowed_scope: { read_paths: [".", "e2e-fixture.txt"], write_paths: [], external_systems: [] },
 });
 const restartTaskId = stringField(restartTask, "id", "restart task");
 await api("POST", `/v1/tasks/${encodeURIComponent(restartTaskId)}/start`, {});
@@ -724,7 +738,7 @@ console.log(JSON.stringify({
   thread_id: threadId,
   checkpoint_id: checkpointId,
   checkpoint_artifact_hash: checkpointArtifact.hash,
-  provider_response_hash: providerResponseHash,
+  provider_response_hash: matchedProviderResponseHash,
   contract_fixture_task_id: contractFixtureId,
   pending_recovery_task_id: pendingRecoveryTaskId,
   resume_task_id: restartTaskId,

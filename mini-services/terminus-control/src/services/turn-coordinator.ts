@@ -60,12 +60,19 @@ export interface TurnAdmissionInput {
    * already running. Null means the legacy direct/gateway/local chain.
    */
   readonly selectedProviderAccountId?: string | null | undefined;
+  /**
+   * The caller's per-turn budget, already validated and serialised. Written in
+   * the admission transaction so the loop cannot start against a budget that
+   * was never durably recorded.
+   */
+  readonly requestedBudgetJson?: string | null | undefined;
 }
 
 export interface TurnCoordinatorTransaction {
   readonly findTask: (taskId: string) => Promise<TurnTaskSnapshot | null>;
   readonly findActiveTurn: (taskId: string, activeStates: readonly string[]) => Promise<{ readonly id: string } | null>;
   readonly findLatestSequence: (threadId: string) => Promise<number | null>;
+  /** Restore a steerable task and clear every terminal projection atomically. */
   readonly resumeTask: (taskId: string, expectedStatus: string) => Promise<void>;
   readonly createTurn: (input: TurnAdmissionInput) => Promise<void>;
   readonly createUserEpisode: (input: TurnAdmissionInput) => Promise<void>;

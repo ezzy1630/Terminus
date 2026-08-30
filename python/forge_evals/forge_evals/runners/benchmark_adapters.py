@@ -27,9 +27,15 @@ from .trajectory_recorder import TrajectoryRecorder
 
 __all__ = [
     "SWE_BENCH_HARNESS_COMMIT",
+    "SWE_BENCH_PRO_HARNESS_COMMIT",
+    "SWE_BENCH_PRO_REVISION",
     "SWE_BENCH_VERIFIED_REVISION",
+    "TERMINAL_BENCH_DATASET",
+    "TERMINAL_BENCH_DATASET_VERSION",
     "TERMINAL_BENCH_HARBOR_COMMIT",
+    "TERMINAL_BENCH_HARBOR_VERSION",
     "TERMINAL_BENCH_TASK_COMMIT",
+    "TERMINAL_BENCH_TASK_COUNT",
     "BenchmarkAdapter",
     "BenchmarkAdapterError",
     "BenchmarkExecution",
@@ -40,7 +46,9 @@ __all__ = [
     "HarborAdapter",
     "HarborTerminalBenchAdapter",
     "LiveBenchmarkHarness",
+    "SWEBenchProAdapter",
     "SWEBenchVerifiedAdapter",
+    "SweBenchProAdapter",
     "SweBenchVerifiedAdapter",
     "TranslatedTaskManifest",
     "adapter_for_suite",
@@ -49,16 +57,31 @@ __all__ = [
 
 BenchmarkKind = Literal["harbor", "swebench"]
 
+# Terminal-Bench 2.0, executed through Harbor v0.22.0. These pins mirror the
+# exact registry entry in the suite manifest: Harbor's registry snapshot names
+# the official 89-task dataset and points at the task-source commit below.
 TERMINAL_BENCH_REGISTRY_REPOSITORY = "https://github.com/harbor-framework/harbor.git"
-TERMINAL_BENCH_HARBOR_COMMIT = "72f7dd0134162c5b7229f6a31286e05a49c0f8a4"
+TERMINAL_BENCH_HARBOR_VERSION = "0.22.0"
+TERMINAL_BENCH_HARBOR_COMMIT = "41a50d62d7f35677cc34ba3a0c36f042a4fef68c"
 TERMINAL_BENCH_TASK_REPOSITORY = "https://github.com/laude-institute/terminal-bench-2.git"
 TERMINAL_BENCH_TASK_COMMIT = "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+TERMINAL_BENCH_DATASET = "terminal-bench/terminal-bench-2"
+TERMINAL_BENCH_DATASET_VERSION = "2.0"
+TERMINAL_BENCH_TASK_COUNT = 89
 SWE_BENCH_DATASET = "SWE-bench/SWE-bench_Verified"
 SWE_BENCH_VERIFIED_REVISION = "78f471bf655a3137b2e8a75af1501690ec009ec3"
 SWE_BENCH_HARNESS_REPOSITORY = "https://github.com/SWE-bench/SWE-bench.git"
 SWE_BENCH_HARNESS_COMMIT = "7a21e05772954cc81471ae19d56f436cecf43c54"
+# SWE-bench Pro (Scale AI): 731 multi-language instances, graded by the
+# `swe_bench_pro_eval.py` harness in `scaleapi/SWE-bench_Pro-os`.
+SWE_BENCH_PRO_DATASET = "ScaleAI/SWE-bench_Pro"
+SWE_BENCH_PRO_REVISION = "7ab5114912baf22bb098818e604c02fe7ad2c11f"
+SWE_BENCH_PRO_HARNESS_REPOSITORY = "https://github.com/scaleapi/SWE-bench_Pro-os.git"
+SWE_BENCH_PRO_HARNESS_COMMIT = "ca10a60a5fcae51e6948ffe1485d4153d421e6c5"
+SWE_BENCH_PRO_TASK_COUNT = 731
 
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_HEX40 = _GIT_COMMIT
 _SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ALL_ZERO_DIGEST = "sha256:" + "0" * 64
 
@@ -142,6 +165,18 @@ class BenchmarkManifest:
                 harness_commit=harness_commit,
             )
 
+        if suite_id == "swe-bench-pro":
+            return cls._from_swebench_pro(
+                suite_id=suite_id,
+                suite_version=suite_version,
+                task_count=task_count,
+                source=source,
+                cohorts=cohorts,
+                adapter=adapter,
+                harness_repository=harness_repository,
+                harness_commit=harness_commit,
+            )
+
         return cls._from_swebench(
             suite_id=suite_id,
             suite_version=suite_version,
@@ -151,6 +186,85 @@ class BenchmarkManifest:
             adapter=adapter,
             harness_repository=harness_repository,
             harness_commit=harness_commit,
+        )
+
+    @classmethod
+    def _from_swebench_pro(
+        cls,
+        *,
+        suite_id: str,
+        suite_version: int,
+        task_count: int,
+        source: str,
+        cohorts: tuple[str, ...],
+        adapter: Mapping[str, object],
+        harness_repository: str,
+        harness_commit: str,
+    ) -> BenchmarkManifest:
+        """Validate the SWE-bench Pro pin set.
+
+        SWE-bench Pro is deliberately *not* validated with the Verified rules:
+        it is a different dataset (731 instances), a different evaluator
+        (`swe_bench_pro_eval.py` in `scaleapi/SWE-bench_Pro-os`), and it is
+        multi-language, so the Python-only scope check would be wrong.
+        """
+        if task_count != SWE_BENCH_PRO_TASK_COUNT:
+            raise BenchmarkManifestError(
+                f"SWE-bench Pro must contain exactly {SWE_BENCH_PRO_TASK_COUNT} instances, "
+                f"got {task_count}"
+            )
+        if harness_repository != SWE_BENCH_PRO_HARNESS_REPOSITORY:
+            raise BenchmarkManifestError(
+                "SWE-bench Pro harness repository is not the pinned upstream evaluator"
+            )
+        if harness_commit != SWE_BENCH_PRO_HARNESS_COMMIT:
+            raise BenchmarkManifestError(
+                "SWE-bench Pro harness commit does not match the pinned evaluator"
+            )
+
+        dataset = _string(adapter, "dataset", "suite.adapter.dataset")
+        split = _string(adapter, "split", "suite.adapter.split")
+        revision = _string(adapter, "revision", "suite.adapter.revision")
+        if _HEX40.fullmatch(revision) is None:
+            raise BenchmarkManifestError(
+                "suite.adapter.revision must be the 40-character dataset revision"
+            )
+        language = _string(adapter, "language", "suite.adapter.language").lower()
+        image_digest_policy = _string(
+            adapter, "image_digest_policy", "suite.adapter.image_digest_policy"
+        )
+        if dataset != SWE_BENCH_PRO_DATASET or split != "test":
+            raise BenchmarkManifestError(
+                f"SWE-bench Pro adapter must pin {SWE_BENCH_PRO_DATASET} split test"
+            )
+        if revision != SWE_BENCH_PRO_REVISION:
+            raise BenchmarkManifestError(
+                "SWE-bench Pro dataset revision does not match the exact pin"
+            )
+        if language != "multi":
+            raise BenchmarkManifestError(
+                "SWE-bench Pro spans several languages; suite.adapter.language must be 'multi'"
+            )
+        if image_digest_policy != "per_instance_required":
+            raise BenchmarkManifestError(
+                "SWE-bench Pro requires one resolved image digest per instance"
+            )
+
+        return cls(
+            suite_id=suite_id,
+            suite_version=suite_version,
+            adapter_kind="swebench",
+            dataset=dataset,
+            dataset_version=None,
+            dataset_revision=revision,
+            task_count=task_count,
+            source=source,
+            cohorts=cohorts,
+            image_digest_policy=image_digest_policy,
+            harness_repository=harness_repository,
+            harness_commit=harness_commit,
+            split=split,
+            language=language,
         )
 
     @classmethod
@@ -170,9 +284,10 @@ class BenchmarkManifest:
             raise BenchmarkManifestError(
                 f"Harbor adapter must be used by suite terminal-bench, got {suite_id!r}"
             )
-        if task_count != 89:
+        if task_count != TERMINAL_BENCH_TASK_COUNT:
             raise BenchmarkManifestError(
-                f"terminal-bench@2.0 must contain exactly 89 tasks, got {task_count}"
+                f"terminal-bench@{TERMINAL_BENCH_DATASET_VERSION} must contain exactly "
+                f"{TERMINAL_BENCH_TASK_COUNT} tasks, got {task_count}"
             )
         if harness_repository != TERMINAL_BENCH_REGISTRY_REPOSITORY:
             raise BenchmarkManifestError(
@@ -185,8 +300,11 @@ class BenchmarkManifest:
 
         dataset = _string(adapter, "dataset", "suite.adapter.dataset")
         dataset_version = _string(adapter, "dataset_version", "suite.adapter.dataset_version")
-        if dataset != "terminal-bench" or dataset_version != "2.0":
-            raise BenchmarkManifestError("Harbor adapter must pin the terminal-bench@2.0 dataset")
+        if dataset != TERMINAL_BENCH_DATASET or dataset_version != TERMINAL_BENCH_DATASET_VERSION:
+            raise BenchmarkManifestError(
+                "Harbor adapter must pin the "
+                f"{TERMINAL_BENCH_DATASET}@{TERMINAL_BENCH_DATASET_VERSION} dataset"
+            )
 
         registry = _mapping(adapter.get("registry"), "suite.adapter.registry")
         registry_repository = _https_url(
@@ -667,8 +785,33 @@ class SweBenchVerifiedAdapter(_ExternalBenchmarkAdapter):
         )
 
 
+class SweBenchProAdapter(SweBenchVerifiedAdapter):
+    """Translate SWE-bench Pro requests into the live evaluator boundary.
+
+    Like SWE-bench Verified, the official evaluator consumes an agent-produced
+    patch, so ``argv`` stays ``None`` until one exists. The executable path —
+    materialise the instance, run one Terminus turn, write the prediction, and
+    invoke `swe_bench_pro_eval.py` — lives in
+    :mod:`forge_evals.runners.swebench_pro`, which the CLI drives.
+    """
+
+    def translate(self, request: RunRequest) -> BenchmarkInvocation:
+        """Describe the pinned Pro instance without inventing a patch."""
+        return BenchmarkInvocation(
+            executable=self._executable,
+            argv=None,
+            task_manifest=self._translated_task_manifest(request),
+            notes=(
+                "SWE-bench Pro is graded by scaleapi/SWE-bench_Pro-os "
+                "swe_bench_pro_eval.py --patch_path; forge_evals.runners.swebench_pro "
+                "materialises the instance, writes the prediction, and invokes it."
+            ),
+        )
+
+
 HarborAdapter = HarborTerminalBenchAdapter
 SWEBenchVerifiedAdapter = SweBenchVerifiedAdapter
+SWEBenchProAdapter = SweBenchProAdapter
 
 
 def load_benchmark_manifest(path: Path | str) -> BenchmarkManifest:
@@ -696,6 +839,8 @@ def adapter_for_suite(
     manifest = load_benchmark_manifest(path)
     if manifest.adapter_kind == "harbor":
         return HarborTerminalBenchAdapter(manifest, live_harness=live_harness)
+    if manifest.suite_id == "swe-bench-pro":
+        return SweBenchProAdapter(manifest, live_harness=live_harness)
     return SweBenchVerifiedAdapter(manifest, live_harness=live_harness)
 
 

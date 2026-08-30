@@ -211,6 +211,8 @@ pub struct LocalCredentialRoots {
     pub codex_dir: Option<PathBuf>,
     /// `PATH` used for the install probe. `None` reads the process `PATH`.
     pub path_override: Option<std::ffi::OsString>,
+    /// User home used for standard per-user CLI install locations.
+    pub home_dir: Option<PathBuf>,
 }
 
 impl LocalCredentialRoots {
@@ -220,7 +222,13 @@ impl LocalCredentialRoots {
     /// `None` and is treated as "store absent" — not an error.
     #[must_use]
     pub fn from_environment() -> Self {
-        let home = non_empty_env("HOME").map(PathBuf::from);
+        // Packaged desktop runtimes isolate their writable state by setting
+        // HOME to the app's private data directory. The shell passes the real
+        // account home separately so local CLI discovery still describes the
+        // signed-in macOS user rather than the runtime sandbox.
+        let home = non_empty_env("TERMINUS_USER_HOME")
+            .or_else(|| non_empty_env("HOME"))
+            .map(PathBuf::from);
         let opencode_dir = non_empty_env("XDG_DATA_HOME")
             .map(|xdg| PathBuf::from(xdg).join(OPENCODE_DATA_DIR))
             .or_else(|| {
@@ -240,6 +248,7 @@ impl LocalCredentialRoots {
             opencode_dir,
             codex_dir,
             path_override: None,
+            home_dir: home,
         }
     }
 
@@ -265,6 +274,12 @@ impl LocalCredentialRoots {
     #[must_use]
     pub fn with_path_override(mut self, path: impl Into<std::ffi::OsString>) -> Self {
         self.path_override = Some(path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_home_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.home_dir = Some(path.into());
         self
     }
 
@@ -512,10 +527,20 @@ impl ProviderAccountService {
                 None => return false,
             },
         };
-        std::env::split_paths(&path)
+        let on_path = std::env::split_paths(&path)
             .take(MAX_PATH_ENTRIES)
             .filter(|dir| !dir.as_os_str().is_empty())
-            .any(|dir| is_executable_file(&dir.join(binary)))
+            .any(|dir| is_executable_file(&dir.join(binary)));
+        if on_path {
+            return true;
+        }
+        // GUI apps inherit a minimal launchd PATH on macOS. OpenCode's
+        // installer uses this stable per-user location, so PATH-only probing
+        // made an installed CLI disappear specifically in the shipped app.
+        binary == OPENCODE_BINARY
+            && self.roots.home_dir.as_ref().is_some_and(|home| {
+                is_executable_file(&home.join(".opencode").join("bin").join(binary))
+            })
     }
 }
 

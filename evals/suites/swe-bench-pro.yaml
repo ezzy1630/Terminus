@@ -1,0 +1,51 @@
+suite:
+  id: swe-bench-pro
+  version: 1
+  description: |
+    SWE-bench Pro (Scale AI) — 731 long-horizon, multi-language software
+    engineering instances. Given a repository at a base commit and an issue,
+    the agent must produce a patch that turns the instance's hidden
+    fail_to_pass tests green without regressing pass_to_pass.
+  source: https://github.com/scaleapi/SWE-bench_Pro-os
+  license: CC-BY-4.0
+  task_count: 731
+  default_timeout_seconds: 3600
+  default_budget:
+    model_micros: 10000000
+    compute_seconds: 1800
+    wall_clock_seconds: 3600
+    human_approvals: 0
+  grader_version: swe-bench-pro-1.0
+  metrics:
+    primary: resolved
+    secondary: [applied_patch_parses, tests_pass, cost_usd, wall_clock_seconds]
+  cohorts:
+    - multi-language-repos
+  notes: |
+    Instances are NOT vendored. The live adapter resolves the pinned Hugging
+    Face revision, or reads a byte-pinned local instance file supplied with
+    `--instance-file` for fully offline runs.
+
+    Grading is the upstream harness's, not ours:
+    `python swe_bench_pro_eval.py --raw_sample_path=... --patch_path=...
+    --output_dir=... --scripts_dir=run_scripts`, which reads a JSON list of
+    `{instance_id, patch, prefix}`. Every run therefore writes two prediction
+    files — the canonical SWE-bench shape (`instance_id`,
+    `model_name_or_path`, `model_patch`) and the Pro evaluator's shape — and
+    records `evaluation_pending` with both paths when
+    TERMINUS_SWEBENCH_PRO_HARNESS_DIR is unset or Docker is unavailable.
+
+    Container images are per-instance (`dockerhub_tag` on each row, published
+    under `jefzda/sweap-images`), so a live harness must return the resolved
+    image digest for each instance before its result is benchmark evidence.
+  adapter:
+    kind: swebench
+    dataset: ScaleAI/SWE-bench_Pro
+    split: test
+    revision: 7ab5114912baf22bb098818e604c02fe7ad2c11f
+    language: multi
+    task_count: 731
+    image_digest_policy: per_instance_required
+    harness:
+      repository: https://github.com/scaleapi/SWE-bench_Pro-os.git
+      commit: ca10a60a5fcae51e6948ffe1485d4153d421e6c5

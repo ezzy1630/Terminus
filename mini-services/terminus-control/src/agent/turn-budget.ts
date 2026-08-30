@@ -15,7 +15,16 @@ import type { OperationObservation } from "./loop-contracts.js";
  * that the adaptive budget may approach but never exceed.
  */
 
-export const HARD_MAX_STEPS = 24;
+/**
+ * Absolute ceiling on provider attempts in one turn.
+ *
+ * It was 24, which silently clamped the configured 64 and ended real coding
+ * tasks mid-edit with `steps_exhausted` — a bug fix that needs twenty reads,
+ * ten edits and three test runs does not fit in 24 model turns. 200 matches
+ * what shipping harnesses allow per session; the wall-clock, token and cost
+ * budgets are the bounds that actually bite first.
+ */
+export const HARD_MAX_STEPS = 200;
 
 export interface TurnBudgetOptions {
   /** Soft step budget; the loop stops when exhausted. Must be <= hardMaxSteps. */

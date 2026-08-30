@@ -58,7 +58,13 @@ export function approvalRequiredFor(profile: PermissionProfile, call: ParsedStan
     case "auto":
       return call.toolId === "web_fetch";
     case "ask":
-      return call.toolId === "patch" || call.toolId === "exec" || call.toolId === "web_fetch";
+      if (call.toolId === "capability") return false;
+      // `write` creates or replaces a whole file: the same authority as
+      // `patch`, so it sits behind the same approval.
+      return call.toolId === "patch"
+        || call.toolId === "write"
+        || call.toolId === "exec"
+        || call.toolId === "web_fetch";
   }
 }
 
@@ -89,6 +95,7 @@ export function approvalReasonFor(profile: PermissionProfile, call: ParsedStanda
   const level = describePermissionProfile(profile).label;
   switch (call.toolId) {
     case "patch":
+    case "write":
       return `Your permission level is "${level}", so the agent needs your approval before editing a file.`;
     case "exec":
       return `Your permission level is "${level}", so the agent needs your approval before running a command.`;
@@ -102,8 +109,12 @@ export function approvalReasonFor(profile: PermissionProfile, call: ParsedStanda
 /** Short verb phrase for the approval card's title. */
 export function approvalActionFor(call: ParsedStandaloneToolCall): string {
   switch (call.toolId) {
+    case "capability":
+      return "Activate workspace tools";
     case "patch":
       return `Edit ${call.arguments.path}`;
+    case "write":
+      return `Write ${call.arguments.path}`;
     case "exec": {
       const shell = call.arguments.shell;
       const command = shell !== undefined
