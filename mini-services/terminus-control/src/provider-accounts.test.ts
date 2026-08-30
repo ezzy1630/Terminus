@@ -201,8 +201,12 @@ describe("mapLocalCredential", () => {
   });
 
   test("rejects token-shaped and dot-segment Cloudflare metadata", () => {
-    const tokenShapedAccountId = ["sk", "live", "secret"].join("-");
-    for (const accountId of ["..", tokenShapedAccountId, "malformed-account-id"]) {
+    const malformedAccountIds = [
+      "..",
+      ["sk", "live", "secret"].join("-"),
+      `${"0123456789abcdef".repeat(2)}g`,
+    ];
+    for (const accountId of malformedAccountIds) {
       const mapping = mapLocalCredential({
         credential: credential({
           source: "opencode:cloudflare-workers-ai",
