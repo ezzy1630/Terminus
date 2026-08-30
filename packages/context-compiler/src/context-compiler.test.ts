@@ -8,6 +8,7 @@ import type {
   Uuid7,
 } from "@terminus/domain";
 import type { ContextBudget, ContextFragment, ContextManifest } from "@terminus/context-ir";
+import { computeContentHash } from "@terminus/context-ir";
 import type {
   CanonicalRenderInput,
   CompatibilityResult,
@@ -348,6 +349,71 @@ describe("Context Compiler", () => {
     const manifestFragment = compiled.manifest.fragments.find((fragment) => fragment.fragmentId === instruction[0]!.id);
     expect(manifestFragment?.required).toBe(true);
     expect(compiled.rendered.request.blocks.some((block) => block.content.includes("Never skip"))).toBe(true);
+  });
+
+  test("hard-includes a compaction summary after its source episodes are hidden", async () => {
+    const summaryText = "AUTHORITATIVE_OBLIGATION_ANCHOR:\n{}\nUNTRUSTED_LOSSY_MODEL_SUMMARY_DATA:\ncontinue";
+    const summaryHash = computeContentHash(summaryText);
+    const tailText = "most recent exact working state";
+    const tailHash = computeContentHash(tailText);
+    let persistedCandidates: readonly ContextFragment[] = [];
+    const store: ContextStore = {
+      async persistManifest(manifest, fragments = []) {
+        persistedCandidates = fragments;
+        return { id: MANIFEST_ID, ...manifest };
+      },
+      async getManifest() {
+        return null;
+      },
+      async recordObservation() {},
+    };
+    const base = compileInput(store);
+    const compiled = await compileContext({
+      ...base,
+      recentEpisodes: [
+        {
+          id: "00000000-0000-7000-8000-000000000008" as Uuid7,
+          turnId: "00000000-0000-7000-8000-000000000007" as Uuid7,
+          sequence: 1,
+          kind: "model_message",
+          contentRef: tailHash,
+          providerAttemptId: null,
+          toolCallId: null,
+          occurredAt: NOW,
+        },
+        {
+          id: "00000000-0000-7000-8000-000000000006" as Uuid7,
+          turnId: "00000000-0000-7000-8000-000000000007" as Uuid7,
+          sequence: 2,
+          kind: "summary",
+          contentRef: summaryHash,
+          providerAttemptId: null,
+          toolCallId: null,
+          occurredAt: NOW,
+        },
+      ],
+      episodeContent: new Map([[summaryHash, summaryText], [tailHash, tailText]]),
+      budget: {
+        ...base.budget,
+        optionalContextTarget: 1n as TokenCount,
+      },
+    });
+
+    const summaryFragment = compiled.manifest.fragments.find(
+      (fragment) => fragment.artifactHash === summaryHash,
+    );
+    expect(summaryFragment?.required).toBe(true);
+    expect(compiled.manifest.fragments.find((fragment) => fragment.artifactHash === tailHash)?.required).toBe(true);
+    expect(compiled.rendered.request.blocks.some((block) => block.content === summaryText)).toBe(true);
+    expect(compiled.rendered.request.blocks.some((block) => block.content === tailText)).toBe(true);
+    const summaryCandidate = persistedCandidates.find(
+      (fragment) => fragment.contentRef.hash === summaryHash,
+    );
+    expect(summaryCandidate).toMatchObject({
+      authority: 85,
+      trust: "untrusted",
+      injectionRisk: "high",
+    });
   });
 
   test("replays the exact selected manifest and records ablation drift", async () => {

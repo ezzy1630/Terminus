@@ -2,6 +2,7 @@ import type { ContentHash, Episode } from "@terminus/domain";
 import type { ArtifactClient } from "@terminus/artifact-client";
 import type { ProviderToolCallChunk } from "@terminus/provider-core";
 import { DEFAULT_MAX_TOOL_CYCLES, type InvalidToolCallError } from "../agent-tools.js";
+import { MAX_MODEL_VISIBLE_EPISODE_BYTES } from "../agent/model-visible-limits.js";
 
 export class ToolPolicyDeniedError extends Error {
   constructor(message: string) {
@@ -20,6 +21,12 @@ export class ToolCycleBudgetExhaustedError extends Error {
 export interface ModelVisibleEpisodeSet {
   readonly episodes: readonly Episode[];
   readonly content: ReadonlyMap<ContentHash, string>;
+}
+
+export interface ModelVisibleEpisodeWindow {
+  readonly maxTokens: number;
+  readonly estimateTextTokens: (text: string) => number;
+  readonly messageEnvelopeTokens: number;
 }
 
 export interface ToolEpisodeStore {
@@ -59,8 +66,8 @@ export interface ToolEpisodeDependencies {
   readonly settleCall: (input: ToolEpisodeSettlementInput) => Promise<void>;
   readonly maxCycles?: number;
   /**
-   * R4: byte budget for the model-visible episode window
-   * (bytes ≈ tokens × 4). Default ≈ 96k tokens.
+   * Legacy byte budget used only when the caller has no selected-model token
+   * window. The live control loop supplies a token window.
    */
   readonly windowBytes?: number;
 }
@@ -105,39 +112,67 @@ export class ToolEpisodeService {
     };
   }
 
-  async loadModelVisibleEpisodes(turnId: string): Promise<ModelVisibleEpisodeSet> {
+  async loadModelVisibleEpisodes(
+    turnId: string,
+    tokenWindow?: ModelVisibleEpisodeWindow,
+  ): Promise<ModelVisibleEpisodeSet> {
     // R4: token-budgeted window replaces the fixed take(16). Scan the newest
-    // model-visible rows first and include oldest rows only while they fit
-    // the byte budget (bytes ≈ tokens × 4), so long turns degrade gracefully
-    // instead of truncating at an arbitrary count.
+    // model-visible rows first and include older rows only while they fit the
+    // selected-model window. The byte path remains for compatibility callers.
     const rows = await this.dependencies.store.listModelVisibleEpisodes(turnId);
     const decoder = new TextDecoder("utf-8", { fatal: true });
     const content = new Map<ContentHash, string>();
     type Row = (typeof rows)[number];
     const includedRows: Row[] = [];
     let budgetBytes = this.windowBytes;
+    let budgetTokens = tokenWindow?.maxTokens ?? null;
+    if (budgetTokens !== null && (!Number.isSafeInteger(budgetTokens) || budgetTokens < 0)) {
+      throw new Error("episode token window must be a non-negative safe integer");
+    }
     // Walk newest→oldest; include while budget allows.
     for (let index = rows.length - 1; index >= 0; index -= 1) {
       const row = rows[index]!;
       const contentRef: ContentHash | null = row.contentArtifact?.startsWith("artifact://sha256/")
         ? `sha256:${row.contentArtifact.slice("artifact://sha256/".length)}` as ContentHash
         : null;
-      if (contentRef !== null && !content.has(contentRef)) {
-        if (budgetBytes <= 0) break;
+      let text = contentRef === null ? "" : content.get(contentRef);
+      let bytesLength = 0;
+      if (contentRef !== null && text === undefined) {
         const bytes = await this.dependencies.store.readArtifact(contentRef);
         if (bytes === null) throw new Error(`episode ${row.id} artifact ${contentRef} is unavailable`);
-        if (bytes.byteLength > 128 * 1_024) {
-          throw new Error(`episode ${row.id} exceeds the 131072-byte continuation limit`);
+        if (bytes.byteLength > MAX_MODEL_VISIBLE_EPISODE_BYTES) {
+          throw new Error(
+            `episode ${row.id} exceeds the ${MAX_MODEL_VISIBLE_EPISODE_BYTES}-byte continuation limit`,
+          );
         }
-        if (bytes.byteLength > budgetBytes) {
+        bytesLength = bytes.byteLength;
+        text = decoder.decode(bytes);
+        content.set(contentRef as ContentHash, text);
+      } else if (text !== undefined) {
+        bytesLength = new TextEncoder().encode(text).byteLength;
+      }
+      if (tokenWindow !== undefined) {
+        const rowTokens = tokenWindow.estimateTextTokens(text ?? "")
+          + tokenWindow.messageEnvelopeTokens;
+        if (!Number.isSafeInteger(rowTokens) || rowTokens < 0) {
+          throw new Error(`episode ${row.id} has an invalid token estimate`);
+        }
+        const remainingTokens = budgetTokens ?? 0;
+        if (remainingTokens < rowTokens) {
+          if (includedRows.length > 0) break;
+          budgetTokens = rowTokens;
+        }
+        budgetTokens = (budgetTokens ?? 0) - rowTokens;
+      } else if (contentRef !== null) {
+        if (budgetBytes <= 0) break;
+        if (bytesLength > budgetBytes) {
           // A single oversized episode can exceed what fits; include it only
           // when nothing else has been included yet so the window is never
           // empty, otherwise stop here.
           if (includedRows.length > 0) break;
-          budgetBytes = bytes.byteLength;
+          budgetBytes = bytesLength;
         }
-        budgetBytes -= bytes.byteLength;
-        content.set(contentRef as ContentHash, decoder.decode(bytes));
+        budgetBytes -= bytesLength;
       }
       includedRows.push(row);
     }

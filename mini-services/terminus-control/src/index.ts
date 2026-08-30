@@ -345,7 +345,12 @@ import {
   type ThreadSnapshot,
   type WorldStateSnapshot,
 } from "@terminus/context-compiler";
-import { deriveProviderAwareContextBudget, observeAttemptUsage, resolveTokenizer } from "@terminus/context-compiler";
+import {
+  MESSAGE_ENVELOPE_TOKENS,
+  deriveProviderAwareContextBudget,
+  observeAttemptUsage,
+  resolveTokenizer,
+} from "@terminus/context-compiler";
 import {
   canonicalJson,
   computeContentHash,
@@ -448,13 +453,19 @@ import {
   type TextDeltaCoalescer,
 } from "./agent/provider-stream-coalescer.js";
 import {
-  BYTES_PER_TOKEN_ESTIMATE,
-  DEFAULT_COMPACT_THRESHOLD_TOKENS,
   runCompaction,
   SUMMARY_SYSTEM_INSTRUCTIONS,
   type CompactionStore,
+  type CompactionReport,
+  type CompactionTaskAnchor,
   type Summarizer,
 } from "./agent/compaction-service.js";
+import {
+  METADATA_PREFLIGHT_BYTES_PER_TOKEN,
+  TurnCompactionFailureGuard,
+  conservativeCompactionTextTokens,
+  deriveCompactionPolicy,
+} from "./agent/compaction-policy.js";
 import {
   initialResponseAuthorityDocuments,
   standaloneAuthorityDocuments,
@@ -12420,6 +12431,13 @@ function artifactUriHash(uri: string | null | undefined): string | null {
   return /^sha256:[0-9a-f]{64}$/.test(hash) ? hash : null;
 }
 
+function compactionSummaryHash(sourceVersionsJson: string | null): string | null {
+  if (sourceVersionsJson === null) return null;
+  const sourceVersions = safeParse<Record<string, unknown> | null>(sourceVersionsJson, null);
+  const parsed = contentHashSchema.safeParse(sourceVersions?.summaryHash);
+  return parsed.success ? parsed.data : null;
+}
+
 function ledgerProgressJson(progress: OperationProgressAnalysis | null): string | null {
   return progress === null ? null : canonicalJson(progress);
 }
@@ -16724,6 +16742,11 @@ async function agentLoop(turnId: string): Promise<void> {
   // Compaction preflight cache: artifact URI → byte size, fetched from kernel
   // artifact metadata at most once per artifact for the turn's lifetime.
   const turnArtifactSizeCache = new Map<string, number>();
+  // Token counts are model-specific, but one turn has one selected model.
+  const turnArtifactTokenCache = new Map<string, number>();
+  // Identical failed compactions get one provider attempt per turn. Appending
+  // an episode changes the source fingerprint and creates a new opportunity.
+  const compactionFailureGuard = new TurnCompactionFailureGuard();
   let persistEvidenceForCurrentTurn: (
     terminalOutcome: EvidenceTerminalOutcome,
     options?: {
@@ -17598,11 +17621,43 @@ async function agentLoop(turnId: string): Promise<void> {
       );
       contextBudget = contextBudgetSelection.budget;
       turnContextBudgetJson = canonicalJson(jsonSafe(contextBudgetSelection.breakdown));
-      let recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId);
+      const compactionTaskAnchor: CompactionTaskAnchor = {
+        contractVersion: contractRow.version,
+        contractHash: contractRow.contentHash,
+        objective: taskSnapshot.contract.objective,
+        acceptanceCriteria: criteriaRows.map((criterion) => ({
+          id: criterion.criterionId,
+          statement: criterion.statement,
+          required: criterion.required,
+          status: checkpointRequirementStatus(criterion.status),
+        })),
+        nonGoals: taskSnapshot.contract.nonGoals,
+        constraints: taskSnapshot.contract.constraints,
+        allowedScope: taskSnapshot.contract.allowedScope,
+      };
+      const compactionTokenizer = resolveTokenizer(selectedProvider.providerId, selectedModel.modelKey);
+      const estimateCompactionTokens = (text: string): number =>
+        conservativeCompactionTextTokens(compactionTokenizer, text);
+      const compactionPolicy = deriveCompactionPolicy(contextBudget, {
+        // Reserve selected-model-estimated, task-specific summary input before
+        // allocating source text. The fixed margin covers envelope variance.
+        summaryReservedInputTokens: estimateCompactionTokens(
+          `${SUMMARY_SYSTEM_INSTRUCTIONS}\n${canonicalJson(compactionTaskAnchor)}`,
+        ) + 512,
+        tokenizerStatus: compactionTokenizer.calibration.status,
+      });
+      const episodeWindow = {
+        maxTokens: compactionPolicy.compactThresholdTokens,
+        estimateTextTokens: estimateCompactionTokens,
+        messageEnvelopeTokens: MESSAGE_ENVELOPE_TOKENS,
+      };
+      let recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId, episodeWindow);
       // Verification recovery must not make any provider call while it
       // rebuilds the durable response/plan boundary. A compaction summary is
       // optional; retain source episodes when recovery has no provider path.
-      const compactionSummarizer = resumeVerificationFromState ? null : buildSummarizer();
+      const compactionSummarizer = resumeVerificationFromState || !compactionPolicy.compactionEnabled
+        ? null
+        : buildSummarizer();
       // R4/Cubic round-2: the compaction decision must consider the FULL
       // episode set, not the already window-capped view — otherwise a long
       // turn never crosses the threshold. Byte sizes come from the CAS
@@ -17610,14 +17665,21 @@ async function agentLoop(turnId: string): Promise<void> {
       const fullEpisodeSizes = await db.episode.findMany({
         where: { turnId, modelVisible: true },
         orderBy: { sequence: "asc" },
-        select: { id: true, kind: true, sequence: true, toolCallId: true, contentArtifact: true },
+        select: {
+          id: true,
+          kind: true,
+          sequence: true,
+          toolCallId: true,
+          contentArtifact: true,
+          sourceVersionsJson: true,
+        },
       });
       // Artifact sizes are immutable and episodes are append-only per turn,
       // so this per-turn cache makes the compaction preflight O(new episodes)
       // in kernel metadata RPCs instead of O(total episodes) per attempt.
-      // A cached 0 is a real "metadata unavailable" result, not a miss; the
-      // totalBytes re-check below stays conservative and re-reads content
-      // bytes when a compaction is actually triggered.
+      // A cached 0 is a real "metadata unavailable" result, not a miss. Byte
+      // metadata is only a conservative preflight; the selected tokenizer
+      // decides after source materialization.
       const sizeByUri = turnArtifactSizeCache;
       for (const row of fullEpisodeSizes) {
         if (row.contentArtifact === null) continue;
@@ -17645,15 +17707,41 @@ async function agentLoop(turnId: string): Promise<void> {
           sizeByUri.set(row.contentArtifact, 0);
         }
       }
-      const totalBytes = fullEpisodeSizes.reduce((sum, row) => sum + (row.contentArtifact !== null ? sizeByUri.get(row.contentArtifact) ?? 0 : 0), 0);
+      const totalBytes = fullEpisodeSizes.reduce(
+        (sum, row) => sum + (row.contentArtifact !== null ? sizeByUri.get(row.contentArtifact) ?? 0 : 0),
+        0,
+      );
+      const metadataUpperBoundTokens = Math.ceil(
+        totalBytes / METADATA_PREFLIGHT_BYTES_PER_TOKEN,
+      ) + fullEpisodeSizes.length * MESSAGE_ENVELOPE_TOKENS;
+      const hasUnavailableMetadata = fullEpisodeSizes.some(
+        (row) => row.contentArtifact !== null
+          && (sizeByUri.get(row.contentArtifact) ?? 0) === 0,
+      );
       const contentByEpisodeId = new Map<string, string | null>();
-      const compactThresholdBytes = DEFAULT_COMPACT_THRESHOLD_TOKENS * BYTES_PER_TOKEN_ESTIMATE;
-      if (compactionSummarizer !== null && totalBytes > compactThresholdBytes) {
+      const tokenCountByEpisodeId = new Map<string, number>();
+      const compactionFingerprint = computeContentHash(canonicalJson({
+        taskAnchor: compactionTaskAnchor,
+        policy: compactionPolicy,
+        sources: fullEpisodeSizes.map((row) => ({
+          id: row.id,
+          sequence: row.sequence,
+          contentArtifact: row.contentArtifact,
+          sourceVersionsJson: row.sourceVersionsJson,
+        })),
+      }));
+      const retrySuppressed = compactionFailureGuard.shouldSuppress(compactionFingerprint);
+      const shouldMaterializeAndMeasure = !retrySuppressed
+        && compactionSummarizer !== null
+        && (hasUnavailableMetadata
+          || metadataUpperBoundTokens > compactionPolicy.compactThresholdTokens);
+      if (shouldMaterializeAndMeasure) {
         const decoder = new TextDecoder("utf-8", { fatal: true });
         for (const row of fullEpisodeSizes) {
           if (abortController.signal.aborted) throw new Error("turn aborted during compaction source loading");
           if (row.contentArtifact === null || !row.contentArtifact.startsWith("artifact://sha256/")) {
             contentByEpisodeId.set(row.id, null);
+            tokenCountByEpisodeId.set(row.id, MESSAGE_ENVELOPE_TOKENS);
             continue;
           }
           const hash = `sha256:${row.contentArtifact.slice("artifact://sha256/".length)}` as ContentHash;
@@ -17661,27 +17749,51 @@ async function agentLoop(turnId: string): Promise<void> {
           if (cached !== undefined) {
             contentByEpisodeId.set(row.id, cached);
             sizeByUri.set(row.contentArtifact, new TextEncoder().encode(cached).byteLength);
+            const tokens = turnArtifactTokenCache.get(row.contentArtifact)
+              ?? estimateCompactionTokens(cached) + MESSAGE_ENVELOPE_TOKENS;
+            turnArtifactTokenCache.set(row.contentArtifact, tokens);
+            tokenCountByEpisodeId.set(row.id, tokens);
             continue;
           }
           try {
             const bytes = await artifactClient.get(hash);
-            contentByEpisodeId.set(row.id, decoder.decode(bytes));
+            const text = decoder.decode(bytes);
+            contentByEpisodeId.set(row.id, text);
             sizeByUri.set(row.contentArtifact, bytes.byteLength);
+            const tokens = turnArtifactTokenCache.get(row.contentArtifact)
+              ?? estimateCompactionTokens(text) + MESSAGE_ENVELOPE_TOKENS;
+            turnArtifactTokenCache.set(row.contentArtifact, tokens);
+            tokenCountByEpisodeId.set(row.id, tokens);
           } catch {
             // A missing or non-text source is not safe to summarize. The
             // compaction service will retain it and expose the failure code.
             contentByEpisodeId.set(row.id, null);
+            tokenCountByEpisodeId.set(
+              row.id,
+              (sizeByUri.get(row.contentArtifact) ?? 0) + MESSAGE_ENVELOPE_TOKENS,
+            );
           }
         }
       }
-      const measuredTotalBytes = fullEpisodeSizes.reduce(
-        (sum, row) => sum + (row.contentArtifact !== null ? sizeByUri.get(row.contentArtifact) ?? 0 : 0),
-        0,
-      );
-      const compactionReport = await runCompaction(
-        buildCompactionStore(),
-        {
+      const measuredHistoryTokens = shouldMaterializeAndMeasure
+        ? fullEpisodeSizes.reduce(
+            (sum, row) => sum + (tokenCountByEpisodeId.get(row.id) ?? MESSAGE_ENVELOPE_TOKENS),
+            0,
+          )
+        : metadataUpperBoundTokens;
+      const compactionReport: CompactionReport = retrySuppressed
+        ? {
+            triggered: false,
+            prunedCount: 0,
+            prunedBytes: 0,
+            summaryChars: 0,
+            reason: "retry_suppressed",
+            failureCode: "retry_suppressed",
+          }
+        : await runCompaction(buildCompactionStore(), {
           turnId,
+          taskAnchor: compactionTaskAnchor,
+          enabled: compactionPolicy.compactionEnabled,
           episodes: fullEpisodeSizes.map((row) => ({
             id: row.id,
             kind: row.kind,
@@ -17690,14 +17802,35 @@ async function agentLoop(turnId: string): Promise<void> {
             contentJson: contentByEpisodeId.get(row.id) ?? null,
             contentArtifact: row.contentArtifact,
             byteSize: row.contentArtifact !== null ? sizeByUri.get(row.contentArtifact) ?? 0 : 0,
+            tokenCount: tokenCountByEpisodeId.get(row.id)
+              ?? (row.contentArtifact === null
+                ? MESSAGE_ENVELOPE_TOKENS
+                : (sizeByUri.get(row.contentArtifact) ?? 0) + MESSAGE_ENVELOPE_TOKENS),
+            compactionSummaryHash: compactionSummaryHash(row.sourceVersionsJson),
           })),
-          totalBytes: measuredTotalBytes > 0 ? measuredTotalBytes : totalBytes,
+          totalTokens: measuredHistoryTokens,
+          compactThresholdTokens: compactionPolicy.compactThresholdTokens,
+          keepRecentTokens: compactionPolicy.keepRecentTokens,
+          summaryHardInputLimitTokens: compactionPolicy.summaryHardInputLimitTokens,
+          maxTranscriptChunkTokens: compactionPolicy.maxTranscriptChunkTokens,
+          maxTranscriptChunkChars: compactionPolicy.maxTranscriptChunkChars,
+          estimateTranscriptTokens: (text) => estimateCompactionTokens(text) + MESSAGE_ENVELOPE_TOKENS,
+          maxSummaryAndTailTokens: compactionPolicy.compactThresholdTokens,
+          estimateSummaryTokens: (text) => estimateCompactionTokens(text) + MESSAGE_ENVELOPE_TOKENS,
           summarizer: compactionSummarizer,
           signal: abortController.signal,
-        },
-      );
+          hypothesisId: currentHypothesisId,
+        });
+      if (
+        !compactionReport.triggered
+        && compactionReport.reason !== "below_threshold"
+        && compactionReport.reason !== "policy_disabled"
+        && compactionReport.reason !== "retry_suppressed"
+      ) {
+        compactionFailureGuard.recordFailure(compactionFingerprint);
+      }
       if (compactionReport.triggered) {
-        recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId);
+        recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId, episodeWindow);
         await mutateAgentState(() => emit({
           eventType: "context.compacted",
           aggregateType: "turn",
@@ -17708,6 +17841,33 @@ async function agentLoop(turnId: string): Promise<void> {
             pruned_bytes: compactionReport.prunedBytes,
             summary_chars: compactionReport.summaryChars,
             mode: compactionReport.reason,
+            policy_version: compactionPolicy.policyVersion,
+            policy_source: compactionPolicy.source,
+            compact_threshold_tokens: compactionPolicy.compactThresholdTokens,
+            keep_recent_tokens: compactionPolicy.keepRecentTokens,
+            summary_hard_input_limit_tokens: compactionPolicy.summaryHardInputLimitTokens,
+            summary_reserved_input_tokens: compactionPolicy.summaryReservedInputTokens,
+            max_transcript_chunk_tokens: compactionPolicy.maxTranscriptChunkTokens,
+            max_transcript_chunk_chars: compactionPolicy.maxTranscriptChunkChars,
+            measured_history_tokens: measuredHistoryTokens,
+          },
+        }));
+      } else if (compactionReport.reason !== "below_threshold") {
+        await mutateAgentState(() => emit({
+          eventType: "context.compaction_deferred",
+          aggregateType: "turn",
+          aggregateId: turnId,
+          correlationId: task.id,
+          payload: {
+            reason: compactionReport.reason,
+            failure_code: compactionReport.failureCode ?? null,
+            policy_version: compactionPolicy.policyVersion,
+            policy_source: compactionPolicy.source,
+            compact_threshold_tokens: compactionPolicy.compactThresholdTokens,
+            keep_recent_tokens: compactionPolicy.keepRecentTokens,
+            summary_reserved_input_tokens: compactionPolicy.summaryReservedInputTokens,
+            max_transcript_chunk_tokens: compactionPolicy.maxTranscriptChunkTokens,
+            measured_history_tokens: measuredHistoryTokens,
           },
         }));
       }
@@ -18158,6 +18318,7 @@ async function agentLoop(turnId: string): Promise<void> {
                 sourceArtifacts: Object.fromEntries(
                   summary.sourceEpisodes.map((source) => [source.episodeId, source.artifactRef]),
                 ),
+                parentSummaryHashes: summary.parentSummaries.map((parent) => parent.summaryHash),
               }),
             },
           });
@@ -18175,8 +18336,11 @@ async function agentLoop(turnId: string): Promise<void> {
         summarizerMemo = null;
         return summarizerMemo;
       }
-      summarizerMemo = async ({ transcript }) => {
+      const summaryTokenizer = resolveTokenizer(selectedProvider.providerId, selectedModel.modelKey);
+      summarizerMemo = async ({ transcript, taskAnchor, hardInputLimitTokens }) => {
         const instructionsHash = computeContentHash(SUMMARY_SYSTEM_INSTRUCTIONS);
+        const taskAnchorText = canonicalJson(taskAnchor);
+        const taskAnchorHash = computeContentHash(taskAnchorText);
         const transcriptHash = computeContentHash(transcript);
         const scope = {
           workspaceId: workspace.id as never,
@@ -18185,7 +18349,12 @@ async function agentLoop(turnId: string): Promise<void> {
           pathPatterns: [],
         };
         const now = new Date().toISOString() as never;
-        const makeFragment = (fragmentId: string, kind: "authority" | "recent_episode", text: string, hash: string): ContextFragment => ({
+        const makeFragment = (
+          fragmentId: string,
+          kind: "authority" | "task_contract" | "recent_episode",
+          text: string,
+          hash: string,
+        ): ContextFragment => ({
           id: fragmentId,
           kind,
           contentRef: {
@@ -18197,25 +18366,28 @@ async function agentLoop(turnId: string): Promise<void> {
           textContent: text,
           source: { uri: `turn://${turnId}/compaction`, producer: "terminus-control", producerVersion: "v1", observedAt: now, observedBy: "control", evidenceRefs: [] },
           sourceVersion: null,
-          authority: kind === "authority" ? 90 : 45,
-          priority: kind === "authority" ? 90 : 45,
-          trust: "derived",
+          authority: kind === "recent_episode" ? 45 : 90,
+          priority: kind === "recent_episode" ? 45 : 90,
+          trust: kind === "recent_episode" ? "untrusted" : "trusted",
           confidentiality: "workspace",
-          injectionRisk: "low",
+          injectionRisk: kind === "recent_episode" ? "high" : "low",
           exactness: "exact",
           scope,
           freshness: { observedAt: now, sourceVersion: null, stale: false, staleReason: null },
           dependencies: [],
           invalidation: [],
-          estimatedTokens: { [selectedModel.modelKey]: Math.max(1, Math.ceil(text.length / 4)) },
+          estimatedTokens: {
+            [selectedModel.modelKey]: conservativeCompactionTextTokens(summaryTokenizer, text),
+          },
           selectionFeatures: { relevance: 1, novelty: 0, coverage: 1, uncertaintyReduction: 1, riskReduction: 1, modelCompatibility: 1, redundancyPenalty: 0, injectionPenalty: 0 },
         });
         const canonicalRenderInput = {
           provider: selectedProvider,
           model: selectedModel,
-          manifestId: `summary:${turnId}`,
+          manifestId: `summary:${turnId}:${taskAnchorHash}`,
           fragments: [
             makeFragment(`compaction:instructions:${turnId}`, "authority", SUMMARY_SYSTEM_INSTRUCTIONS, instructionsHash),
+            makeFragment(`compaction:task-anchor:${turnId}`, "task_contract", taskAnchorText, taskAnchorHash),
             makeFragment(`compaction:transcript:${turnId}`, "recent_episode", transcript, transcriptHash),
           ],
           toolSchemas: [],
@@ -18226,7 +18398,7 @@ async function agentLoop(turnId: string): Promise<void> {
           outputProfile: "terse",
           reasoningReserveTokens: 4_096n as never,
           outputReserveTokens: 2_048n as never,
-          hardInputLimit: 400_000n as never,
+          hardInputLimit: BigInt(hardInputLimitTokens) as never,
           signal: abortController.signal,
         } as Parameters<typeof selectedRenderer.render>[0];
         const rendered = await selectedRenderer.render(canonicalRenderInput);
@@ -18239,7 +18411,10 @@ async function agentLoop(turnId: string): Promise<void> {
             ? null
             : { vendor: directConfiguration.vendor },
           ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
-          context: { ...await buildProviderTaskContext(), idempotencyKey: `compaction:${turnId}:${transcriptHash}` },
+          context: {
+            ...await buildProviderTaskContext(),
+            idempotencyKey: `compaction:${turnId}:${taskAnchorHash}:${transcriptHash}`,
+          },
           workspaceId: workspace.id,
           signal: abortController.signal,
         });

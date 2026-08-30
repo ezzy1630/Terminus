@@ -1024,6 +1024,7 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
   }
 
   const toolEpisodeIds = new Map<string, { callId: string | null; resultId: string | null }>();
+  const hasCompactionSummary = input.recentEpisodes.some((episode) => episode.kind === "summary");
   for (const episode of input.recentEpisodes) {
     if (episode.toolCallId === null) continue;
     const pair = toolEpisodeIds.get(episode.toolCallId) ?? { callId: null, resultId: null };
@@ -1061,6 +1062,8 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
     // `assistant` teaches the model that it said what the user said.
     const isUserSideEpisode = episode.kind === "user_message"
       || episode.kind === "steering_message";
+    const isCompactionSummary = episode.kind === "summary";
+    const isProtectedCompactionTail = hasCompactionSummary && !isCompactionSummary;
     const fragment = makeRuntimeFragment({
       id: episodeFragmentId(episode),
       kind: episode.kind === "tool_result"
@@ -1071,14 +1074,14 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
       uri: `episode://${episode.id}`,
       text,
       sourceVersion: episode.contentRef,
-      // The user's own words are the task. They stay selectable ahead of tool
-      // chatter without becoming hard-required (which would pin them into the
-      // cache-stable prefix and invalidate it on every turn).
-      authority: isUserSideEpisode ? 60 : 45,
-      priority: isUserSideEpisode ? 60 : 45,
-      trust: isUserSideEpisode ? "untrusted" : "derived",
+      // Compaction has already hidden its source episodes, so the replacement
+      // summary is required context. User words stay selectable ahead of tool
+      // chatter without becoming required on every turn.
+      authority: isCompactionSummary ? 85 : isProtectedCompactionTail ? 81 : isUserSideEpisode ? 60 : 45,
+      priority: isCompactionSummary ? 85 : isProtectedCompactionTail ? 81 : isUserSideEpisode ? 60 : 45,
+      trust: isCompactionSummary || isUserSideEpisode ? "untrusted" : "derived",
       confidentiality: "workspace",
-      injectionRisk: isUserSideEpisode ? "medium" : "low",
+      injectionRisk: isCompactionSummary ? "high" : isUserSideEpisode ? "medium" : "low",
       exactness: hydratedText === undefined ? "recoverable_by_reference" : "exact",
       scope,
       modelKey,
