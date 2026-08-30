@@ -53,7 +53,7 @@ describe("logical mutation journal", () => {
     expect(() => corrupt.result.current.keyFor("same action")).toThrow(MutationJournalAdmissionError);
     corrupt.unmount();
 
-    const getItem = vi.spyOn(window.localStorage, "getItem").mockImplementation(() => {
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new DOMException("Storage denied", "SecurityError");
     });
     const unavailable = renderHook(() => useLogicalMutation("test-unavailable"));
@@ -63,7 +63,7 @@ describe("logical mutation journal", () => {
   });
 
   test("does not admit a mutation until its journal write is verified", () => {
-    const setItem = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new DOMException("Quota exceeded", "QuotaExceededError");
     });
     const denied = renderHook(() => useLogicalMutation("test-quota"));
@@ -71,7 +71,7 @@ describe("logical mutation journal", () => {
     denied.unmount();
     setItem.mockRestore();
 
-    const getItem = vi.spyOn(window.localStorage, "getItem")
+    const getItem = vi.spyOn(Storage.prototype, "getItem")
       .mockReturnValueOnce(null)
       .mockReturnValueOnce(JSON.stringify({
         signatureFingerprint: "0000000000000000",
@@ -115,7 +115,7 @@ describe("logical mutation journal", () => {
   test("does not admit a later effect until its checkpoint write is verified", () => {
     const mutation = renderHook(() => useLogicalMutation("test-checkpoint-write"));
     const admission = mutation.result.current.acquire("same action");
-    const setItem = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new DOMException("Quota exceeded", "QuotaExceededError");
     });
     expect(() => mutation.result.current.checkpoint(admission.key, "task_created", "task-7"))
@@ -148,7 +148,7 @@ describe("logical mutation journal", () => {
   test("keeps the prior key when durable cleanup fails", () => {
     const first = renderHook(() => useLogicalMutation("test-cleanup-failure"));
     const key = first.result.current.keyFor("same action");
-    vi.spyOn(window.localStorage, "removeItem").mockImplementation(() => {
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
       throw new DOMException("Storage denied", "SecurityError");
     });
     expect(() => first.result.current.settle(key)).toThrow(MutationJournalAdmissionError);
@@ -161,7 +161,7 @@ describe("logical mutation journal", () => {
   });
 
   test("rejects an oversized canonical signature before touching storage", () => {
-    const setItem = vi.spyOn(window.localStorage, "setItem");
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
     const mutation = renderHook(() => useLogicalMutation("test-large-signature"));
     expect(() => mutation.result.current.keyFor("x".repeat(64 * 1024 + 1))).toThrow(MutationJournalAdmissionError);
     expect(setItem).not.toHaveBeenCalled();
@@ -196,7 +196,7 @@ describe("logical mutation journal", () => {
 describe("ApprovalCard mutation reconciliation", () => {
   test("does not dispatch when the mutation journal cannot be persisted", async () => {
     const user = userEvent.setup();
-    vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new DOMException("Quota exceeded", "QuotaExceededError");
     });
     const resolveApproval = vi.spyOn(api, "resolveApproval");

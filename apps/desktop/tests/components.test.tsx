@@ -1150,7 +1150,7 @@ describe("Composer — send-button mode switches based on task status", () => {
 
   test("surfaces quota failures as session-only drafts with recovery actions", () => {
     makeTask("ACTIVE");
-    const storage = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+    const storage = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new DOMException("quota", "QuotaExceededError");
     });
     try {
