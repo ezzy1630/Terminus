@@ -27,6 +27,8 @@ import type { CredentialBoundGatewayClient, GatewayModel, GatewayProtocol } from
 import { ProviderTransportError } from "./providers/provider-retry.js";
 import {
   decodeModelsDevProvider,
+  providerAccountHasApprovedBinding,
+  ZEN_SOURCE,
   type ProviderAccountRecord,
   type ProviderRenderProfile,
 } from "./provider-accounts.js";
@@ -326,7 +328,11 @@ export async function discoverAccountModels(
 async function probeAccountModels(
   input: DiscoverAccountModelsInput,
 ): Promise<{ readonly reachable: boolean | null; readonly detail: string }> {
-  if (input.account.baseUrl === "") return { reachable: null, detail: "" };
+  if (!providerAccountHasApprovedBinding(input.account)) return { reachable: null, detail: "" };
+  const baseUrl = input.account.source === ZEN_SOURCE
+    ? input.account.baseUrl
+    : input.account.approvedBaseUrl;
+  if (baseUrl === "") return { reachable: null, detail: "" };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   const onAbort = (): void => controller.abort();
@@ -334,7 +340,7 @@ async function probeAccountModels(
   try {
     await readAll(
       input.client.stream({
-        url: `${input.account.baseUrl}/models`,
+        url: `${baseUrl}/models`,
         method: "GET",
         headers: { accept: "application/json", ...(input.headers ?? {}) },
         credentialBindingId: input.account.credentialUri,
@@ -385,6 +391,9 @@ export function toGatewayModel(input: {
   readonly providerId: string;
   readonly observedAt: string;
 }): GatewayModel {
+  if (!providerAccountHasApprovedBinding(input.account)) {
+    throw new Error("provider account has no current approved binding");
+  }
   return {
     id: input.model.id,
     name: input.model.name,
@@ -392,7 +401,9 @@ export function toGatewayModel(input: {
     // shared transport type stays one type.
     deployment: "zen",
     providerId: input.providerId,
-    baseUrl: input.account.baseUrl,
+    baseUrl: input.account.source === ZEN_SOURCE
+      ? input.account.baseUrl
+      : input.account.approvedBaseUrl,
     protocol: input.account.protocol as GatewayProtocol,
     free: input.model.free,
     toolCalling: input.model.toolCalling,

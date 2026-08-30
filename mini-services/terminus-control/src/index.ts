@@ -117,11 +117,14 @@ import {
   ZEN_SOURCE,
   ZEN_VENDOR_ID,
   chooseDefaultAccount,
+  canonicalMetadataForAccount,
   connectLocalProviderAccount,
   discoverAndConnectLocalAccounts,
   mapGatewayConfiguration,
   providerAccountCapabilityScope,
+  providerAccountHasApprovedBinding,
   providerAccountProviderId,
+  providerAccountSecuritySnapshot,
   providerAccountSecretUri,
   providerAccountWorkspaceAccess,
   providerAccountWire,
@@ -130,6 +133,7 @@ import {
   zenAccountCredentialUri,
   type LocalCredentialDiscovery,
   type ProviderAccountRecord,
+  type ProviderAccountSecuritySnapshot,
   type ProviderAccountUpsert,
   type ProviderRenderProfile,
   type TurnProviderResolution,
@@ -191,7 +195,9 @@ import {
 import { errorResult, okResult, type ToolResult } from "@terminus/aci";
 import {
   CapabilityOperationProto,
+  OpencodeStoreStatusProto,
   PatchCommitMode,
+  SecretPresenceProto,
   type RequestContext,
 } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import {
@@ -8149,6 +8155,7 @@ const routes: Route[] = [
     }
     if (
       account.baseUrl !== parsed.data.expected_destination
+      || account.catalogDigest !== parsed.data.expected_catalog_digest
       || modelsDevCatalogDigest() !== parsed.data.expected_catalog_digest
     ) {
       return sendError(
@@ -8191,11 +8198,7 @@ const routes: Route[] = [
       );
     }
   }),
-  /**
-   * Disconnect. The keyring secret goes first: a row without its secret is a
-   * visible broken account, a secret without its row is unreachable material
-   * nobody will ever clean up.
-   */
+  /** Disconnect through the same durable revoke saga used by recovery. */
   route("DELETE", "/v1/provider-accounts/:id", async (req, res, params) => {
     const parsed = providerAccountRevisionSchema.safeParse(await jsonBody(req));
     if (!parsed.success) {
@@ -8216,26 +8219,17 @@ const routes: Route[] = [
         { expected_revision: parsed.data.expected_revision, actual_revision: account.revision },
       );
     }
-    // Only secrets this feature minted are deleted. `secret://opencode/*`
-    // belongs to the legacy gateway configuration, which owns its own
-    // lifecycle; removing it here would break that route's contract.
-    if (account.credentialUri.startsWith(providerAccountSecretUri(""))) {
-      const deleted = await requireKernelUds().secrets.Delete({
-        context: {
-          ...await kernelMaintenanceContext(),
-          idempotencyKey: `provider-account-secret-delete:${account.id}:${account.revision}`,
-        },
-        capabilityUri: account.credentialUri,
-      });
-      if (deleted.stored || deleted.capabilityUri !== account.credentialUri) {
-        return sendError(
-          res,
-          502,
-          "PROVIDER_ACCOUNT_SECRET_DELETE_FAILED",
-          "the kernel did not confirm credential deletion; the account was kept",
-          "external_dependency",
-        );
-      }
+    const settled = account.source === ZEN_SOURCE
+      ? account
+      : await settleProviderAccountCleanup(account);
+    if (settled.credentialUri !== "" || settled.secretState !== "none") {
+      return sendError(
+        res,
+        502,
+        "PROVIDER_ACCOUNT_SECRET_DELETE_FAILED",
+        "credential cleanup is pending; the account was kept and startup recovery will retry",
+        "external_dependency",
+      );
     }
     await writerTransaction(async (tx) => {
       // A session pointing at a deleted account would fail every later turn
@@ -8245,7 +8239,7 @@ const routes: Route[] = [
         data: { defaultProviderAccountId: null },
       });
       await tx.providerAccountModelDiscovery.deleteMany({ where: { accountId: account.id } });
-      await tx.providerAccount.deleteMany({ where: { id: account.id, revision: account.revision } });
+      await tx.providerAccount.deleteMany({ where: { id: settled.id, revision: settled.revision } });
     });
     providerAccountModelCache.delete(account.id);
     if (account.isDefault) {
@@ -8275,7 +8269,7 @@ const routes: Route[] = [
         { expected_revision: parsed.data.expected_revision, actual_revision: account.revision },
       );
     }
-    if (account.status !== "connected") {
+    if (account.status !== "connected" || !providerAccountHasApprovedBinding(account)) {
       return sendError(
         res,
         409,
@@ -13229,29 +13223,41 @@ let lastProviderAccountDiscovery: {
   readonly opencodeStoreStatus: "available" | "missing" | "rejected" | "unavailable";
 } | null = null;
 
-function localStoreStatus(value: string): "available" | "missing" | "rejected" {
-  return value === "available" || value === "rejected" ? value : "missing";
+function localStoreStatus(
+  value: OpencodeStoreStatusProto,
+): "available" | "missing" | "rejected" | "unavailable" {
+  switch (value) {
+    case OpencodeStoreStatusProto.OPENCODE_STORE_STATUS_AVAILABLE:
+      return "available";
+    case OpencodeStoreStatusProto.OPENCODE_STORE_STATUS_MISSING:
+      return "missing";
+    case OpencodeStoreStatusProto.OPENCODE_STORE_STATUS_REJECTED:
+      return "rejected";
+    case OpencodeStoreStatusProto.OPENCODE_STORE_STATUS_UNAVAILABLE:
+    case OpencodeStoreStatusProto.OPENCODE_STORE_STATUS_UNSPECIFIED:
+    case OpencodeStoreStatusProto.UNRECOGNIZED:
+      return "unavailable";
+  }
 }
 
 async function listProviderAccountRecords(): Promise<readonly ProviderAccountRecord[]> {
   return db.providerAccount.findMany({ orderBy: [{ displayName: "asc" }, { source: "asc" }] });
 }
 
-/**
- * Create the account for a source, or update the one that exists.
- *
- * `revision` moves only when something actually changed, so a discovery run
- * that finds nothing new does not invalidate every client's optimistic
- * concurrency token. `isDefault` is never touched here: it is a user decision.
- */
-async function upsertProviderAccountRecord(input: ProviderAccountUpsert): Promise<ProviderAccountRecord> {
-  const columns = {
+function providerAccountColumns(input: ProviderAccountUpsert) {
+  return {
     displayName: input.displayName,
     vendorId: input.vendorId,
     authKind: input.authKind,
     credentialUri: input.credentialUri,
     fingerprint: input.fingerprint,
     baseUrl: input.baseUrl,
+    catalogDigest: input.catalogDigest,
+    credentialFingerprint: input.credentialFingerprint,
+    approvedBaseUrl: input.approvedBaseUrl,
+    approvedCatalogDigest: input.approvedCatalogDigest,
+    secretState: input.secretState,
+    secretOperationId: input.secretOperationId,
     host: input.host,
     protocol: input.protocol,
     connectorId: input.connectorId,
@@ -13262,6 +13268,17 @@ async function upsertProviderAccountRecord(input: ProviderAccountUpsert): Promis
     metadataJson: input.metadataJson,
     expiresAt: input.expiresAt,
   };
+}
+
+/**
+ * Create the account for a source, or update the one that exists.
+ *
+ * `revision` moves only when something actually changed, so a discovery run
+ * that finds nothing new does not invalidate every client's optimistic
+ * concurrency token. `isDefault` is never touched here: it is a user decision.
+ */
+async function upsertProviderAccountRecord(input: ProviderAccountUpsert): Promise<ProviderAccountRecord> {
+  const columns = providerAccountColumns(input);
   return writerTransaction(async (tx) => {
     const current = await tx.providerAccount.findUnique({ where: { source: input.source } });
     if (current === null) {
@@ -13293,46 +13310,233 @@ async function upsertProviderAccountRecord(input: ProviderAccountUpsert): Promis
 }
 
 /**
- * Commit an explicit credential import only against the row the user saw.
- * Discovery may reconcile the same source while the kernel is opening the
- * keyring; revision plus fingerprint make that race a conflict, never a
- * silent approval transfer to different bytes.
+ * Replace a row only if every security-relevant field still matches the
+ * caller's snapshot. External keyring effects are always bracketed by this
+ * CAS so stale discovery cannot overwrite a newly imported credential.
  */
-async function commitProviderAccountConnection(
+async function reconcileProviderAccountRecord(
   input: ProviderAccountUpsert,
-  expectedRevision: number,
-  expectedFingerprint: string,
+  expected: ProviderAccountSecuritySnapshot,
 ): Promise<ProviderAccountRecord | null> {
-  const columns = {
-    displayName: input.displayName,
-    vendorId: input.vendorId,
-    authKind: input.authKind,
-    credentialUri: input.credentialUri,
-    fingerprint: input.fingerprint,
-    baseUrl: input.baseUrl,
-    host: input.host,
-    protocol: input.protocol,
-    connectorId: input.connectorId,
-    renderProfile: input.renderProfile,
-    status: input.status,
-    statusDetail: input.statusDetail,
-    billing: input.billing,
-    metadataJson: input.metadataJson,
-    expiresAt: input.expiresAt,
-  };
+  const columns = providerAccountColumns(input);
   return writerTransaction(async (tx) => {
     const updated = await tx.providerAccount.updateMany({
       where: {
-        id: input.id,
+        id: expected.id,
         source: input.source,
-        revision: expectedRevision,
-        fingerprint: expectedFingerprint,
+        revision: expected.revision,
+        fingerprint: expected.fingerprint,
+        credentialUri: expected.credentialUri,
+        secretState: expected.secretState,
+        secretOperationId: expected.secretOperationId,
       },
       data: { ...columns, revision: { increment: 1 } },
     });
     if (updated.count !== 1) return null;
-    return tx.providerAccount.findUnique({ where: { id: input.id } });
+    return tx.providerAccount.findUnique({ where: { id: expected.id } });
   });
+}
+
+function providerAccountUpsertFromRecord(
+  account: ProviderAccountRecord,
+  changes: Partial<Pick<
+    ProviderAccountUpsert,
+    | "credentialUri"
+    | "fingerprint"
+    | "baseUrl"
+    | "catalogDigest"
+    | "credentialFingerprint"
+    | "approvedBaseUrl"
+    | "approvedCatalogDigest"
+    | "secretState"
+    | "secretOperationId"
+    | "status"
+    | "statusDetail"
+    | "metadataJson"
+    | "host"
+    | "connectorId"
+    | "renderProfile"
+  >>,
+): ProviderAccountUpsert {
+  return {
+    id: account.id,
+    source: account.source,
+    displayName: account.displayName,
+    vendorId: account.vendorId,
+    authKind: account.authKind,
+    credentialUri: changes.credentialUri ?? account.credentialUri,
+    fingerprint: changes.fingerprint ?? account.fingerprint,
+    baseUrl: changes.baseUrl ?? account.baseUrl,
+    catalogDigest: changes.catalogDigest ?? account.catalogDigest,
+    credentialFingerprint: changes.credentialFingerprint ?? account.credentialFingerprint,
+    approvedBaseUrl: changes.approvedBaseUrl ?? account.approvedBaseUrl,
+    approvedCatalogDigest: changes.approvedCatalogDigest ?? account.approvedCatalogDigest,
+    secretState: changes.secretState ?? providerAccountSecuritySnapshot(account).secretState,
+    secretOperationId: changes.secretOperationId ?? account.secretOperationId,
+    host: changes.host ?? account.host,
+    protocol: account.protocol,
+    connectorId: changes.connectorId ?? account.connectorId,
+    renderProfile: changes.renderProfile ?? account.renderProfile,
+    status: changes.status ?? account.status,
+    statusDetail: changes.statusDetail ?? account.statusDetail,
+    billing: account.billing,
+    metadataJson: changes.metadataJson ?? account.metadataJson,
+    discoveredAt: account.discoveredAt,
+    expiresAt: account.expiresAt,
+  };
+}
+
+async function claimProviderAccountImport(
+  account: ProviderAccountRecord,
+  claim: {
+    readonly capabilityUri: string;
+    readonly operationId: string;
+    readonly credentialFingerprint: string;
+    readonly approvedBaseUrl: string;
+    readonly approvedCatalogDigest: string;
+  },
+): Promise<ProviderAccountRecord | null> {
+  return reconcileProviderAccountRecord(providerAccountUpsertFromRecord(account, {
+    credentialUri: claim.capabilityUri,
+    credentialFingerprint: claim.credentialFingerprint,
+    approvedBaseUrl: claim.approvedBaseUrl,
+    approvedCatalogDigest: claim.approvedCatalogDigest,
+    secretState: "import_pending",
+    secretOperationId: claim.operationId,
+    status: "error",
+    statusDetail: "Credential import settlement is pending; routing is disabled.",
+  }), providerAccountSecuritySnapshot(account));
+}
+
+async function finalizeProviderAccountImport(
+  claimed: ProviderAccountRecord,
+): Promise<ProviderAccountRecord | null> {
+  return reconcileProviderAccountRecord(providerAccountUpsertFromRecord(claimed, {
+    secretState: "bound",
+    secretOperationId: "",
+    status: "connected",
+    statusDetail: "",
+  }), providerAccountSecuritySnapshot(claimed));
+}
+
+async function markProviderAccountImportForCleanup(
+  claimed: ProviderAccountRecord,
+): Promise<ProviderAccountRecord | null> {
+  return reconcileProviderAccountRecord(providerAccountUpsertFromRecord(claimed, {
+    secretState: "revoke_pending",
+    status: "error",
+    statusDetail: "Credential import could not be settled; keyring cleanup is pending.",
+  }), providerAccountSecuritySnapshot(claimed));
+}
+
+const PROVIDER_ACCOUNT_SECRET_URI = /^secret:\/\/provider-account\/[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+async function deleteOwnedProviderCredential(account: ProviderAccountRecord): Promise<boolean> {
+  if (account.credentialUri === "") return true;
+  // A legacy row may point at the original tool-owned store. Sever that stale
+  // reference, but never ask the kernel to delete material Terminus did not
+  // import into its provider-account namespace.
+  if (!PROVIDER_ACCOUNT_SECRET_URI.test(account.credentialUri)) return true;
+  try {
+    const deleted = await requireKernelUds().secrets.Delete({
+      context: {
+        ...await kernelMaintenanceContext(),
+        idempotencyKey: `provider-account-cleanup:${account.secretOperationId}:${account.credentialUri}`,
+      },
+      capabilityUri: account.credentialUri,
+    });
+    return !deleted.stored && deleted.capabilityUri === account.credentialUri;
+  } catch (error: unknown) {
+    console.warn(`[terminus-control] provider credential cleanup remains pending: ${String(error)}`);
+    return false;
+  }
+}
+
+async function settleProviderAccountCleanup(
+  initial: ProviderAccountRecord,
+): Promise<ProviderAccountRecord> {
+  let pending = initial;
+  if (pending.secretState !== "revoke_pending") {
+    const claimed = await reconcileProviderAccountRecord(providerAccountUpsertFromRecord(pending, {
+      secretState: "revoke_pending",
+      secretOperationId: pending.secretOperationId || uuidV7(),
+      status: "error",
+      statusDetail: "Credential cleanup is pending; routing is disabled.",
+      metadataJson: canonicalMetadataForAccount(pending.source, pending.metadataJson),
+    }), providerAccountSecuritySnapshot(pending));
+    if (claimed === null) return pending;
+    pending = claimed;
+  }
+  if (!await deleteOwnedProviderCredential(pending)) return pending;
+  const codex = pending.source === "codex-chatgpt" || pending.renderProfile === "chatgpt_codex";
+  const cleared = await reconcileProviderAccountRecord(providerAccountUpsertFromRecord(pending, {
+    credentialUri: "",
+    credentialFingerprint: "",
+    approvedBaseUrl: "",
+    approvedCatalogDigest: "",
+    secretState: "none",
+    secretOperationId: "",
+    status: codex ? "unsupported" : "disconnected",
+    statusDetail: codex
+      ? "ChatGPT subscriptions require the separate Codex App Server lane."
+      : "Credential cleanup completed; connect again to approve the current credential and destination.",
+    metadataJson: canonicalMetadataForAccount(pending.source, pending.metadataJson),
+    ...(codex ? {
+      fingerprint: "",
+      baseUrl: "",
+      catalogDigest: "",
+      host: "",
+      connectorId: "",
+      renderProfile: "openai_responses",
+    } : {}),
+  }), providerAccountSecuritySnapshot(pending));
+  return cleared ?? pending;
+}
+
+/** Recover durable import/delete operations and scrub pre-hardening residue. */
+async function recoverProviderAccountSecretState(): Promise<void> {
+  const rows = await listProviderAccountRecords();
+  for (const row of rows) {
+    const codex = row.source === "codex-chatgpt" || row.renderProfile === "chatgpt_codex";
+    const legacyCopiedCredential = row.secretState === "none"
+      && row.credentialUri !== ""
+      && (codex || row.source.startsWith("opencode:"));
+    if (
+      row.secretState === "import_pending"
+      || row.secretState === "revoke_pending"
+      || legacyCopiedCredential
+    ) {
+      await settleProviderAccountCleanup(row);
+      if (codex) {
+        await db.providerAccountModelDiscovery.deleteMany({ where: { accountId: row.id } });
+        providerAccountModelCache.delete(row.id);
+      }
+      continue;
+    }
+    const metadataJson = canonicalMetadataForAccount(row.source, row.metadataJson);
+    if (codex) {
+      await reconcileProviderAccountRecord(providerAccountUpsertFromRecord(row, {
+        fingerprint: "",
+        baseUrl: "",
+        catalogDigest: "",
+        credentialFingerprint: "",
+        approvedBaseUrl: "",
+        approvedCatalogDigest: "",
+        secretState: "none",
+        secretOperationId: "",
+        host: "",
+        connectorId: "",
+        renderProfile: "openai_responses",
+        status: "unsupported",
+        statusDetail: "ChatGPT subscriptions require the separate Codex App Server lane.",
+        metadataJson: "{}",
+      }), providerAccountSecuritySnapshot(row));
+      await db.providerAccountModelDiscovery.deleteMany({ where: { accountId: row.id } });
+      providerAccountModelCache.delete(row.id);
+    } else if (metadataJson !== row.metadataJson) {
+      await reconcileProviderAccountRecord(providerAccountUpsertFromRecord(row, { metadataJson }), providerAccountSecuritySnapshot(row));
+    }
+  }
 }
 
 /**
@@ -13371,20 +13575,6 @@ async function readGatewayConfigurationSnapshot(): Promise<{
 }
 
 /**
- * Whether a `SecretService.Mint` failure is the kernel saying the capability
- * does not resolve, rather than the call never getting there.
- *
- * gRPC status codes (`@grpc/grpc-js` `status`): 3 INVALID_ARGUMENT,
- * 5 NOT_FOUND, 7 PERMISSION_DENIED. The numbers are inlined rather than
- * imported so this module keeps its distance from the transport package.
- */
-function kernelRefusedSecretLookup(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const code = (error as { readonly code?: unknown }).code;
-  return code === 3 || code === 5 || code === 7;
-}
-
-/**
  * Ask the kernel what credentials this machine holds and reconcile the rows.
  *
  * Discovery is metadata-only for new credentials. It may revoke a previously
@@ -13400,10 +13590,7 @@ async function runProviderAccountDiscovery(): Promise<{
   readonly opencodeStoreStatus: "available" | "missing" | "rejected" | "unavailable";
   readonly lastRunAt: string;
 }> {
-  // Rows from the pre-App-Server implementation may still contain a copied
-  // Codex token. Keep the material untouched for an explicit disconnect, but
-  // make the row and any cached model list non-routable before reconciliation.
-  await demoteUnsupportedCodexAccounts();
+  await recoverProviderAccountSecretState();
   const result = await discoverAndConnectLocalAccounts({
     discoverLocal: async (): Promise<LocalCredentialDiscovery> => {
       const response = await requireKernelUds().providerAccounts.DiscoverLocal({
@@ -13432,21 +13619,23 @@ async function runProviderAccountDiscovery(): Promise<{
     // handle plus expiry — never bytes. A row whose URI no longer resolves
     // (the kernel's secret backend changed, or the keychain entry is gone) is
     // re-imported rather than left permanently broken.
-    credentialResolves: async (credentialUri: string): Promise<boolean> => {
-      try {
-        await requireKernelUds().secrets.Mint({
-          context: await kernelMaintenanceContext(),
-          capabilityUri: credentialUri,
-          ttlSeconds: 0,
-        });
-        return true;
-      } catch (error: unknown) {
-        // Only a refusal from the kernel itself means "not there". Anything
-        // else (UNAVAILABLE, DEADLINE_EXCEEDED, a socket error) is a transport
-        // problem: rethrow so the caller fails open instead of re-importing
-        // every credential on every blip.
-        if (kernelRefusedSecretLookup(error)) return false;
-        throw error;
+    credentialStatus: async (credentialUri: string): Promise<"present" | "missing" | "unavailable"> => {
+      const inspected = await requireKernelUds().secrets.Inspect({
+        context: await kernelMaintenanceContext(),
+        capabilityUri: credentialUri,
+      });
+      if (inspected.capabilityUri !== credentialUri) {
+        throw new Error("kernel returned secret inspection for a different capability");
+      }
+      switch (inspected.presence) {
+        case SecretPresenceProto.SECRET_PRESENCE_PRESENT:
+          return "present";
+        case SecretPresenceProto.SECRET_PRESENCE_MISSING:
+          return "missing";
+        case SecretPresenceProto.SECRET_PRESENCE_UNAVAILABLE:
+        case SecretPresenceProto.SECRET_PRESENCE_UNSPECIFIED:
+        case SecretPresenceProto.UNRECOGNIZED:
+          return "unavailable";
       }
     },
     revokeCredential: async (credentialUri: string): Promise<boolean> => {
@@ -13461,9 +13650,14 @@ async function runProviderAccountDiscovery(): Promise<{
     },
     listAccounts: listProviderAccountRecords,
     upsertAccount: upsertProviderAccountRecord,
+    reconcileAccount: reconcileProviderAccountRecord,
     readGatewayConfiguration: readGatewayConfigurationSnapshot,
-    fetchCatalog: () => fetchModelsDevRaw({ forceOffline: true }),
+    fetchCatalog: async () => ({
+      ...await fetchModelsDevRaw({ forceOffline: true }),
+      digest: modelsDevCatalogDigest(),
+    }),
     newAccountId: () => uuidV7(),
+    newOperationId: () => uuidV7(),
     warn: (message) => console.warn(`[terminus-control] ${message}`),
   });
   lastProviderAccountDiscovery = {
@@ -13474,32 +13668,6 @@ async function runProviderAccountDiscovery(): Promise<{
     opencodeStoreStatus: result.opencodeStoreStatus,
   };
   return result;
-}
-
-async function demoteUnsupportedCodexAccounts(): Promise<void> {
-  await writerTransaction(async (tx) => {
-    const stale = await tx.providerAccount.findMany({
-      where: {
-        OR: [{ source: "codex-chatgpt" }, { renderProfile: "chatgpt_codex" }],
-      },
-      select: { id: true },
-    });
-    if (stale.length === 0) return;
-    await tx.providerAccount.updateMany({
-      where: { id: { in: stale.map((account) => account.id) } },
-      data: {
-        status: "unsupported",
-        statusDetail: "ChatGPT subscriptions require the separate Codex App Server lane.",
-        baseUrl: "",
-        host: "",
-        connectorId: "",
-        renderProfile: "openai_responses",
-      },
-    });
-    await tx.providerAccountModelDiscovery.deleteMany({
-      where: { accountId: { in: stale.map((account) => account.id) } },
-    });
-  });
 }
 
 /** Import only after the HTTP connect route has validated explicit consent. */
@@ -13514,13 +13682,13 @@ async function connectProviderAccountWithConsent(
     throw new Error("provider catalog changed after approval; reload it before connecting");
   }
   const capabilityUri = providerAccountSecretUri(uuidV7());
-  let imported = false;
   try {
     return await connectLocalProviderAccount({
       account,
       expectedRevision,
       expectedFingerprint,
       expectedDestination,
+      expectedCatalogDigest,
       capabilityUri,
       userConsent: true,
       discoverLocal: async (): Promise<LocalCredentialDiscovery> => {
@@ -13552,30 +13720,31 @@ async function connectProviderAccountWithConsent(
           capabilityUri: destination,
           expectedFingerprint: approvedFingerprint,
         });
-        imported = response.stored && response.capabilityUri === destination;
         return {
           capabilityUri: response.capabilityUri,
           stored: response.stored,
           fingerprint: response.credential?.fingerprint ?? "",
         };
       },
-      fetchCatalog: () => fetchModelsDevRaw({ forceOffline: true }),
-      commitAccount: commitProviderAccountConnection,
+      fetchCatalog: async () => ({
+        ...await fetchModelsDevRaw({ forceOffline: true }),
+        digest: modelsDevCatalogDigest(),
+      }),
+      claimImport: claimProviderAccountImport,
+      finalizeImport: finalizeProviderAccountImport,
+      markImportForCleanup: markProviderAccountImportForCleanup,
       now: () => new Date(),
     });
   } catch (error: unknown) {
-    if (imported) {
-      try {
-        await requireKernelUds().secrets.Delete({
-          context: {
-            ...await kernelMaintenanceContext(),
-            idempotencyKey: `provider-account-failed-import-delete:${capabilityUri}`,
-          },
-          capabilityUri,
-        });
-      } catch (cleanupError: unknown) {
-        console.warn(`[terminus-control] failed provider credential cleanup failed: ${String(cleanupError)}`);
-      }
+    const pending = await db.providerAccount.findFirst({
+      where: {
+        id: account.id,
+        credentialUri: capabilityUri,
+        secretState: { in: ["import_pending", "revoke_pending"] },
+      },
+    });
+    if (pending !== null) {
+      await settleProviderAccountCleanup(pending);
     }
     throw error;
   }
@@ -13591,7 +13760,16 @@ function providerAccountEndpoint(account: ProviderAccountRecord): KernelConnecto
   const profile = account.renderProfile as ProviderRenderProfile;
   if (profile === "zen_gateway") return ZEN_GATEWAY_ENDPOINT;
   if (profile === "chatgpt_codex") throw new Error("ChatGPT subscriptions require the separate Codex App Server lane");
-  const base = new URL(account.baseUrl);
+  if (
+    account.secretState !== "bound"
+    || account.credentialUri === ""
+    || account.credentialFingerprint !== account.fingerprint
+    || account.approvedBaseUrl !== account.baseUrl
+    || account.approvedCatalogDigest !== account.catalogDigest
+  ) {
+    throw new Error("provider account has no current approved credential and destination binding");
+  }
+  const base = new URL(account.approvedBaseUrl);
   const prefix = base.pathname === "/" ? "/" : `${base.pathname.replace(/\/+$/, "")}/`;
   return {
     connectorId: account.connectorId,
@@ -13769,7 +13947,9 @@ async function warmProviderAccountDiscovery(): Promise<void> {
   for (const warning of discovered.warnings) {
     console.warn(`[terminus-control] provider account discovery: ${warning}`);
   }
-  const connected = discovered.accounts.filter((account) => account.status === "connected");
+  const connected = discovered.accounts.filter(
+    (account) => account.status === "connected" && providerAccountHasApprovedBinding(account),
+  );
   for (const account of connected) {
     const persisted = await loadPersistedProviderAccountModels(account.id);
     if (persisted !== null) {
@@ -13923,6 +14103,7 @@ async function providerAccountsResponse(): Promise<{
   discovery: {
     last_run_at: string | null;
     installed_tools: string[];
+    opencode_store_status: "available" | "missing" | "rejected" | "unavailable" | null;
     warnings: string[];
   };
 }> {
@@ -13940,6 +14121,7 @@ async function providerAccountsResponse(): Promise<{
     discovery: {
       last_run_at: lastProviderAccountDiscovery?.lastRunAt ?? null,
       installed_tools: installedTools,
+      opencode_store_status: lastProviderAccountDiscovery?.opencodeStoreStatus ?? null,
       warnings: [...(lastProviderAccountDiscovery?.warnings ?? [])],
     },
   };
@@ -13959,7 +14141,7 @@ async function providerAccountInventory(): Promise<ReturnType<typeof providerAcc
   const failures: string[] = [];
   for (const account of accounts) {
     let result = await knownProviderAccountModels(account.id);
-    if (result === null && account.status === "connected") {
+    if (result === null && account.status === "connected" && providerAccountHasApprovedBinding(account)) {
       try {
         result = await discoverAndPersistProviderAccountModels(account);
       } catch (error: unknown) {
@@ -13978,7 +14160,7 @@ async function providerAccountInventory(): Promise<ReturnType<typeof providerAcc
   // can show instead of an unexplained blank picker.
   const reason = failures.length > 0
     ? failures.join("; ")
-    : accounts.some((account) => account.status === "connected")
+    : accounts.some((account) => account.status === "connected" && providerAccountHasApprovedBinding(account))
       ? "No connected provider account has reported any models yet."
       : "No provider account is connected.";
   return { ...wire, error: reason };

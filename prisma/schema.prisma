@@ -1083,8 +1083,17 @@ model ProviderAccount {
   vendorId       String    @map("vendor_id")
   authKind       String    @map("auth_kind")
   credentialUri  String    @default("") @map("credential_uri")
-  fingerprint    String    @default("")
-  baseUrl        String    @map("base_url")
+  // Discovery and authorization are intentionally separate. `fingerprint`
+  // and `baseUrl` describe the currently observed OpenCode entry; these
+  // fields describe the exact bytes and routing tuple the user approved.
+  fingerprint               String @default("")
+  baseUrl                   String @map("base_url")
+  catalogDigest             String @default("") @map("catalog_digest")
+  credentialFingerprint    String @default("") @map("credential_fingerprint")
+  approvedBaseUrl           String @default("") @map("approved_base_url")
+  approvedCatalogDigest     String @default("") @map("approved_catalog_digest")
+  secretState               String @default("none") @map("secret_state")
+  secretOperationId         String @default("") @map("secret_operation_id")
   host           String
   protocol       String
   connectorId    String    @map("connector_id")

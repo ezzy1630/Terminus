@@ -22,6 +22,9 @@ import { providerAccountProviderId, type ProviderAccountRecord } from "./provide
 const OBSERVED_AT = "2026-08-28T12:00:00.000Z";
 
 function account(overrides: Partial<ProviderAccountRecord> = {}): ProviderAccountRecord {
+  const fingerprint = overrides.fingerprint ?? "0123456789abcdef".repeat(4);
+  const baseUrl = overrides.baseUrl ?? "https://api.cerebras.ai/v1";
+  const catalogDigest = overrides.catalogDigest ?? `sha256:${"1".repeat(64)}`;
   return {
     id: "account-1",
     source: "opencode:cerebras",
@@ -29,8 +32,14 @@ function account(overrides: Partial<ProviderAccountRecord> = {}): ProviderAccoun
     vendorId: "cerebras",
     authKind: "api",
     credentialUri: "secret://provider-account/account-1",
-    fingerprint: "0123456789abcdef".repeat(4),
-    baseUrl: "https://api.cerebras.ai/v1",
+    fingerprint,
+    baseUrl,
+    catalogDigest,
+    credentialFingerprint: overrides.credentialFingerprint ?? fingerprint,
+    approvedBaseUrl: overrides.approvedBaseUrl ?? baseUrl,
+    approvedCatalogDigest: overrides.approvedCatalogDigest ?? catalogDigest,
+    secretState: overrides.secretState ?? "bound",
+    secretOperationId: "",
     host: "api.cerebras.ai",
     protocol: "chat_completions",
     connectorId: "openai-compatible",
