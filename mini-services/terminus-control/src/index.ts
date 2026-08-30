@@ -351,7 +351,7 @@ import {
 } from "@terminus/provider-zen";
 import { ANTHROPIC_MODEL_PROFILES } from "@terminus/provider-anthropic";
 import { GOOGLE_MODEL_PROFILES } from "@terminus/provider-google";
-import { OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
+import { CodexTurnState, OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
 import {
   CodingTurnEngine,
