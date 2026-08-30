@@ -3,21 +3,21 @@
 - **Status:** PROPOSED
 - **Date:** 2026-08-30
 - **Decision owner:** context owner
-- **Supersedes:** fixed live defaults in the control-plane compaction path
+- **Supersedes:** none (the adaptive arm remains proposed)
 - **Related:** SPEC §8, §9, §10, §33, §39; ADR-0009; ADR-0010; ADR-0023
 
 ## Context
 
-The live control plane compacts model-visible episodes above a fixed 96,000-token estimate, retains a fixed 24,000-token tail, and renders each summary chunk with a fixed 400,000-token input ceiling. Those constants are unrelated to the selected provider/model's tested-safe window. They can compact too late for small windows, too early for large windows, or send an oversized summary request.
+The live control plane has a compatibility-sensitive fixed-byte control assignment: a 384,000-byte episode window and compaction trigger, a 96,000-byte retained tail, and a 400,000-character summary chunk ceiling. An adaptive provider-budgeted assignment is useful, but enabling it by default would change loader selection, trigger timing, and cache behavior without a paired evaluation.
 
 The persisted summary is source-backed and recallable, but its structured `goal` currently prefers model prose. A lossy summary must not restate the authoritative task contract. Repeated compaction also needs typed links to the earlier summaries it absorbs so exact recall remains recursively discoverable.
 
 ## Decision
 
-1. Derive a versioned compaction decision from the provider-aware `ContextBudget` already reconciled for the current attempt. The initial policy compacts when episode history reaches 75% of the optional-context target, retains a bounded 25% recent tail, and sizes summary chunks from the selected model's hard input limit. A missing provider budget uses the previous fixed behavior as an explicit fallback. A known zero optional budget, an obligation anchor that consumes the summary input, or degraded tokenizer calibration disables compaction instead of inventing capacity. The degraded path preserves the baseline history window until calibration is trustworthy.
+1. Preserve the exact fixed-byte control assignment by default: 384,000-byte loader/trigger, 96,000-byte retained tail, and 400,000-character summary chunks. The versioned `terminus.adaptive-compaction.v1` assignment is enabled only by the explicit `TERMINUS_EXPERIMENTAL_ADAPTIVE_COMPACTION=1` opt-in. Invalid non-empty values fail clearly. Adaptive mode derives its trigger, window, tail, and chunk limits from the reconciled provider budget; unavailable budget or degraded tokenizer calibration falls back to the exact fixed-byte control behavior, including loader selection and compaction.
 2. Persist an exact obligation anchor in every compaction summary: contract version and hash, objective, acceptance criteria and status, non-goals, constraints, and allowed scope. The anchor is supplied to the summarizer as a separate exact fragment. Model prose remains a lossy narrative and cannot override it. This is deliberately not a second copy of the complete task contract: `userOutcome`, verification hints, assumptions, unknowns, risk, budget, and change policy remain in the full contract that the Context Compiler hard-includes on every attempt.
 3. Record parent summary hashes when a compaction absorbs earlier summary episodes. The immutable event/artifact log remains authoritative; the model-visible summary is an expandable view.
-4. Record the policy version, derived limits, measured history, and outcome in compaction telemetry. Successful compaction starts the existing new-baseline lifecycle; failed compaction leaves every source episode visible.
+4. Record the policy version, control/adaptive assignment, requested assignment, derived limits, measured history, and outcome in compaction/deferred telemetry. Record the effective assignment in the execution profile configuration and every Context Compiler manifest's `experimentAssignments`. Successful compaction starts the existing new-baseline lifecycle; failed compaction leaves every source episode visible.
 5. Treat a committed compaction summary and its exact retained tail as required context. Before any summary call, require the fixed serialized scaffold plus retained tail to fit the model-visible byte and token allocation. Before commit, require the finalized summary plus retained tail to fit the same allocation.
 6. Suppress an identical failed compaction fingerprint for the rest of the turn. New source episodes, task obligations, or policy values create a new fingerprint and one new attempt.
 7. Preserve prompt-injection taint. Episode bodies and the model-produced narrative are JSON-serialized as untrusted data, the summary model is forbidden from following embedded instructions, and the persistent replacement remains `untrusted`/`high` injection risk even though it is required context.
@@ -32,9 +32,9 @@ The persisted summary is source-backed and recallable, but its structured `goal`
 
 ## Consequences
 
-- The policy changes model input and requires the targeted context/recovery evaluation plus two approvals before merge.
-- Small-window models compact before the provider limit instead of failing after it. Large-window models retain more exact history before paying summarization cost.
-- CAS byte metadata is only a no-read pressure preflight. The live path materializes candidate sources and uses the selected model's calibrated tokenizer estimator for the trigger, retained tail, chunk fit, and finalized artifact. Calibrated estimates carry error headroom; degraded estimates use a conservative UTF-8 byte bound. Missing metadata forces measurement instead of suppressing compaction.
+- The adaptive arm changes model input and requires the targeted context/recovery evaluation plus two approvals before promotion; the default control arm remains behavior-compatible.
+- When explicitly enabled, small-window models can compact before the provider limit and large-window models can retain more exact history before paying summarization cost.
+- CAS byte metadata is only a no-read pressure preflight. The adaptive live path materializes candidate sources and uses the selected model's calibrated tokenizer estimator for the trigger, retained tail, chunk fit, and finalized artifact. The control path remains byte-based. Calibrated estimates carry error headroom; degraded estimates use the exact fixed-byte fallback. Missing metadata forces measurement instead of suppressing compaction.
 - Source episodes are never hidden for a replacement artifact that the episode loader cannot reopen, that crowds out the retained tail, or that the next context allocation cannot admit.
 - A failed source/anchor/policy fingerprint spends at most one summary attempt per turn.
 - Required inclusion does not upgrade trust: compaction output stays explicitly tainted and transcript instructions remain data.
@@ -43,7 +43,7 @@ The persisted summary is source-backed and recallable, but its structured `goal`
 
 ## Evaluation plan
 
-- Unit/property coverage across small, medium, and large provider budgets.
+- Unit/property coverage across fixed control behavior and explicitly opted-in small, medium, and large provider budgets.
 - Compaction tests for exact obligation anchors, tool-pair integrity, source retention on failure, retained-tail admission, hostile transcript and summarizer-output serialization, and parent-summary lineage.
 - Persisted-artifact conformance: compact, cross a serialization boundary, recover the obligation anchor, and expand exact source through the restart-bound recall store.
 - Full restart conformance remains an evaluation gate: run the real persistence path and next context compilation, then prove unchanged complete task contract, checkpoint state, and effect settlements.
@@ -51,4 +51,4 @@ The persisted summary is source-backed and recallable, but its structured `goal`
 
 ## Rollback
 
-Disable the adaptive policy and use the explicit fixed fallback. Do not remove exact obligation anchors or source lineage from summaries that already exist.
+Unset `TERMINUS_EXPERIMENTAL_ADAPTIVE_COMPACTION` (or use the control assignment) to restore the exact fixed-byte behavior. Do not remove exact obligation anchors or source lineage from summaries that already exist.

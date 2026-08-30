@@ -72,7 +72,9 @@ export interface ToolEpisodeDependencies {
   readonly windowBytes?: number;
 }
 
-export const DEFAULT_EPISODE_WINDOW_BYTES = 96_000 * 4;
+// The control assignment intentionally preserves the original byte window.
+// Callers must opt into the token-window overload for adaptive behavior.
+export const DEFAULT_EPISODE_WINDOW_BYTES = 384_000;
 
 export interface ToolEpisodeSession {
   readonly settle: (input: ToolEpisodeSettlementInput) => Promise<void>;
@@ -116,9 +118,8 @@ export class ToolEpisodeService {
     turnId: string,
     tokenWindow?: ModelVisibleEpisodeWindow,
   ): Promise<ModelVisibleEpisodeSet> {
-    // R4: token-budgeted window replaces the fixed take(16). Scan the newest
-    // model-visible rows first and include older rows only while they fit the
-    // selected-model window. The byte path remains for compatibility callers.
+    // Scan newest→oldest. The default control path uses the fixed byte window;
+    // adaptive callers explicitly provide a calibrated token window.
     const rows = await this.dependencies.store.listModelVisibleEpisodes(turnId);
     const decoder = new TextDecoder("utf-8", { fatal: true });
     const content = new Map<ContentHash, string>();

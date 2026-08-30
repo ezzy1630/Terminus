@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type { ContextBudget } from "@terminus/context-ir";
 import type { TokenCount } from "@terminus/domain";
 import {
-  COMPACTION_POLICY_VERSION,
-  DEFAULT_COMPACT_THRESHOLD_TOKENS,
-  DEFAULT_KEEP_RECENT_TOKENS,
+  ADAPTIVE_COMPACTION_POLICY_VERSION,
+  LEGACY_COMPACT_THRESHOLD_BYTES,
+  LEGACY_KEEP_RECENT_BYTES,
+  LEGACY_SUMMARY_CHUNK_CHARS,
   MAX_COMPACTION_TRANSCRIPT_CHARS,
+  resolveAdaptiveCompactionMode,
   TurnCompactionFailureGuard,
   conservativeCompactionTextTokens,
   deriveCompactionPolicy,
@@ -35,6 +37,30 @@ function budget(input: {
 }
 
 describe("provider-budgeted compaction policy", () => {
+  test("keeps the exact fixed byte control arm by default", () => {
+    const decision = deriveCompactionPolicy(budget({
+      hardInputLimit: 32_000,
+      optionalContextTarget: 12_000,
+    }));
+    expect(decision).toMatchObject({
+      policyVersion: "terminus.fixed-compaction.v1",
+      assignment: "control",
+      source: "legacy_fixed",
+      compactionEnabled: true,
+      compactThresholdTokens: LEGACY_COMPACT_THRESHOLD_BYTES,
+      keepRecentTokens: LEGACY_KEEP_RECENT_BYTES,
+      maxTranscriptChunkTokens: undefined,
+      maxTranscriptChunkChars: LEGACY_SUMMARY_CHUNK_CHARS,
+    });
+  });
+
+  test("accepts only the explicit adaptive opt-in", () => {
+    expect(resolveAdaptiveCompactionMode(undefined)).toBe("control");
+    expect(resolveAdaptiveCompactionMode("1")).toBe("adaptive");
+    expect(() => resolveAdaptiveCompactionMode("0")).toThrow("TERMINUS_EXPERIMENTAL_ADAPTIVE_COMPACTION");
+    expect(() => resolveAdaptiveCompactionMode("true")).toThrow("received 'true'");
+  });
+
   test("suppresses only the exact failed source, anchor, and policy fingerprint", () => {
     const guard = new TurnCompactionFailureGuard();
     expect(guard.shouldSuppress("sha256:first")).toBe(false);
@@ -78,10 +104,11 @@ describe("provider-budgeted compaction policy", () => {
     const decision = deriveCompactionPolicy(budget({
       hardInputLimit: 32_000,
       optionalContextTarget: 12_000,
-    }));
+    }), { mode: "adaptive" });
 
     expect(decision).toEqual({
-      policyVersion: COMPACTION_POLICY_VERSION,
+      policyVersion: ADAPTIVE_COMPACTION_POLICY_VERSION,
+      assignment: "adaptive",
       source: "provider_budget",
       compactionEnabled: true,
       compactThresholdTokens: 9_000,
@@ -97,11 +124,11 @@ describe("provider-budgeted compaction policy", () => {
     const medium = deriveCompactionPolicy(budget({
       hardInputLimit: 200_000,
       optionalContextTarget: 120_000,
-    }));
+    }), { mode: "adaptive" });
     const large = deriveCompactionPolicy(budget({
       hardInputLimit: 1_000_000,
       optionalContextTarget: 800_000,
-    }));
+    }), { mode: "adaptive" });
 
     expect(medium.compactThresholdTokens).toBe(90_000);
     expect(medium.keepRecentTokens).toBe(30_000);
@@ -114,12 +141,13 @@ describe("provider-budgeted compaction policy", () => {
     const decision = deriveCompactionPolicy(budget({
       hardInputLimit: 0,
       optionalContextTarget: 0,
-    }));
+    }), { mode: "adaptive" });
 
     expect(decision.source).toBe("fallback_unavailable_budget");
+    expect(decision.assignment).toBe("control");
     expect(decision.compactionEnabled).toBe(true);
-    expect(decision.compactThresholdTokens).toBe(DEFAULT_COMPACT_THRESHOLD_TOKENS);
-    expect(decision.keepRecentTokens).toBe(DEFAULT_KEEP_RECENT_TOKENS);
+    expect(decision.compactThresholdTokens).toBe(LEGACY_COMPACT_THRESHOLD_BYTES);
+    expect(decision.keepRecentTokens).toBe(LEGACY_KEEP_RECENT_BYTES);
     expect(decision.maxTranscriptChunkChars).toBe(MAX_COMPACTION_TRANSCRIPT_CHARS);
   });
 
@@ -127,35 +155,34 @@ describe("provider-budgeted compaction policy", () => {
     const decision = deriveCompactionPolicy(budget({
       hardInputLimit: 32_000,
       optionalContextTarget: 0,
-    }));
+    }), { mode: "adaptive" });
 
-    expect(decision.source).toBe("provider_budget_exhausted");
-    expect(decision.compactionEnabled).toBe(false);
-    expect(decision.compactThresholdTokens).toBe(0);
-    expect(decision.keepRecentTokens).toBe(0);
-    expect(decision.summaryHardInputLimitTokens).toBe(32_000);
-    expect(decision.summaryReservedInputTokens).toBe(2_000);
-    expect(decision.maxTranscriptChunkTokens).toBe(30_000);
-    expect(decision.maxTranscriptChunkChars).toBe(90_000);
+    expect(decision.source).toBe("fallback_unavailable_budget");
+    expect(decision.assignment).toBe("control");
+    expect(decision.compactionEnabled).toBe(true);
+    expect(decision.compactThresholdTokens).toBe(LEGACY_COMPACT_THRESHOLD_BYTES);
+    expect(decision.keepRecentTokens).toBe(LEGACY_KEEP_RECENT_BYTES);
+    expect(decision.maxTranscriptChunkChars).toBe(LEGACY_SUMMARY_CHUNK_CHARS);
   });
 
   test("keeps the baseline history window and disables compaction while tokenizer calibration is degraded", () => {
     const decision = deriveCompactionPolicy(
       budget({ hardInputLimit: 8_192, optionalContextTarget: 1_280 }),
-      { tokenizerStatus: "degraded" },
+      { mode: "adaptive", tokenizerStatus: "degraded" },
     );
 
     expect(decision.source).toBe("fallback_unverified_tokenizer");
-    expect(decision.compactionEnabled).toBe(false);
-    expect(decision.compactThresholdTokens).toBe(DEFAULT_COMPACT_THRESHOLD_TOKENS);
-    expect(decision.keepRecentTokens).toBe(DEFAULT_KEEP_RECENT_TOKENS);
-    expect(decision.summaryHardInputLimitTokens).toBe(8_192);
+    expect(decision.assignment).toBe("control");
+    expect(decision.compactionEnabled).toBe(true);
+    expect(decision.compactThresholdTokens).toBe(LEGACY_COMPACT_THRESHOLD_BYTES);
+    expect(decision.keepRecentTokens).toBe(LEGACY_KEEP_RECENT_BYTES);
+    expect(decision.maxTranscriptChunkChars).toBe(LEGACY_SUMMARY_CHUNK_CHARS);
   });
 
   test("reserves the measured obligation anchor before sizing a source chunk", () => {
     const decision = deriveCompactionPolicy(
       budget({ hardInputLimit: 32_000, optionalContextTarget: 12_000 }),
-      { summaryReservedInputTokens: 31_000 },
+      { mode: "adaptive", summaryReservedInputTokens: 31_000 },
     );
 
     expect(decision.summaryReservedInputTokens).toBe(31_000);
@@ -166,7 +193,7 @@ describe("provider-budgeted compaction policy", () => {
   test("disables compaction when the obligation anchor consumes the summary model input", () => {
     const decision = deriveCompactionPolicy(
       budget({ hardInputLimit: 32_000, optionalContextTarget: 12_000 }),
-      { summaryReservedInputTokens: 32_000 },
+      { mode: "adaptive", summaryReservedInputTokens: 32_000 },
     );
 
     expect(decision.source).toBe("provider_summary_budget_exhausted");
@@ -184,7 +211,7 @@ describe("provider-budgeted compaction policy", () => {
     expect(() => deriveCompactionPolicy(unsafe)).toThrow("optionalContextTarget");
     expect(() => deriveCompactionPolicy(
       budget({ hardInputLimit: 32_000, optionalContextTarget: 12_000 }),
-      { summaryReservedInputTokens: -1 },
+      { mode: "adaptive", summaryReservedInputTokens: -1 },
     )).toThrow("summaryReservedInputTokens");
   });
 });

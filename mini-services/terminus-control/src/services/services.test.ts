@@ -3,6 +3,7 @@ import type { ContentHash } from "@terminus/domain";
 import type { ProviderToolCallChunk } from "@terminus/provider-core";
 import {
   EffectSettlementService,
+  DEFAULT_EPISODE_WINDOW_BYTES,
   EventSubscriptionService,
   ProviderExecutionUnavailableError,
   ProviderSessionService,
@@ -593,6 +594,30 @@ describe("control-plane service boundaries", () => {
     });
 
     expect(episodes.episodes.map((episode) => String(episode.id))).toEqual(["episode-2", "episode-3"]);
+  });
+
+  test("ToolEpisodeService keeps the exact fixed byte window without a token estimator", async () => {
+    expect(DEFAULT_EPISODE_WINDOW_BYTES).toBe(384_000);
+    const rows = [1, 2, 3, 4].map((sequence) => ({
+      id: `legacy-episode-${sequence}`,
+      turnId: "turn-legacy",
+      sequence,
+      kind: "user_message",
+      contentArtifact: `artifact://sha256/legacy-${sequence}`,
+      toolCallId: null,
+      createdAt: new Date(`2026-01-01T00:00:0${sequence}.000Z`),
+    }));
+    const service = new ToolEpisodeService({
+      store: {
+        listModelVisibleEpisodes: async () => rows,
+        readArtifact: async () => new TextEncoder().encode("x".repeat(130_000)),
+      },
+      settleCall: async () => {},
+    });
+
+    const episodes = await service.loadModelVisibleEpisodes("turn-legacy");
+
+    expect(episodes.episodes.map((episode) => String(episode.id))).toEqual(["legacy-episode-3", "legacy-episode-4"]);
   });
 
   test("VerificationCoordinator owns the VERIFYING and terminal task CAS transitions", async () => {

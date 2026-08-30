@@ -1,8 +1,12 @@
 hypothesis: >-
-  Deriving compaction pressure from the selected model budget while preserving an
-  exact obligation anchor and recursive source lineage will improve long-horizon
-  completion without reducing requirement recall or restart correctness.
+  Explicitly opting into provider-budgeted compaction while preserving an exact
+  obligation anchor and recursive source lineage may improve long-horizon
+  completion without reducing requirement recall or restart correctness; the
+  fixed-byte control assignment remains the baseline.
 target_cohort: compaction_mid_implementation
+control_assignment: terminus.compaction.assignment.v1.control
+experimental_assignment: terminus.compaction.assignment.v1.adaptive
+activation: TERMINUS_EXPERIMENTAL_ADAPTIVE_COMPACTION=1
 changed_components:
   - terminus.adaptive-compaction.v1
   - terminus.compaction-summary.v2
@@ -48,9 +52,10 @@ observed:
   cost_guardrail_results: {}
   regression_cohorts: []
   notes: >-
-    Local deterministic policy, compaction, lineage, and serialize/restart/recall
-    tests pass. No paired provider-backed cohort has been run, so this is not
-    promotion evidence.
+    Local deterministic control/adaptive policy, compaction, lineage, and
+    serialize/restart/recall tests pass. Degraded tokenizer or unavailable budget
+    uses the exact fixed-byte control behavior. No paired provider-backed cohort
+    has been run, so this is not promotion evidence.
 decision: retain_experimental
 decision_reason: >-
   The candidate is implemented on an isolated branch, but the required paired

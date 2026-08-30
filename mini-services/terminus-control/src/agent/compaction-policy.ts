@@ -1,6 +1,10 @@
 import type { ContextBudget } from "@terminus/context-ir";
 
-export const COMPACTION_POLICY_VERSION = "terminus.adaptive-compaction.v1" as const;
+export const LEGACY_COMPACTION_POLICY_VERSION = "terminus.fixed-compaction.v1" as const;
+export const ADAPTIVE_COMPACTION_POLICY_VERSION = "terminus.adaptive-compaction.v1" as const;
+/** Compatibility name for callers and the adaptive evaluation cohort. */
+export const COMPACTION_POLICY_VERSION = ADAPTIVE_COMPACTION_POLICY_VERSION;
+export const EXPERIMENTAL_ADAPTIVE_COMPACTION_ENV = "TERMINUS_EXPERIMENTAL_ADAPTIVE_COMPACTION" as const;
 
 /**
  * A byte-level tokenizer cannot emit more tokens than input bytes. The live
@@ -15,6 +19,9 @@ const SUMMARY_CHARS_PER_TOKEN_ESTIMATE = 3;
 /** Explicit fallback for providers that publish no usable context budget. */
 export const DEFAULT_COMPACT_THRESHOLD_TOKENS = 96_000;
 export const DEFAULT_KEEP_RECENT_TOKENS = 24_000;
+export const LEGACY_COMPACT_THRESHOLD_BYTES = 384_000;
+export const LEGACY_KEEP_RECENT_BYTES = 96_000;
+export const LEGACY_SUMMARY_CHUNK_CHARS = 400_000;
 
 /** Upper bound on one source chunk sent to the summary model. */
 export const MAX_COMPACTION_TRANSCRIPT_CHARS = 400_000;
@@ -29,23 +36,27 @@ const MIN_KEEP_RECENT_TOKENS = 2_000;
 const MAX_KEEP_RECENT_TOKENS = 32_000;
 
 export interface CompactionPolicyDecision {
-  readonly policyVersion: typeof COMPACTION_POLICY_VERSION;
+  readonly policyVersion: typeof LEGACY_COMPACTION_POLICY_VERSION | typeof ADAPTIVE_COMPACTION_POLICY_VERSION;
+  readonly assignment: "control" | "adaptive";
   readonly source:
     | "provider_budget"
     | "provider_budget_exhausted"
     | "provider_summary_budget_exhausted"
     | "fallback_unverified_tokenizer"
-    | "fallback_unavailable_budget";
+    | "fallback_unavailable_budget"
+    | "legacy_fixed";
   readonly compactionEnabled: boolean;
   readonly compactThresholdTokens: number;
   readonly keepRecentTokens: number;
   readonly summaryHardInputLimitTokens: number;
   readonly summaryReservedInputTokens: number;
-  readonly maxTranscriptChunkTokens: number;
+  readonly maxTranscriptChunkTokens: number | undefined;
   readonly maxTranscriptChunkChars: number;
 }
 
 export interface CompactionPolicyOptions {
+  /** Fixed byte control arm unless the explicit experimental opt-in is set. */
+  readonly mode?: "control" | "adaptive" | undefined;
   /** Selected-model estimate for non-transcript summary input. */
   readonly summaryReservedInputTokens?: number | undefined;
   /** Adaptive compaction is fail-closed until token estimates are calibrated. */
@@ -59,6 +70,14 @@ export interface CompactionTokenEstimator {
     readonly status: "calibrated" | "degraded";
     readonly maximumAbsolutePercentageError: number | null;
   };
+}
+
+/** Parse the only supported opt-in. Any non-empty typo fails closed. */
+export function resolveAdaptiveCompactionMode(raw: string | undefined | null): "control" | "adaptive" {
+  const value = raw?.trim() ?? "";
+  if (value === "") return "control";
+  if (value === "1") return "adaptive";
+  throw new Error(`${EXPERIMENTAL_ADAPTIVE_COMPACTION_ENV} must be '1' when set, received '${value}'`);
 }
 
 /** Per-turn circuit breaker keyed by the exact source/anchor/policy state. */
@@ -106,6 +125,7 @@ export function deriveCompactionPolicy(
   budget: ContextBudget,
   options: CompactionPolicyOptions = {},
 ): CompactionPolicyDecision {
+  const requestedMode = options.mode ?? "control";
   const hardInputLimitTokens = safeTokenNumber(
     budget.hardInputLimit,
     "hardInputLimit",
@@ -121,50 +141,16 @@ export function deriveCompactionPolicy(
       "summaryReservedInputTokens",
     ),
   );
+  if (requestedMode === "control") return legacyCompactionPolicy();
 
+  // Experimental adaptive sizing is never allowed to become a degraded
+  // default. If calibration or provider capacity is unavailable, retain the
+  // exact byte control behavior, including loader and compaction thresholds.
   if (options.tokenizerStatus === "degraded") {
-    const summaryHardInputLimitTokens = hardInputLimitTokens === 0
-      ? DEFAULT_SUMMARY_HARD_INPUT_TOKENS
-      : hardInputLimitTokens;
-    const transcriptTokenBudget = Math.max(
-      1,
-      summaryHardInputLimitTokens - summaryReservedInputTokens,
-    );
-    return {
-      policyVersion: COMPACTION_POLICY_VERSION,
-      source: "fallback_unverified_tokenizer",
-      compactionEnabled: false,
-      compactThresholdTokens: DEFAULT_COMPACT_THRESHOLD_TOKENS,
-      keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
-      summaryHardInputLimitTokens,
-      summaryReservedInputTokens,
-      maxTranscriptChunkTokens: transcriptTokenBudget,
-      maxTranscriptChunkChars: Math.min(
-        MAX_COMPACTION_TRANSCRIPT_CHARS,
-        transcriptTokenBudget * SUMMARY_CHARS_PER_TOKEN_ESTIMATE,
-      ),
-    };
+    return legacyCompactionPolicy("fallback_unverified_tokenizer");
   }
-
-  if (hardInputLimitTokens === 0) {
-    const transcriptTokenBudget = Math.max(
-      1,
-      DEFAULT_SUMMARY_HARD_INPUT_TOKENS - summaryReservedInputTokens,
-    );
-    return {
-      policyVersion: COMPACTION_POLICY_VERSION,
-      source: "fallback_unavailable_budget",
-      compactionEnabled: true,
-      compactThresholdTokens: DEFAULT_COMPACT_THRESHOLD_TOKENS,
-      keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
-      summaryHardInputLimitTokens: DEFAULT_SUMMARY_HARD_INPUT_TOKENS,
-      summaryReservedInputTokens,
-      maxTranscriptChunkTokens: transcriptTokenBudget,
-      maxTranscriptChunkChars: Math.min(
-        MAX_COMPACTION_TRANSCRIPT_CHARS,
-        transcriptTokenBudget * SUMMARY_CHARS_PER_TOKEN_ESTIMATE,
-      ),
-    };
+  if (hardInputLimitTokens === 0 || optionalContextTargetTokens === 0) {
+    return legacyCompactionPolicy("fallback_unavailable_budget");
   }
 
   const transcriptTokenBudget = Math.max(
@@ -173,7 +159,8 @@ export function deriveCompactionPolicy(
   );
   if (summaryReservedInputTokens >= hardInputLimitTokens) {
     return {
-      policyVersion: COMPACTION_POLICY_VERSION,
+      policyVersion: ADAPTIVE_COMPACTION_POLICY_VERSION,
+      assignment: "adaptive",
       source: "provider_summary_budget_exhausted",
       compactionEnabled: false,
       compactThresholdTokens: 0,
@@ -189,7 +176,8 @@ export function deriveCompactionPolicy(
   }
   if (optionalContextTargetTokens === 0) {
     return {
-      policyVersion: COMPACTION_POLICY_VERSION,
+      policyVersion: ADAPTIVE_COMPACTION_POLICY_VERSION,
+      assignment: "adaptive",
       source: "provider_budget_exhausted",
       compactionEnabled: false,
       compactThresholdTokens: 0,
@@ -220,7 +208,8 @@ export function deriveCompactionPolicy(
         Math.max(Math.min(MIN_KEEP_RECENT_TOKENS, recentCeiling), desiredRecentTokens),
       );
   return {
-    policyVersion: COMPACTION_POLICY_VERSION,
+    policyVersion: ADAPTIVE_COMPACTION_POLICY_VERSION,
+    assignment: "adaptive",
     source: "provider_budget",
     compactionEnabled: true,
     compactThresholdTokens,
@@ -232,6 +221,24 @@ export function deriveCompactionPolicy(
       MAX_COMPACTION_TRANSCRIPT_CHARS,
       transcriptTokenBudget * SUMMARY_CHARS_PER_TOKEN_ESTIMATE,
     ),
+  };
+}
+
+function legacyCompactionPolicy(
+  source: "legacy_fixed" | "fallback_unverified_tokenizer" | "fallback_unavailable_budget" = "legacy_fixed",
+): CompactionPolicyDecision {
+  return {
+    policyVersion: LEGACY_COMPACTION_POLICY_VERSION,
+    assignment: "control",
+    source,
+    compactionEnabled: true,
+    // These fields are consumed as byte units by the legacy control path.
+    compactThresholdTokens: LEGACY_COMPACT_THRESHOLD_BYTES,
+    keepRecentTokens: LEGACY_KEEP_RECENT_BYTES,
+    summaryHardInputLimitTokens: LEGACY_SUMMARY_CHUNK_CHARS,
+    summaryReservedInputTokens: 0,
+    maxTranscriptChunkTokens: undefined,
+    maxTranscriptChunkChars: LEGACY_SUMMARY_CHUNK_CHARS,
   };
 }
 
