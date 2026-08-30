@@ -25,6 +25,10 @@ describe("external Codex control-plane contract", () => {
     expect(eventsStart).toBeGreaterThanOrEqual(0);
     expect(accountStart).toBeGreaterThan(eventsStart);
     expect(source.slice(eventsStart, accountStart)).not.toContain("getCodexLaneSession");
+    const statusStart = source.indexOf('route("GET", "/v1/external/codex/status"');
+    expect(statusStart).toBeGreaterThanOrEqual(0);
+    expect(source.slice(statusStart, eventsStart)).not.toContain("await lane.open");
+    expect(source.slice(statusStart, eventsStart)).toContain("codexStatusFromPersisted");
   });
 
   test("keeps OpenCode connect consent and credential identity bounded", async () => {

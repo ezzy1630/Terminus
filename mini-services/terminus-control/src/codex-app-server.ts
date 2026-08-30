@@ -18,6 +18,8 @@ export const CODEX_EXTERNAL_HARNESS = "codex" as const;
 export const CODEX_APP_SERVER_PROTOCOL = "codex-app-server.v2" as const;
 /** JobService has a hard background ceiling; sessions must also state it. */
 export const CODEX_APP_SERVER_MAX_LIFETIME_SECONDS = 30 * 60;
+/** Every App Server request has its own finite response budget. */
+export const CODEX_APP_SERVER_RPC_TIMEOUT_MS = 30_000;
 
 const MAX_PROTOCOL_BYTES = 8 * 1_024 * 1_024;
 const MAX_LINE_BYTES = 1 * 1_024 * 1_024;
@@ -106,11 +108,25 @@ export interface CodexAppServerSessionOptions {
   readonly context: RequestContext | (() => Promise<RequestContext>);
   readonly workspace_id: string;
   readonly public_env: Readonly<Record<string, string>>;
+  /** A lease recovered from Session.metadataJson after a control restart. */
+  readonly persisted_lease?: {
+    readonly job_id: string | null;
+    readonly state: string;
+  };
+  /** Persist the lease before launch and after every settlement transition. */
+  readonly on_lease?: (lease: CodexAppServerLease) => Promise<void>;
+  /** Test-only shortening, still hard-capped by the production RPC budget. */
+  readonly rpc_timeout_ms?: number;
   readonly on_event?: (event: CodexAppServerEvent) => void;
   /** Handle Codex approval/input requests. Returning null denies the request. */
   readonly on_server_request?: (
     request: Record<string, unknown>,
   ) => Promise<unknown | null>;
+}
+
+export interface CodexAppServerLease {
+  readonly job_id: string | null;
+  readonly state: "starting" | "running" | "exited" | "unknown_settlement" | "stopped";
 }
 
 export interface CodexAppServerStartThreadInput {
@@ -148,6 +164,13 @@ interface PendingRequest {
   readonly reject: (error: Error) => void;
 }
 
+class CodexRpcTimeoutError extends Error {
+  constructor(operation: string) {
+    super(`Codex App Server ${operation} RPC timed out`);
+    this.name = "CodexRpcTimeoutError";
+  }
+}
+
 /**
  * One process-backed App Server connection. Keep this object alive across
  * turns so Codex can retain its own durable thread and turn state.
@@ -165,6 +188,7 @@ export class CodexAppServerSession {
   private protocolBytes = 0;
   private opened: Promise<void> | null = null;
   private expiryTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly rpcTimeoutMs: number;
 
   constructor(options: CodexAppServerSessionOptions) {
     if (options.workspace_id.length === 0) {
@@ -178,7 +202,25 @@ export class CodexAppServerSession {
         throw new Error(`Codex App Server public environment contains a control delimiter: ${name}`);
       }
     }
+    if (options.rpc_timeout_ms !== undefined
+      && (!Number.isInteger(options.rpc_timeout_ms)
+        || options.rpc_timeout_ms <= 0
+        || options.rpc_timeout_ms > CODEX_APP_SERVER_RPC_TIMEOUT_MS)) {
+      throw new Error(`Codex App Server RPC timeout must be an integer in 1..${CODEX_APP_SERVER_RPC_TIMEOUT_MS} ms`);
+    }
     this.options = options;
+    this.rpcTimeoutMs = options.rpc_timeout_ms ?? CODEX_APP_SERVER_RPC_TIMEOUT_MS;
+    if (options.persisted_lease?.state === "starting" && options.persisted_lease.job_id === null) {
+      // A control restart during the launch window cannot prove whether the
+      // kernel created a process. Refuse a second launch until reconciliation.
+      this.state = "unknown_settlement";
+    }
+    if (options.persisted_lease?.job_id !== null
+      && options.persisted_lease?.job_id !== undefined
+      && (options.persisted_lease.state === "running" || options.persisted_lease.state === "unknown_settlement")) {
+      this.jobId = options.persisted_lease.job_id;
+      if (options.persisted_lease.state === "unknown_settlement") this.state = "unknown_settlement";
+    }
   }
 
   status(): CodexAppServerStatus {
@@ -307,48 +349,106 @@ export class CodexAppServerSession {
   async stop(reason = "user-stop"): Promise<void> {
     if (this.jobId === null) return;
     const jobId = this.jobId;
-    if (this.expiryTimer !== null) {
-      clearTimeout(this.expiryTimer);
-      this.expiryTimer = null;
-    }
-    this.state = "stopped";
+    this.clearExpiryTimer();
     for (const pending of this.pending.values()) pending.reject(new CodexAppServerError("CODEX_APP_SERVER_EXITED", `Codex App Server stopped: ${reason}`));
     this.pending.clear();
     this.subscription?.unsubscribe();
     this.subscription = null;
-    await this.options.clients.jobs.Stop({
-      context: await nextContext(this.options.context, "codex-stop"),
-      jobId,
-      reason,
-    });
+    try {
+      await this.withRpcDeadline(this.options.clients.jobs.Stop({
+        context: await nextContext(this.options.context, "codex-stop"),
+        jobId,
+        reason,
+      }), "stop");
+    } catch (error: unknown) {
+      this.state = "unknown_settlement";
+      void this.persistLease({ job_id: jobId, state: "unknown_settlement" }).catch(() => undefined);
+      throw new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", `Codex App Server stop settlement is unknown: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
+      await this.persistLease({ job_id: null, state: "stopped" });
+    } catch (error: unknown) {
+      this.state = "unknown_settlement";
+      void this.persistLease({ job_id: jobId, state: "unknown_settlement" }).catch(() => undefined);
+      throw new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", `Codex App Server stop lease persistence is unknown: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.state = "stopped";
+    this.jobId = null;
+    this.processId = null;
   }
 
   /** Expire the bounded lease while retaining a truthful terminal state. */
   private async expire(): Promise<void> {
     if (this.jobId === null || this.state === "stopped" || this.state === "exited" || this.state === "unknown_settlement") return;
     const jobId = this.jobId;
-    this.expiryTimer = null;
+    this.clearExpiryTimer();
     this.state = "expired";
     this.failPending(new CodexAppServerError("CODEX_APP_SERVER_EXPIRED", "Codex App Server session lifetime expired; reconnect and resume the thread"));
     this.subscription?.unsubscribe();
     this.subscription = null;
     try {
-      await this.options.clients.jobs.Stop({
+      await this.withRpcDeadline(this.options.clients.jobs.Stop({
         context: await nextContext(this.options.context, "codex-expire"),
         jobId,
         reason: "session-expired",
-      });
+      }), "expire");
+      await this.persistLease({ job_id: null, state: "stopped" });
+      this.jobId = null;
+      this.processId = null;
     } catch (error: unknown) {
       this.state = "unknown_settlement";
+      void this.persistLease({ job_id: jobId, state: "unknown_settlement" }).catch(() => undefined);
       this.failPending(new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", `Codex App Server expiry settlement is unknown: ${error instanceof Error ? error.message : String(error)}`));
     }
   }
 
   private async startAndInitialize(): Promise<void> {
+    if (this.state === "unknown_settlement") {
+      throw new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", "Codex App Server job settlement is unknown; reconcile before retrying");
+    }
+    if (this.options.persisted_lease?.job_id !== null
+      && this.options.persisted_lease?.job_id !== undefined
+      && this.options.persisted_lease.state === "running") {
+      const restoredJobId = this.options.persisted_lease.job_id;
+      this.jobId = restoredJobId;
+      try {
+        const recovered = await this.withRpcDeadline(this.options.clients.jobs.Get({
+          context: await nextContext(this.options.context, "codex-reconcile"),
+          jobId: restoredJobId,
+        }), "reconcile");
+        if (recovered.state === "running" || recovered.state === "queued") {
+          this.state = "starting";
+          await this.attachAndInitialize(restoredJobId, 0);
+          return;
+        }
+        if (recovered.state === "unknown") {
+          this.state = "unknown_settlement";
+          void this.persistLease({ job_id: restoredJobId, state: "unknown_settlement" }).catch(() => undefined);
+          throw new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", "Codex App Server job reconciliation is unknown");
+        }
+        // A known exit is settled. Release the old identity before reserving
+        // a fresh lease for an explicit reconnect/resume operation.
+        await this.persistLease({ job_id: restoredJobId, state: "exited" });
+        this.jobId = null;
+        this.processId = null;
+        this.state = "not_started";
+      } catch (error: unknown) {
+        if (error instanceof CodexAppServerError) throw error;
+        this.state = "unknown_settlement";
+        void this.persistLease({ job_id: restoredJobId, state: "unknown_settlement" }).catch(() => undefined);
+        throw new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", `Codex App Server reconciliation is unknown: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     this.state = "starting";
+    try {
+      await this.persistLease({ job_id: null, state: "starting" });
+    } catch (error: unknown) {
+      this.state = "unknown_settlement";
+      throw new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", `Codex App Server launch lease persistence is unknown: ${error instanceof Error ? error.message : String(error)}`);
+    }
     let started;
     try {
-      started = await this.options.clients.jobs.Start({
+      started = await this.withRpcDeadline(this.options.clients.jobs.Start({
         context: await nextContext(this.options.context, "codex-start"),
         intent: {
           userIntentRef: "external-harness:codex",
@@ -376,25 +476,45 @@ export class CodexAppServerSession {
         sandboxProfileId: "secure-local-default",
         outputPolicyId: "provider-response-bounded",
         durable: true,
-      });
+      }), "start");
     } catch (error: unknown) {
-      this.state = "exited";
-      throw new CodexAppServerError("CODEX_APP_SERVER_UNAVAILABLE", "the Codex App Server could not be started through the kernel");
+      const uncertain = error instanceof CodexRpcTimeoutError;
+      this.state = uncertain ? "unknown_settlement" : "exited";
+      try {
+        await this.persistLease({ job_id: null, state: uncertain ? "unknown_settlement" : "exited" });
+      } catch {
+        this.state = "unknown_settlement";
+      }
+      throw new CodexAppServerError(uncertain ? "CODEX_APP_SERVER_UNKNOWN_SETTLEMENT" : "CODEX_APP_SERVER_UNAVAILABLE", uncertain
+        ? "Codex App Server launch settlement is unknown; reconcile before retrying"
+        : "the Codex App Server could not be started through the kernel");
     }
     if (started.jobId.length === 0 || started.processId.length === 0) {
-      this.state = "exited";
-      throw new CodexAppServerError("CODEX_APP_SERVER_UNAVAILABLE", "the kernel returned no durable Codex App Server job identity");
+      this.state = "unknown_settlement";
+      void this.persistLease({ job_id: null, state: "unknown_settlement" }).catch(() => undefined);
+      throw new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", "the kernel returned no durable Codex App Server job identity");
     }
     this.jobId = started.jobId;
     this.processId = started.processId;
+    try {
+      await this.persistLease({ job_id: started.jobId, state: "running" });
+    } catch (error: unknown) {
+      this.state = "unknown_settlement";
+      void this.persistLease({ job_id: started.jobId, state: "unknown_settlement" }).catch(() => undefined);
+      throw new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", `Codex App Server lease persistence is unknown: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    await this.attachAndInitialize(started.jobId, 0);
+  }
+
+  private async attachAndInitialize(jobId: string, fromSequence: number): Promise<void> {
     this.expiryTimer = setTimeout(() => { void this.expire(); }, CODEX_APP_SERVER_MAX_LIFETIME_SECONDS * 1_000);
     this.subscription = this.options.clients.jobs.Stream({
       context: await nextContext(this.options.context, "codex-stream"),
-      jobId: started.jobId,
-      fromSequence: 0,
+      jobId,
+      fromSequence,
     }).subscribe({
       next: (event) => this.handleJobEvent(event),
-      error: (error: unknown) => this.failPending(new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", `Codex App Server stream failed: ${error instanceof Error ? error.message : String(error)}`)),
+      error: (error: unknown) => this.handleStreamFailure(error),
     });
     try {
       await this.request("initialize", {
@@ -436,7 +556,10 @@ export class CodexAppServerSession {
       return;
     }
     if (event.exited !== undefined) {
+      this.clearExpiryTimer();
+      this.subscription = null;
       this.state = event.exited.exitCode === 0 ? "exited" : "unknown_settlement";
+      void this.persistLease({ job_id: this.jobId, state: this.state }).catch(() => undefined);
       this.failPending(new CodexAppServerError(
         this.state === "exited" ? "CODEX_APP_SERVER_EXITED" : "CODEX_APP_SERVER_UNKNOWN_SETTLEMENT",
         `Codex App Server exited with code ${event.exited.exitCode}`,
@@ -444,8 +567,7 @@ export class CodexAppServerSession {
       return;
     }
     if (event.reconciled !== undefined && event.reconciled.state === "unknown-settlement") {
-      this.state = "unknown_settlement";
-      this.failPending(new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", event.reconciled.explanation || "Codex App Server job settlement is unknown"));
+      this.markUnknown(event.reconciled.explanation || "Codex App Server job settlement is unknown");
     }
   }
 
@@ -509,7 +631,7 @@ export class CodexAppServerSession {
       throw error;
     }
     this.state = "running";
-    return result;
+    return this.withPendingDeadline(id, result, method);
   }
 
   private async notify(method: string, params: unknown): Promise<void> {
@@ -520,16 +642,68 @@ export class CodexAppServerSession {
     if (this.jobId === null) throw new CodexAppServerError("CODEX_APP_SERVER_UNAVAILABLE", "Codex App Server has not started");
     const encoded = new TextEncoder().encode(`${JSON.stringify(message)}\n`);
     if (encoded.byteLength > MAX_LINE_BYTES) throw new CodexAppServerError("CODEX_APP_SERVER_PROTOCOL_ERROR", "Codex App Server request exceeds the bounded input limit");
-    await this.options.clients.jobs.Input({
+    await this.withRpcDeadline(this.options.clients.jobs.Input({
       context: await nextContext(this.options.context, "codex-input"),
       jobId: this.jobId,
       stdin: encoded,
-    });
+    }), "input");
   }
 
   private failPending(error: Error): void {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+  }
+
+  private async withPendingDeadline(id: number, result: Promise<unknown>, method: string): Promise<unknown> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await new Promise<unknown>((resolve, reject) => {
+        timer = setTimeout(() => {
+          this.pending.delete(id);
+          const error = new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", `Codex App Server ${method} response timed out`);
+          this.markUnknown(error.message);
+          reject(error);
+        }, this.rpcTimeoutMs);
+        result.then(resolve, reject);
+      });
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
+  private async withRpcDeadline<T>(result: Promise<T>, operation: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await new Promise<T>((resolve, reject) => {
+        timer = setTimeout(() => reject(new CodexRpcTimeoutError(operation)), this.rpcTimeoutMs);
+        result.then(resolve, reject);
+      });
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
+  private handleStreamFailure(error: unknown): void {
+    this.clearExpiryTimer();
+    this.subscription = null;
+    this.markUnknown(`Codex App Server stream failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  private clearExpiryTimer(): void {
+    if (this.expiryTimer === null) return;
+    clearTimeout(this.expiryTimer);
+    this.expiryTimer = null;
+  }
+
+  private markUnknown(message: string): void {
+    if (this.state === "stopped") return;
+    this.state = "unknown_settlement";
+    void this.persistLease({ job_id: this.jobId, state: "unknown_settlement" }).catch(() => undefined);
+    this.failPending(new CodexAppServerError("CODEX_APP_SERVER_UNKNOWN_SETTLEMENT", message));
+  }
+
+  private async persistLease(lease: CodexAppServerLease): Promise<void> {
+    await this.options.on_lease?.(lease);
   }
 }
 

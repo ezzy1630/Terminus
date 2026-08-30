@@ -23,7 +23,7 @@ const context: RequestContext = {
   policyVersion: "",
 };
 
-function fakeKernel() {
+function fakeKernel(config: { readonly stopFails?: boolean; readonly getState?: string; readonly dropMethods?: readonly string[] } = {}) {
   let subscriber: Subscriber<JobEvent> | null = null;
   let sequence = 0;
   const methods: string[] = [];
@@ -39,10 +39,10 @@ function fakeKernel() {
       subscriber = next;
       return () => { subscriber = null; };
     }),
-    Input: async (input: { stdin: Uint8Array }) => {
-      const message = JSON.parse(new TextDecoder().decode(input.stdin)) as { id?: number; method?: string };
+    Input: async (request: { stdin: Uint8Array }) => {
+      const message = JSON.parse(new TextDecoder().decode(request.stdin)) as { id?: number; method?: string };
       if (message.method !== undefined) methods.push(message.method);
-      if (message.id !== undefined) {
+      if (message.id !== undefined && !config.dropMethods?.includes(message.method ?? "")) {
         const response = message.method === "account/read"
           ? { account: { type: "chatgpt", email: "user@example.com", planType: "plus" }, requiresOpenaiAuth: false }
           : message.method === "model/list"
@@ -58,13 +58,18 @@ function fakeKernel() {
       }
       return { jobId: "job-1", state: "running", exitCode: 0, startedAt: undefined, exitedAt: undefined, stdoutArtifact: undefined, stderrArtifact: undefined };
     },
-    Stop: async () => ({ jobId: "job-1", state: "exited", exitCode: 0, startedAt: undefined, exitedAt: undefined, stdoutArtifact: undefined, stderrArtifact: undefined }),
+    Stop: async () => {
+      if (config.stopFails) throw new Error("stop unavailable");
+      return { jobId: "job-1", state: "exited", exitCode: 0, startedAt: undefined, exitedAt: undefined, stdoutArtifact: undefined, stderrArtifact: undefined };
+    },
+    Get: async () => ({ jobId: "job-1", state: config.getState ?? "running", exitCode: 0, startedAt: undefined, exitedAt: undefined, stdoutArtifact: undefined, stderrArtifact: undefined }),
   };
   return {
     clients: { jobs },
     methods,
     startInput: () => startInput,
     emit: (message: unknown) => subscriber?.next({ sequence: ++sequence, stdout: { cursor: sequence, bytes: new TextEncoder().encode(JSON.stringify(message) + "\n"), redacted: false }, occurredAt: undefined }),
+    failStream: (error: Error = new Error("stream disconnected")) => subscriber?.error(error),
     reconcile: () => subscriber?.next({ sequence: ++sequence, reconciled: { state: "unknown-settlement", explanation: "kernel restart" }, occurredAt: undefined }),
   };
 }
@@ -139,6 +144,62 @@ describe("Codex App Server external lane", () => {
       public_env: {},
     } as never;
     await expect(probeCodexAppServer(options)).resolves.toMatchObject({ available: false, external_harness: "codex", reason: "the Codex App Server could not be started through the kernel" });
+  });
+
+  test("does not relaunch a lease whose launch window was interrupted", async () => {
+    const fake = fakeKernel();
+    const session = new CodexAppServerSession({
+      clients: fake.clients as never,
+      context,
+      workspace_id: "workspace",
+      public_env: {},
+      persisted_lease: { job_id: null, state: "starting" },
+    });
+    await expect(session.open()).rejects.toMatchObject({ code: "CODEX_APP_SERVER_UNKNOWN_SETTLEMENT" });
+    expect(fake.startInput()).toBeNull();
+    expect(session.status()).toMatchObject({ state: "unknown_settlement", job_id: null });
+  });
+
+  test("reattaches a running durable job after control restart without starting a duplicate", async () => {
+    const fake = fakeKernel({ getState: "running" });
+    const session = new CodexAppServerSession({
+      clients: fake.clients as never,
+      context,
+      workspace_id: "workspace",
+      public_env: {},
+      persisted_lease: { job_id: "job-1", state: "running" },
+    });
+    await session.open();
+    expect(fake.startInput()).toBeNull();
+    expect(fake.methods).toEqual(["initialize", "initialized"]);
+    await session.stop();
+  });
+
+  test("retains the job identity when stop settlement is unknown", async () => {
+    const fake = fakeKernel({ stopFails: true });
+    const session = new CodexAppServerSession({ clients: fake.clients as never, context, workspace_id: "workspace", public_env: {} });
+    await session.open();
+    await expect(session.stop()).rejects.toMatchObject({ code: "CODEX_APP_SERVER_UNKNOWN_SETTLEMENT" });
+    expect(session.status()).toMatchObject({ state: "unknown_settlement", job_id: "job-1" });
+  });
+
+  test("retains the job identity when the kernel event stream fails", async () => {
+    const fake = fakeKernel();
+    const session = new CodexAppServerSession({ clients: fake.clients as never, context, workspace_id: "workspace", public_env: {} });
+    await session.open();
+    fake.failStream();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(session.status()).toMatchObject({ state: "unknown_settlement", job_id: "job-1" });
+    await session.stop();
+  });
+
+  test("bounds a response wait and converts it to unknown settlement", async () => {
+    const fake = fakeKernel({ dropMethods: ["account/read"] });
+    const session = new CodexAppServerSession({ clients: fake.clients as never, context, workspace_id: "workspace", public_env: {}, rpc_timeout_ms: 5 });
+    await session.open();
+    await expect(session.account()).rejects.toMatchObject({ code: "CODEX_APP_SERVER_UNKNOWN_SETTLEMENT" });
+    expect(session.status()).toMatchObject({ state: "unknown_settlement", job_id: "job-1" });
+    await session.stop().catch(() => undefined);
   });
 });
 
