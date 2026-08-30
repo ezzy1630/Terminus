@@ -27,6 +27,7 @@ import {
 import type { KernelUdsClients } from "./kernel-uds.js";
 import { classifyLoopError } from "./agent/loop-contracts.js";
 import type { OperationEffectMetadata } from "./agent/turn-budget.js";
+import { MAX_MODEL_VISIBLE_EPISODE_BYTES } from "./agent/model-visible-limits.js";
 import {
   resolveKernelRequestContext,
   type KernelRequestContextSource,
@@ -71,7 +72,7 @@ export const MAX_TOOL_CYCLES_CEILING = 1_000;
  * with room for the envelope, or `persistSettledToolResult` strips the
  * payload to an artifact reference the model has no tool to fetch.
  */
-export const MAX_TOOL_MODEL_RESULT_BYTES = 128 * 1_024;
+export const MAX_TOOL_MODEL_RESULT_BYTES = MAX_MODEL_VISIBLE_EPISODE_BYTES;
 /** Inline byte budget for one `read` page (the model-visible slice). */
 export const READ_PAGE_MAX_BYTES = 64 * 1_024;
 /** Combined stdout+stderr projection budget for one exec/grep/glob result. */

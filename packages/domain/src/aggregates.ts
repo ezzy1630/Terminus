@@ -300,6 +300,7 @@ export interface Episode {
     | "tool_result"
     | "side_effect"
     | "checkpoint"
+    | "summary"
     | "system";
   /** Artifact hash for the episode content. */
   readonly contentRef: ContentHash | null;

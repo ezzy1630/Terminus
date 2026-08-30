@@ -568,6 +568,33 @@ describe("control-plane service boundaries", () => {
     expect(episodes.content.get(hash)).toBe("hello");
   });
 
+  test("ToolEpisodeService accepts a provider-tokenized dynamic history window", async () => {
+    const rows = [1, 2, 3].map((sequence) => ({
+      id: `episode-${sequence}`,
+      turnId: "turn-1",
+      sequence,
+      kind: "user_message",
+      contentArtifact: `artifact://sha256/episode-${sequence}`,
+      toolCallId: null,
+      createdAt: new Date(`2026-01-01T00:00:0${sequence}.000Z`),
+    }));
+    const service = new ToolEpisodeService({
+      store: {
+        listModelVisibleEpisodes: async () => rows,
+        readArtifact: async () => new TextEncoder().encode("12345"),
+      },
+      settleCall: async () => {},
+    });
+
+    const episodes = await service.loadModelVisibleEpisodes("turn-1", {
+      maxTokens: 12,
+      estimateTextTokens: (text) => text.length,
+      messageEnvelopeTokens: 1,
+    });
+
+    expect(episodes.episodes.map((episode) => String(episode.id))).toEqual(["episode-2", "episode-3"]);
+  });
+
   test("VerificationCoordinator owns the VERIFYING and terminal task CAS transitions", async () => {
     type Transaction = { readonly name: "verification" };
     let state = "ACTIVE";
