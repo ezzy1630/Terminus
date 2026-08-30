@@ -20018,11 +20018,12 @@ async function agentLoop(turnId: string): Promise<void> {
             timeoutSeconds: contract.budget.wallClockSeconds,
             signals: {
               changedFiles: latestChangedFiles,
-              projectFiles: [
-                ...contract.allowedScope.readPaths,
-                ...contract.allowedScope.writePaths,
-                ...(latestRepositorySignals.value?.observedConfigPaths ?? []),
-              ],
+              // `projectFiles` means observed repository configuration and
+              // instruction sources. Contract scope is authority, not
+              // evidence that every readable/writable path changed: folding
+              // it into the verification signals made a read-only `.ts`
+              // verifier invent required parse/format/diagnostic checks.
+              projectFiles: latestRepositorySignals.value?.observedConfigPaths ?? [],
               instructionHashes: latestInstructionHashes,
               failingTests: latestFailureSelectors,
               diagnostics: latestDiagnostics,
