@@ -74,6 +74,13 @@ const RETIRED_DESKTOP_MARKERS = [
   "pty:resize",
   "pty:kill",
 ] as const;
+const RETIRED_OPENCODE_ARTIFACT_MARKERS = [
+  "@terminus/open-code-bridge",
+  "packages/open-code-bridge",
+  "open_code_bridge",
+  "open.code.bridge",
+  "upstream/opencode.lock.json",
+] as const;
 const FORBIDDEN_ENTITLEMENTS = [
   "com.apple.security.cs.allow-dyld-environment-variables",
   "com.apple.security.cs.disable-library-validation",
@@ -230,11 +237,17 @@ function checkBuiltDesktopArtifacts(): void {
       for (const marker of RETIRED_DESKTOP_MARKERS) {
         if (text.includes(marker)) fail(`built desktop artifact retains retired bridge marker ${marker}: ${relativePath}`);
       }
-      // Applied SQL migrations are immutable compatibility history. A legacy
-      // data value is not an executable dependency; imports, manifests, and
-      // all other packaged runtime files remain fail-closed below.
-      if (FORBIDDEN_SPECIFIER.test(text) && !PACKAGED_HISTORICAL_MIGRATION.test(relativePath)) {
-        fail(`built desktop artifact retains retired OpenCode runtime marker: ${relativePath}`);
+      // Provider-account UI and data contracts may name an OpenCode credential
+      // source without depending on its runtime. Built artifacts therefore
+      // reject the retired bridge itself, while source imports and dependency
+      // metadata remain guarded by FORBIDDEN_SPECIFIER above. Applied SQL
+      // migrations are immutable compatibility history.
+      if (!PACKAGED_HISTORICAL_MIGRATION.test(relativePath)) {
+        for (const marker of RETIRED_OPENCODE_ARTIFACT_MARKERS) {
+          if (text.includes(marker)) {
+            fail(`built desktop artifact retains retired OpenCode bridge marker ${marker}: ${relativePath}`);
+          }
+        }
       }
     }
   }
