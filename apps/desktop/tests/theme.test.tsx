@@ -66,7 +66,7 @@ beforeEach(resetStore);
 describe("CSS-first theme", () => {
   test("defines complete default tokens without renderer JavaScript", () => {
     expect(themeCss).toContain(":root {");
-    expect(themeCss).toContain("--bg-canvas: #0d0d0f");
+    expect(themeCss).toContain("--bg-canvas: #151516");
     expect(themeCss).toContain("--text-primary: #ededee");
     expect(themeCss).toContain("--font-size-base: 13px");
     expect(themeCss).toContain("--duration-normal: 180ms");
@@ -92,10 +92,10 @@ describe("CSS-first theme", () => {
     }
   });
 
-  test("keeps code text legible on the dark terminal surface in both themes", () => {
-    expect(themeCss).toContain("--bg-terminal: #1b1b19");
+  test("keeps code text legible on theme-native terminal surfaces", () => {
+    expect(themeCss).toContain("--bg-terminal: #191918");
     expect(themeCss).toContain("--text-code: #eaeaec");
-    expect(themeCss.match(/--text-code: #ececea/g)).toHaveLength(2);
+    expect(themeCss.match(/--text-code: #24272d/g)).toHaveLength(2);
   });
 
   test("locks the type, control, radius, and motion scales", () => {
@@ -144,12 +144,6 @@ describe("CSS-first theme", () => {
   });
 
   test("does not keep the renderer repainting continuous CSS animation", () => {
-    // Narrowed from a blanket ban. A spinner that does not spin is not a
-    // bounded transition, it is a broken affordance — .spinner set
-    // border-top-color with no keyframes and rendered as a frozen ring, and
-    // .skeleton carried overflow:hidden for a sweep that had no source.
-    // Continuous animation is allowed only for marks that report ongoing
-    // indeterminate work, and every one stays under the Reduce Motion gate.
     const continuous = new Set(
       [...globalsCss.matchAll(/animation:\s*([a-z-]+)[^;]*\binfinite\b/g)].map((match) => match[1]),
     );

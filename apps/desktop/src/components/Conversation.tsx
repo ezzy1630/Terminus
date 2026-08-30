@@ -1499,7 +1499,6 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
   const storeEvents = useSelectedTaskEvents();
   const events = eventsProp ?? storeEvents;
   const streamState = useTerminusStore((state) => state.streamState);
-  const healthStatus = useTerminusStore((state) => state.healthStatus);
   const lastEventId = events[events.length - 1]?.id;
   const turnInputs = useTurnInputs(events, task?.id ?? null);
 
@@ -1816,19 +1815,6 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
           </div>
         ) : null}
 
-        {/* Empty state.
-
-            Suppressed while the control plane is offline. Both states were
-            rendering at once, and "reconnecting, will resume from the last
-            event" is not true when the service itself is down — the offline
-            banner is the authority in that case. */}
-        {streamState === "reconnecting" && healthStatus !== "offline" ? (
-          <ErrorState
-            {...errorPreset("reconnecting")}
-            compact
-            className="mb-4 rounded-md border border-subtle bg-elevated"
-          />
-        ) : null}
         {/* Empty conversation.
 
             One quiet centred line, and nothing else. A task that simply has not

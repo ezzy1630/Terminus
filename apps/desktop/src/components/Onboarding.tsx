@@ -492,7 +492,7 @@ function OnboardingImpl({
         if (!nextOpen) skip();
       }}
       accessibleTitle={projectOnly ? "Open project" : "Open your first project"}
-      overlayClassName={projectOnly ? "bg-black/40" : "bg-canvas"}
+      overlayClassName={projectOnly ? "bg-black/30" : "bg-canvas"}
       className={cn(
         projectOnly
           ? "dialog-panel fixed left-1/2 top-1/2 flex w-[min(480px,calc(100%-32px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-default bg-elevated shadow-lg"

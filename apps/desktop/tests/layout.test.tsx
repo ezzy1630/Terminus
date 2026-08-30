@@ -3,12 +3,12 @@
  *
  * Coverage:
  *   1. Layout renders sidebar, main, and inspector.
- *   2. Narrow technical surfaces overlay optional navigation and details.
+ *   2. Narrow technical surfaces never overlay primary controls.
  *   3. Both dock separators support keyboard resizing.
  *   4. Review mode responds to its measured container width.
  *
  * The native window enforces a 1000px minimum width. The renderer keeps the
- * conversation usable by overlaying optional panes at narrow widths.
+ * conversation usable by keeping navigation docked and auto-hiding details.
  */
 import { describe, expect, test, beforeEach, afterEach } from "vitest";
 import { act, render, screen, fireEvent, cleanup } from "@testing-library/react";
@@ -50,12 +50,6 @@ function renderLayout(): {
     <Layout sidebar={sidebar} main={main} inspector={inspector} />,
   );
   return { unmount };
-}
-
-function windowDragWidth(): string {
-  const shell = document.querySelector(".app-shell");
-  if (!(shell instanceof HTMLElement)) throw new Error("layout shell not found");
-  return shell.style.getPropertyValue("--window-drag-width");
 }
 
 // ────────────────────────── Setup / teardown ────────────────────────────────
@@ -224,7 +218,7 @@ describe("Layout — sidebar responsive collapse", () => {
     );
     expect(screen.queryByTestId("hidden-sidebar")).toBeNull();
     expect(screen.getByTestId("visible-main")).toBeInTheDocument();
-    expect(windowDragWidth()).toBe("124px");
+    expect(document.querySelector(".window-drag-zone")).toBeInTheDocument();
   });
 
   test("sidebar remains a resizable dock during ordinary narrow use", () => {
@@ -234,10 +228,10 @@ describe("Layout — sidebar responsive collapse", () => {
     expect(aside).not.toBeNull();
     expect(aside!.getAttribute("style") ?? "").toContain("width: 276px");
     expect(screen.getByRole("separator", { name: "Resize sidebar" })).toHaveAttribute("aria-valuenow", "276");
-    expect(windowDragWidth()).toBe("276px");
+    expect(document.querySelector(".window-drag-zone")).toBeInTheDocument();
   });
 
-  test("sidebar overlays instead of compressing a narrow changes surface", () => {
+  test("sidebar remains docked on a narrow changes surface", () => {
     setViewport(1000, 900);
     render(
       <Layout
@@ -249,9 +243,8 @@ describe("Layout — sidebar responsive collapse", () => {
     );
     const aside = document.querySelector("aside");
     expect(aside).not.toBeNull();
-    expect(aside).toHaveClass("absolute");
-    expect(screen.queryByRole("separator", { name: "Resize sidebar" })).not.toBeInTheDocument();
-    expect(windowDragWidth()).toBe("276px");
+    expect(aside).not.toHaveClass("absolute");
+    expect(screen.getByRole("separator", { name: "Resize sidebar" })).toBeInTheDocument();
     expect(screen.getByTestId("main-content")).toBeInTheDocument();
   });
 });
@@ -276,14 +269,13 @@ describe("Layout — docked inspector", () => {
     expect(screen.getByTestId("inspector-dock")).toHaveAttribute("data-layout", "docked");
   });
 
-  test("overlays the inspector below 1200px without compressing the main surface", () => {
+  test("auto-hides the inspector when it would cover the main surface", () => {
     window.localStorage.setItem("terminus-desktop.sidebar-width.v5", "360");
     window.localStorage.setItem("terminus-desktop.inspector-width.v3", "420");
     setViewport(1000, 900);
     renderLayout();
 
-    expect(screen.getByTestId("inspector-dock")).toHaveAttribute("data-layout", "overlay");
-    expect(screen.getByTestId("inspector-dock")).toHaveStyle({ width: "360px" });
+    expect(screen.queryByTestId("inspector-dock")).not.toBeInTheDocument();
     expect(screen.queryByRole("separator", { name: "Resize inspector" })).not.toBeInTheDocument();
     expect(screen.getByTestId("main-content")).toBeInTheDocument();
   });

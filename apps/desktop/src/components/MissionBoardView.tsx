@@ -80,7 +80,6 @@ interface MissionBoardViewProps {
   onInspectTask: (task: TaskV2Snapshot) => void;
 }
 
-type StreamState = "connecting" | "live" | "reconnecting";
 
 const BOARD_CURSOR_KEY = "terminus-desktop.v2-board-cursor.v1";
 const STREAM_REFRESH_DELAY_MS = 120;
@@ -680,7 +679,6 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
   >({});
   const [taskPendingCancel, setTaskPendingCancel] = useState<TaskV2Snapshot | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [streamState, setStreamState] = useState<StreamState>("connecting");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
   const scrollRootRef = useRef<HTMLDivElement | null>(null);
@@ -753,7 +751,6 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
       stream.addEventListener("open", () => {
         if (generation !== generationRef.current) return;
         reconnectAttempts = 0;
-        setStreamState("live");
       });
       stream.addEventListener("message", (event) => {
         if (generation !== generationRef.current) return;
@@ -764,7 +761,6 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
       });
       stream.addEventListener("error", () => {
         if (generation !== generationRef.current || reconnectTimerRef.current !== null) return;
-        setStreamState("reconnecting");
         stream.close();
         reconnectAttempts += 1;
         const delay = Math.min(STREAM_RECONNECT_MAX_MS, STREAM_RECONNECT_BASE_MS * 2 ** Math.min(reconnectAttempts - 1, 4));
@@ -1142,7 +1138,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
   return (
     <section className="flex h-full min-w-0 flex-col overflow-hidden bg-canvas text-primary" aria-labelledby="mission-board-title">
       {/* Top Header: Unified Breadcrumbs, Title, Filters & Primary Controls */}
-      <header className="ui-view-header justify-between">
+      <header className="ui-view-header titlebar-drag justify-between">
         {/* Left: History Navigation, Title & Filter Pills */}
         <div className="flex items-center gap-2.5 min-w-0 flex-1 overflow-x-auto py-1">
           {/* A green dot that is green whenever nothing is wrong is
@@ -1152,15 +1148,10 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
             <h1 id="mission-board-title" className="ui-page-title text-primary">
               All Tasks
             </h1>
-            {streamState !== "live" ? (
-              <span className="ui-meta text-warning" role="status">
-                {streamState === "connecting" ? "Connecting" : "Reconnecting"}
-              </span>
-            ) : null}
           </div>
 
           {/* Filter Pills */}
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="titlebar-no-drag flex items-center gap-1.5 shrink-0">
             {/* Status Filter Chip */}
             <Menu
               label="Status filter"
@@ -1248,7 +1239,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
         </div>
 
         {/* Right: Search, [ Board | List ] View Toggle, Display, Attention, Refresh */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="titlebar-no-drag flex items-center gap-2 shrink-0">
           <label className="relative w-44 sm:w-52">
             <Search size={12} aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-tertiary" />
             <span className="sr-only">Search all tasks</span>

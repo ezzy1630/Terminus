@@ -845,12 +845,12 @@ describe("assistant reply surface", () => {
     expect(screen.getByLabelText("Response in progress")).toBeInTheDocument();
   });
 
-  test("names the model the runtime reported, and says nothing when it did not", () => {
+  test("keeps provider slugs out of transcript chrome", () => {
     const { rerender } = render(<Message message={reply("Done.", { model: "ox-alpha" })} />);
-    expect(screen.getByTestId("message-model")).toHaveTextContent("ox-alpha");
+    expect(screen.queryByText("ox-alpha")).not.toBeInTheDocument();
 
     rerender(<Message message={reply("Done.")} />);
-    expect(screen.queryByTestId("message-model")).not.toBeInTheDocument();
+    expect(screen.queryByText("ox-alpha")).not.toBeInTheDocument();
   });
 });
 

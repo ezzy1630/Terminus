@@ -176,10 +176,10 @@ describe("the access chip", () => {
 
     await user.click(chip());
     const menu = await screen.findByRole("menu");
-    const items = within(menu).getAllByRole("menuitem");
+    const items = within(menu).getAllByRole("menuitemradio");
     expect(items).toHaveLength(3);
     expect(items.map((item) => item.textContent)).toEqual([
-      "✓Full accessEdits files and runs commands without asking",
+      "Full accessEdits files and runs commands without asking",
       "AutoWorks in the workspace freely; asks before network access",
       "Ask for approvalAsks before every edit, command, or fetch",
     ]);
@@ -191,7 +191,7 @@ describe("the access chip", () => {
     renderAccessComposer();
 
     await user.click(chip());
-    await user.click(await screen.findByRole("menuitem", { name: /^Ask for approval/ }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /^Ask for approval/ }));
 
     await waitFor(() => expect(api.updateSession).toHaveBeenCalledWith(
       "session-1",
@@ -209,7 +209,7 @@ describe("the access chip", () => {
     renderAccessComposer();
 
     await user.click(chip());
-    await user.click(await screen.findByRole("menuitem", { name: /^Auto/ }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /^Auto/ }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("session is read-only");
     // Never left claiming a level the server did not accept.

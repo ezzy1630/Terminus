@@ -115,7 +115,7 @@ export function buildMenuTemplate(options: MenuTemplateOptions): MenuItemConstru
     {
       label: "File",
       submenu: [
-        command("New task", "new-task", "CommandOrControl+N"),
+        command("New thread", "new-task", "CommandOrControl+N"),
         command("Open project…", "open-project", "CommandOrControl+O"),
         openRecentItem(options),
         { type: "separator" },
@@ -143,6 +143,10 @@ export function buildMenuTemplate(options: MenuTemplateOptions): MenuItemConstru
         command("Toggle inspector", "toggle-inspector", "CommandOrControl+RightBracket"),
         command("Toggle sidebar", "toggle-sidebar", "CommandOrControl+Backslash"),
         { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
         // Available in packaged builds too: a renderer that died leaves a
         // blank window, and reloading it is the only recovery that does not
         // involve quitting the application.
@@ -151,7 +155,7 @@ export function buildMenuTemplate(options: MenuTemplateOptions): MenuItemConstru
       ],
     },
     {
-      label: "Task",
+      label: "Run",
       submenu: [
         command("Stop run", "stop-run", "CommandOrControl+."),
       ],

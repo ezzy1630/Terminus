@@ -28,7 +28,36 @@ const MOCK_PROMPT_HASH = "f0ad0acf468ae9f15b174f34ac6f995585c93fbd168a48a7ed3d46
 const MOCK_LIVE_PROMPT = "Add an activity pulse to the sidebar session cards so a running task is visible without opening it.";
 const MOCK_LIVE_PROMPT_HASH = "206f18355d70ee49af5a7004f013e04d14017342908da34d71e70dd595190d2f";
 
+/** Keep the visual-audit route connected without weakening real transport UI. */
+function installMockEventStream(): void {
+  const mockWindow = window as Window & { __terminusMockFetch?: typeof fetch };
+  if (mockWindow.__terminusMockFetch) return;
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  mockWindow.__terminusMockFetch = nativeFetch;
+  globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const rawUrl = input instanceof Request ? input.url : String(input);
+    const url = new URL(rawUrl, window.location.origin);
+    if (url.pathname !== "/v1/events" && url.pathname !== "/v2/events") return nativeFetch(input, init);
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(":heartbeat\n\n"));
+        const signal = init?.signal;
+        if (!signal) return;
+        const close = (): void => controller.close();
+        if (signal.aborted) close();
+        else signal.addEventListener("abort", close, { once: true });
+      },
+    });
+    return Promise.resolve(new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }));
+  };
+}
+
 export function setupDevMock(): void {
+  installMockEventStream();
   seedTurnInputCache(MOCK_PROMPT_HASH, MOCK_PROMPT);
   seedTurnInputCache(MOCK_LIVE_PROMPT_HASH, MOCK_LIVE_PROMPT);
   try {

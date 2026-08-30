@@ -2,7 +2,7 @@ import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { createContext, useContext, type ReactElement, type ReactNode, useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
 
-const HOVER_DELAY_MS = 450;
+const HOVER_DELAY_MS = 400;
 /** How long after a tip closes its neighbours still open instantly. */
 const SKIP_DELAY_MS = 300;
 

@@ -52,9 +52,10 @@ export function boardLifecycle(
   domainTask: Task | undefined,
   activity: TurnActivity,
 ): TaskLifecycle {
-  return domainTask === undefined
-    ? lifecycleFromV2Status(task.status)
-    : displayLifecycleWith(domainTask, activity);
+  if (domainTask !== undefined) return displayLifecycleWith(domainTask, activity);
+  // V2 RUNNING means the durable task is active, not that a turn is currently
+  // executing. Without the v1 turn record, idle is the only honest projection.
+  return task.status === "RUNNING" ? "idle" : lifecycleFromV2Status(task.status);
 }
 
 export function boardColumnForTaskLifecycle(lifecycle: TaskLifecycle): MissionBoardPlacement {

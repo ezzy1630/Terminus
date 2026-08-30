@@ -1,4 +1,9 @@
-import { format, formatDistanceToNowStrict } from "date-fns";
+import { formatDistanceToNowStrict } from "date-fns";
+
+const clockFormatter = new Intl.DateTimeFormat(undefined, {
+  hour: "numeric",
+  minute: "2-digit",
+});
 
 function finiteDate(value: string): Date | null {
   const date = new Date(value);
@@ -12,7 +17,7 @@ export function relativeTimestamp(value: string): string {
 
 export function clockTimestamp(value: string): string {
   const date = finiteDate(value);
-  return date ? format(date, "HH:mm:ss") : "time unavailable";
+  return date ? clockFormatter.format(date) : "time unavailable";
 }
 
 /**

@@ -807,6 +807,7 @@ function ReviewPaneImpl({
             <div className="min-h-0 flex-1">
               <DiffViewer
                 key={openArtifact?.artifact.hash ?? activeEventSource?.id ?? "event-diffs"}
+                autoFocus
                 files={viewerFiles}
                 initialSelectedPath={viewerFiles[0]?.displayPath ?? viewerFiles[0]?.newPath}
                 comments={visibleComments}

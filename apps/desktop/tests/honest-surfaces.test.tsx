@@ -113,13 +113,11 @@ describe("the inspector's environment section", () => {
     const user = userEvent.setup();
     render(<Inspector />);
 
-    await user.click(screen.getByRole("tab", { name: "Environment" }));
     expect(await screen.findByText("Secure local default")).toBeInTheDocument();
     expect(screen.queryByText("secure-local-default")).not.toBeInTheDocument();
     expect(screen.queryByText("Local UDS")).not.toBeInTheDocument();
     expect(screen.queryByText("Full access")).not.toBeInTheDocument();
     // Raw protocol values stay available, but only in Advanced details.
-    await user.click(screen.getByRole("tab", { name: "Evidence" }));
     await user.click(screen.getByRole("button", { name: /Advanced details/ }));
     expect(screen.getByText("secure-local-default")).toBeInTheDocument();
     expect(screen.getByText("v3")).toBeInTheDocument();
@@ -133,7 +131,6 @@ describe("the inspector's environment section", () => {
     const user = userEvent.setup();
     render(<Inspector />);
 
-    await user.click(screen.getByRole("tab", { name: "Evidence" }));
     await user.click(screen.getByRole("button", { name: /Advanced details/ }));
     expect(screen.getByText("critical")).toBeInTheDocument();
     expect(screen.queryByText("Standard")).not.toBeInTheDocument();
@@ -144,7 +141,6 @@ describe("the inspector's environment section", () => {
     const user = userEvent.setup();
     render(<Inspector />);
 
-    await user.click(screen.getByRole("tab", { name: "Environment" }));
     expect(screen.queryByText("Permission profile")).not.toBeInTheDocument();
     expect(screen.queryByText("Full access")).not.toBeInTheDocument();
   });

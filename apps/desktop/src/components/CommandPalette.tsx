@@ -315,7 +315,7 @@ function CommandPaletteImpl({
       }}
       accessibleTitle="Command palette"
       tabIndex={-1}
-      overlayClassName="bg-black/35"
+      overlayClassName="bg-black/30"
       className={cn(
         // `dialog-panel` for the same rise-and-settle every other sheet gets.
         // The palette used to snap into existence at full size while its

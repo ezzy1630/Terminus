@@ -1,5 +1,6 @@
 import * as ContextMenuPrimitive from "@radix-ui/react-context-menu";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
+import { Check } from "lucide-react";
 import { Fragment } from "react";
 import type { ReactElement, ReactNode } from "react";
 
@@ -19,11 +20,11 @@ export interface MenuItem {
   keepOpen?: boolean;
 }
 
-function ItemContent({ item }: { item: MenuItem }): JSX.Element {
+function ItemContent({ item, indicator }: { item: MenuItem; indicator?: ReactNode }): JSX.Element {
   return (
     <>
       {item.selected === undefined ? null : (
-        <span className="mr-1.5 w-3 shrink-0 text-center text-xs" aria-hidden>{item.selected ? "✓" : ""}</span>
+        <span className="mr-1.5 flex w-3 shrink-0 items-center justify-center" aria-hidden>{indicator}</span>
       )}
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="truncate">{item.label}</span>
@@ -56,21 +57,40 @@ export function Menu({
       <DropdownMenuPrimitive.Trigger asChild aria-label={label}>{trigger}</DropdownMenuPrimitive.Trigger>
       <DropdownMenuPrimitive.Portal>
         <DropdownMenuPrimitive.Content sideOffset={5} align={align} side={side} className={contentClass}>
-          {items.map((item) => (
-            <Fragment key={item.id}>
-              {item.separatorBefore ? <DropdownMenuPrimitive.Separator className={separatorClass} /> : null}
-              <DropdownMenuPrimitive.Item
-                disabled={item.disabled}
-                onSelect={(event) => {
-                  if (item.keepOpen) event.preventDefault();
-                  item.onSelect?.();
-                }}
-                className={`${itemClass} ${item.danger ? "text-error" : ""}`}
-              >
-                <ItemContent item={item} />
-              </DropdownMenuPrimitive.Item>
-            </Fragment>
-          ))}
+          <DropdownMenuPrimitive.RadioGroup value={items.find((item) => item.selected)?.id ?? ""}>
+            {items.map((item) => (
+              <Fragment key={item.id}>
+                {item.separatorBefore ? <DropdownMenuPrimitive.Separator className={separatorClass} /> : null}
+                {item.selected === undefined ? (
+                  <DropdownMenuPrimitive.Item
+                    disabled={item.disabled}
+                    onSelect={(event) => {
+                      if (item.keepOpen) event.preventDefault();
+                      item.onSelect?.();
+                    }}
+                    className={`${itemClass} ${item.danger ? "text-error" : ""}`}
+                  >
+                    <ItemContent item={item} />
+                  </DropdownMenuPrimitive.Item>
+                ) : (
+                  <DropdownMenuPrimitive.RadioItem
+                    value={item.id}
+                    disabled={item.disabled}
+                    onSelect={(event) => {
+                      if (item.keepOpen) event.preventDefault();
+                      item.onSelect?.();
+                    }}
+                    className={`${itemClass} ${item.danger ? "text-error" : ""}`}
+                  >
+                    <ItemContent
+                      item={item}
+                      indicator={<DropdownMenuPrimitive.ItemIndicator><Check size={12} strokeWidth={2} /></DropdownMenuPrimitive.ItemIndicator>}
+                    />
+                  </DropdownMenuPrimitive.RadioItem>
+                )}
+              </Fragment>
+            ))}
+          </DropdownMenuPrimitive.RadioGroup>
         </DropdownMenuPrimitive.Content>
       </DropdownMenuPrimitive.Portal>
     </DropdownMenuPrimitive.Root>
@@ -83,18 +103,34 @@ export function ContextMenu({ children, items }: { children: ReactNode; items: r
       <ContextMenuPrimitive.Trigger asChild>{children}</ContextMenuPrimitive.Trigger>
       <ContextMenuPrimitive.Portal>
         <ContextMenuPrimitive.Content className={contentClass}>
-          {items.map((item) => (
-            <Fragment key={item.id}>
-              {item.separatorBefore ? <ContextMenuPrimitive.Separator className={separatorClass} /> : null}
-              <ContextMenuPrimitive.Item
-                disabled={item.disabled}
-                onSelect={item.onSelect}
-                className={`${itemClass} ${item.danger ? "text-error" : ""}`}
-              >
-                <ItemContent item={item} />
-              </ContextMenuPrimitive.Item>
-            </Fragment>
-          ))}
+          <ContextMenuPrimitive.RadioGroup value={items.find((item) => item.selected)?.id ?? ""}>
+            {items.map((item) => (
+              <Fragment key={item.id}>
+                {item.separatorBefore ? <ContextMenuPrimitive.Separator className={separatorClass} /> : null}
+                {item.selected === undefined ? (
+                  <ContextMenuPrimitive.Item
+                    disabled={item.disabled}
+                    onSelect={item.onSelect}
+                    className={`${itemClass} ${item.danger ? "text-error" : ""}`}
+                  >
+                    <ItemContent item={item} />
+                  </ContextMenuPrimitive.Item>
+                ) : (
+                  <ContextMenuPrimitive.RadioItem
+                    value={item.id}
+                    disabled={item.disabled}
+                    onSelect={item.onSelect}
+                    className={`${itemClass} ${item.danger ? "text-error" : ""}`}
+                  >
+                    <ItemContent
+                      item={item}
+                      indicator={<ContextMenuPrimitive.ItemIndicator><Check size={12} strokeWidth={2} /></ContextMenuPrimitive.ItemIndicator>}
+                    />
+                  </ContextMenuPrimitive.RadioItem>
+                )}
+              </Fragment>
+            ))}
+          </ContextMenuPrimitive.RadioGroup>
         </ContextMenuPrimitive.Content>
       </ContextMenuPrimitive.Portal>
     </ContextMenuPrimitive.Root>

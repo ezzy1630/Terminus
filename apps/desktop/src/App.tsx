@@ -21,7 +21,7 @@
  * task inspector and operator cockpit are split behind React.lazy boundaries.
  */
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { MessageCircle, PanelLeft } from "lucide-react";
+import { ChevronLeft, ChevronRight, MessageCircle, PanelLeft } from "lucide-react";
 import { Layout } from "./components/Layout";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { projectUriToPath } from "./lib/projects";
@@ -32,7 +32,7 @@ import { SHOW_ACTIVITY_EVENT, Sidebar } from "./components/Sidebar";
 import { FOCUS_QUEUE_EVENT } from "./components/TaskQueue";
 import { Composer } from "./components/Composer";
 import { InterventionTray } from "./components/InterventionTray";
-import { ThreadHeader } from "./components/ThreadHeader";
+import { ThreadHeader, ThreadRunBar } from "./components/ThreadHeader";
 import { NewTaskScreen } from "./components/NewTaskScreen";
 import { MissionBoardView } from "./components/MissionBoardView";
 import { EmptyState } from "./ui/EmptyState";
@@ -829,6 +829,7 @@ export function App(): JSX.Element {
 
   const composerDock = selectedTask ? (
     <div className="composer-dock shrink-0 pb-3 pt-2">
+      {taskPresentation ? <ThreadRunBar presentation={taskPresentation} /> : null}
       <div className="content-column">
         <InterventionTray
           taskId={selectedTask.id}
@@ -853,7 +854,6 @@ export function App(): JSX.Element {
         repository={selectedSession?.title ?? "Terminus"}
         onOpenChanges={() => setChangesOpen(true)}
         onOpenDetails={toggleInspector}
-        onStop={() => { void stopTask(selectedTask.id); }}
       />
       <div className="min-h-0 flex-1">
         {changesOpen ? (
@@ -884,7 +884,7 @@ export function App(): JSX.Element {
     <>
       <Layout
         banner={<ConnectionBanner />}
-        sidebarVisible={sidebarVisible}
+        sidebarVisible={sidebarVisible && activeDestination !== "settings"}
         sidebarOverlay={changesOpen}
         inspectorVisible={SURFACES_WITH_INSPECTOR.has(activeDestination) && inspectorVisible && contextTaskId !== null && !changesOpen}
         backgroundInert={overlay !== null}
@@ -933,14 +933,40 @@ export function App(): JSX.Element {
             ) : activeThreadSurface}
           </Suspense>
         }
-        windowControl={sidebarVisible ? undefined : (
-          <IconButton
-            onClick={() => setSidebarVisible(true)}
-            label="Show sidebar"
-            icon={<PanelLeft size={15} strokeWidth={1.65} />}
-            data-tooltip="Show sidebar"
-            className="icon-button h-7 w-7 rounded-md text-secondary hover:bg-hover hover:text-primary"
-          />
+        windowControl={(
+          <div className="flex items-center gap-0.5">
+            {!sidebarVisible || activeDestination === "settings" ? (
+              <IconButton
+                onClick={() => activeDestination === "settings" ? navHistory.goBack() : setSidebarVisible(true)}
+                label={activeDestination === "settings" ? "Back to app" : "Show sidebar"}
+                icon={activeDestination === "settings"
+                  ? <ChevronLeft size={15} strokeWidth={1.65} />
+                  : <PanelLeft size={15} strokeWidth={1.65} />}
+                data-tooltip={activeDestination === "settings" ? "Back to app" : "Show sidebar"}
+                className="icon-button h-7 w-7 rounded-md text-secondary hover:bg-hover hover:text-primary"
+              />
+            ) : null}
+            {activeDestination !== "settings" ? (
+              <>
+                <IconButton
+                  onClick={navHistory.goBack}
+                  disabled={!navHistory.canGoBack}
+                  label="Back"
+                  icon={<ChevronLeft size={15} strokeWidth={1.65} />}
+                  data-tooltip="Back"
+                  className="icon-button h-7 w-7 rounded-md text-secondary hover:bg-hover hover:text-primary"
+                />
+                <IconButton
+                  onClick={navHistory.goForward}
+                  disabled={!navHistory.canGoForward}
+                  label="Forward"
+                  icon={<ChevronRight size={15} strokeWidth={1.65} />}
+                  data-tooltip="Forward"
+                  className="icon-button h-7 w-7 rounded-md text-secondary hover:bg-hover hover:text-primary"
+                />
+              </>
+            ) : null}
+          </div>
         )}
       />
       {mountedOverlay === "palette" ? (

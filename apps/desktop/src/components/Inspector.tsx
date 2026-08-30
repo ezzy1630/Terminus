@@ -84,8 +84,6 @@ interface InspectorRowProps {
   onClick?: () => void;
   /** Overrides the accessible name when the visible label is not enough. */
   ariaLabel?: string;
-  /** Native tooltip for values the column is too narrow to show in full. */
-  title?: string;
 }
 
 /**
@@ -93,7 +91,7 @@ interface InspectorRowProps {
  * panel does not advertise affordances it cannot honour — principle 4 of the
  * design spec is that every control does something real.
  */
-function InspectorRow({ icon, label, value, onClick, ariaLabel, title }: InspectorRowProps): JSX.Element {
+function InspectorRow({ icon, label, value, onClick, ariaLabel }: InspectorRowProps): JSX.Element {
   const body = (
     <>
       {icon ? <span className="shrink-0 text-secondary">{icon}</span> : null}
@@ -104,14 +102,13 @@ function InspectorRow({ icon, label, value, onClick, ariaLabel, title }: Inspect
     </>
   );
   if (!onClick) {
-    return <div className={ROW} title={title}>{body}</div>;
+    return <div className={ROW}>{body}</div>;
   }
   return (
     <Button
       variant="bare"
       onClick={onClick}
       aria-label={ariaLabel ?? label}
-      title={title}
       className={cn(ROW, ROW_INTERACTIVE)}
     >
       {body}
@@ -427,7 +424,7 @@ const SandboxSection = memo(function SandboxSection({ profileId }: { profileId: 
     );
   }
   if (!resource || resource.profileId !== profileId || resource.status === "loading") {
-    return <InspectorRow icon={<ShieldCheck size={ICON_SIZE} />} label="Sandbox" value="Checking…" title={profileId} />;
+    return <InspectorRow icon={<ShieldCheck size={ICON_SIZE} />} label="Sandbox" value="Checking…" />;
   }
   if (resource.status === "error") {
     return (
@@ -483,11 +480,11 @@ const SandboxSection = memo(function SandboxSection({ profileId }: { profileId: 
         <div className="flex flex-col gap-1.5 border-t border-subtle pt-2 text-tertiary">
           <div className="flex items-center justify-between gap-2">
             <span>Backend</span>
-            <span className="truncate font-mono text-secondary" title={report.backend_id}>{report.backend_id}</span>
+            <span className="truncate font-mono text-secondary">{report.backend_id}</span>
           </div>
           <div className="flex items-center justify-between gap-2">
             <span>Profile</span>
-            <span className="truncate text-secondary" title={profileId}>{accessLabel(profileId)}</span>
+            <span className="truncate text-secondary">{accessLabel(profileId)}</span>
           </div>
           {report.degraded.length > 0 ? <ReportList label="Degraded controls" entries={report.degraded} /> : null}
           {report.unsupported.length > 0 ? <ReportList label="Unsupported controls" entries={report.unsupported} /> : null}
@@ -504,7 +501,7 @@ function ReportList({ label, entries }: { label: string; entries: string[] }): J
       <div className="mb-1 font-medium text-secondary">{label}</div>
       <ul className="flex flex-col gap-0.5">
         {entries.map((entry) => (
-          <li key={entry} className="truncate font-mono text-secondary" title={entry}>
+          <li key={entry} className="truncate font-mono text-secondary">
             {entry.replaceAll("_", " ")}
           </li>
         ))}
@@ -520,8 +517,6 @@ interface InspectorProps {
   /** Opens the review split when the task has patch evidence. */
   onShowChanges?: () => void;
 }
-
-type InspectorTab = "overview" | "environment" | "evidence";
 
 /**
  * Plain-language names for the event stream's lifecycle frames. Anything not
@@ -619,7 +614,6 @@ const ArtifactsSection = memo(function ArtifactsSection({ taskId }: { taskId: st
               icon={<Boxes size={ICON_SIZE} />}
               label={artifact.purpose}
               value={artifact.size_bytes !== null ? formatBytes(artifact.size_bytes) : undefined}
-              title={artifact.hash}
             />
           </li>
         ))}
@@ -673,7 +667,6 @@ function InspectorImpl({
   );
   const eventDerivedStateComplete = eventHistory === null;
   const [copied, setCopied] = useState<"path" | "id" | null>(null);
-  const [activeTab, setActiveTab] = useState<InspectorTab>("overview");
 
   /*
    * One pass over the event tail, not four.
@@ -736,6 +729,14 @@ function InspectorImpl({
 
   const blockedByProvider = task.status === "BLOCKED"
     && task.terminal_reason?.reason === "provider_transport_unavailable";
+  const hasEnvironment = Boolean(
+    workspacePath
+      || session?.default_model
+      || session?.default_reasoning_effort
+      || permissionProfileId
+      || task.budget_ledger,
+  );
+
   return (
     <div className={cn("flex h-full flex-col overflow-y-auto pb-3", className)}>
       {eventHistory ? (
@@ -750,95 +751,54 @@ function InspectorImpl({
         </p>
       ) : null}
 
-      <nav className="flex h-9 shrink-0 items-center gap-1 border-b border-subtle px-2" role="tablist" aria-label="Task inspector views">
-        {([
-          ["overview", "Overview", "Status, changes, verification, and attention"],
-          ["environment", "Environment", "Workspace, model, access, and budget"],
-          ["evidence", "Evidence", "Verification, artifacts, and advanced task details"],
-        ] as const).map(([value, label, description]) => (
-          <Button
-            key={value}
-            variant="bare"
-            role="tab"
-            aria-selected={activeTab === value}
-            data-tooltip={description}
-            onClick={() => setActiveTab(value)}
-            className={cn(
-              "ui-meta h-7 rounded-md px-2 text-secondary hover:bg-hover hover:text-primary",
-              activeTab === value && "bg-selected font-medium text-primary",
-            )}
-          >
-            {label}
-          </Button>
-        ))}
-      </nav>
+      <InspectorGroup title="Status">
+        <InspectorRow icon={<Workflow size={ICON_SIZE} />} label="Status" value={lifecycleLabel(statusKind)} />
+        {changes !== null ? (
+          <InspectorRow
+            icon={<FileDiff size={ICON_SIZE} />}
+            label="Changes"
+            value={
+              <span className="tabular-nums">
+                {changes.stats.files} file{changes.stats.files === 1 ? "" : "s"}
+                <span aria-hidden> · </span>
+                <span className="text-addition">+{changes.stats.additions.toLocaleString()}</span>
+                {" "}
+                <span className="text-deletion">−{changes.stats.deletions.toLocaleString()}</span>
+              </span>
+            }
+          />
+        ) : null}
+        {verification.length > 0 ? (
+          <InspectorRow
+            icon={<Workflow size={ICON_SIZE} />}
+            label="Verification"
+            value={`${verification.filter((check) => check.state === "passed").length}/${verification.length} passed`}
+          />
+        ) : null}
+        {subagents.length > 0 ? (
+          <InspectorRow
+            icon={<UsersRound size={ICON_SIZE} />}
+            label="Subagents"
+            value={`${subagents.filter((item) => item.state === "working").length} active`}
+          />
+        ) : null}
+      </InspectorGroup>
 
-      {activeTab === "overview" ? (
-        <InspectorGroup title="Overview">
-          <InspectorRow icon={<Workflow size={ICON_SIZE} />} label="Status" value={lifecycleLabel(statusKind)} />
-          {changes !== null ? (
-            <InspectorRow
-              icon={<FileDiff size={ICON_SIZE} />}
-              label="Changes"
-              ariaLabel="Open changes review"
-              onClick={onShowChanges}
-              title={
-                changes.source === "working_tree"
-                  ? `${changes.stats.files} file${changes.stats.files === 1 ? "" : "s"} changed in the working tree`
-                  : `${changes.stats.files} file${changes.stats.files === 1 ? "" : "s"} in patches the agent proposed`
-              }
-              value={
-                <span className="tabular-nums">
-                  {changes.stats.files} file{changes.stats.files === 1 ? "" : "s"}
-                  <span aria-hidden> · </span>
-                  <span className="text-addition">+{changes.stats.additions.toLocaleString()}</span>
-                  {" "}
-                  <span className="text-deletion">−{changes.stats.deletions.toLocaleString()}</span>
-                </span>
-              }
-            />
-          ) : null}
-          {verification.length > 0 ? (
-            <InspectorRow
-              icon={<Workflow size={ICON_SIZE} />}
-              label="Verification"
-              value={`${verification.filter((check) => check.state === "passed").length}/${verification.length} passed`}
-            />
-          ) : null}
-          {subagents.length > 0 ? (
-            <InspectorRow
-              icon={<UsersRound size={ICON_SIZE} />}
-              label="Subagents"
-              value={`${subagents.filter((item) => item.state === "working").length} active`}
-            />
-          ) : null}
-        </InspectorGroup>
-      ) : null}
-
-      {/* Environment contains only the effective workspace and run settings.
-          Protocol records and raw ids live behind Advanced details in Evidence. */}
-      {activeTab === "environment" && workspacePath ? (
-        <InspectorGroup title="Environment">
-          {workspacePath ? (
-            <InspectorRow
-              icon={<Laptop size={ICON_SIZE} />}
-              label="Workspace"
-              value={copied === "path" ? "Copied" : deriveProjectTitle(workspacePath)}
-              ariaLabel="Copy workspace path"
-              onClick={() => void copy("path", workspacePath)}
-              title={workspacePath}
-            />
-          ) : null}
-        </InspectorGroup>
-      ) : null}
-
-      {activeTab === "environment" ? <InspectorGroup title="Run settings">
+      {hasEnvironment ? <InspectorGroup title="Environment">
+        {workspacePath ? (
+          <InspectorRow
+            icon={<Laptop size={ICON_SIZE} />}
+            label="Workspace"
+            value={copied === "path" ? "Copied" : deriveProjectTitle(workspacePath)}
+            ariaLabel="Copy workspace path"
+            onClick={() => void copy("path", workspacePath)}
+          />
+        ) : null}
         {session?.default_model ? (
           <InspectorRow
             icon={<Cpu size={ICON_SIZE} />}
             label="Model"
             value={session.default_model}
-            title={session.default_model}
           />
         ) : null}
         {session?.default_reasoning_effort ? (
@@ -849,7 +809,6 @@ function InspectorImpl({
             icon={<ShieldAlert size={ICON_SIZE} />}
             label="Access"
             value={accessLabel(permissionProfileId)}
-            title={permissionProfileId}
           />
         ) : null}
         {task.budget_ledger ? budgetMetrics(task.budget_ledger).map((metric) => (
@@ -860,39 +819,38 @@ function InspectorImpl({
             value={metric.detail ? `${metric.value} · ${metric.detail}` : metric.value}
           />
         )) : null}
-        <SandboxSection profileId={permissionProfileId} />
+        {permissionProfileId ? <SandboxSection profileId={permissionProfileId} /> : null}
       </InspectorGroup> : null}
 
-      {activeTab === "evidence" ? (
-        <div id="inspector-panel-evidence" role="tabpanel" aria-label="Task evidence">
-          {changes !== null ? (
-            <InspectorGroup title="Review">
-              <InspectorRow
-                icon={<FileDiff size={ICON_SIZE} />}
-                label="Open changes"
-                value={`${changes.stats.files} file${changes.stats.files === 1 ? "" : "s"}`}
-                ariaLabel="Open changes review"
-                onClick={onShowChanges}
-              />
-            </InspectorGroup>
-          ) : null}
-          <ArtifactsSection taskId={task.id} />
-          {verification.length > 0 ? (
-            <InspectorGroup title="Verification">
-              <ul>
-                {verification.map((check) => (
-                  <li key={check.id}>
-                    <InspectorRow
-                      icon={<Workflow size={ICON_SIZE} />}
-                      label={check.detail}
-                      value={check.state === "passed" ? "Passed" : check.state === "failed" ? "Failed" : "Pending"}
-                    />
-                  </li>
-                ))}
-              </ul>
-            </InspectorGroup>
-          ) : null}
-          <InspectorGroup title="Advanced">
+      {changes !== null ? (
+        <InspectorGroup title="Review">
+          <InspectorRow
+            icon={<FileDiff size={ICON_SIZE} />}
+            label="Open changes"
+            value={`${changes.stats.files} file${changes.stats.files === 1 ? "" : "s"}`}
+            ariaLabel="Open changes review"
+            onClick={onShowChanges}
+          />
+        </InspectorGroup>
+      ) : null}
+
+      <ArtifactsSection taskId={task.id} />
+      {verification.length > 0 ? (
+        <InspectorGroup title="Verification details">
+          <ul>
+            {verification.map((check) => (
+              <li key={check.id}>
+                <InspectorRow
+                  icon={<Workflow size={ICON_SIZE} />}
+                  label={check.detail}
+                  value={check.state === "passed" ? "Passed" : check.state === "failed" ? "Failed" : "Pending"}
+                />
+              </li>
+            ))}
+          </ul>
+        </InspectorGroup>
+      ) : null}
+      <InspectorGroup title="Advanced">
             <InspectorDisclosure
               icon={<Hash size={ICON_SIZE} />}
               label="Advanced details"
@@ -909,7 +867,6 @@ function InspectorImpl({
                     icon={<Boxes size={ICON_SIZE} />}
                     label="Cached input"
                     value={`${task.budget_ledger.cached_input_tokens} tokens`}
-                    title="Raw cached input token count reported by the control plane"
                   />
                 ) : null}
                 <InspectorRow
@@ -918,7 +875,6 @@ function InspectorImpl({
                   value={copied === "id" ? "Copied" : task.id.slice(-8)}
                   ariaLabel="Copy task ID"
                   onClick={() => void copy("id", task.id)}
-                  title={task.id}
                 />
                 <TaskV2Section taskId={task.id} />
                 {recentEvents.length > 0 ? (
@@ -942,9 +898,7 @@ function InspectorImpl({
                 ) : null}
               </div>
             </InspectorDisclosure>
-          </InspectorGroup>
-        </div>
-      ) : null}
+      </InspectorGroup>
 
     </div>
   );

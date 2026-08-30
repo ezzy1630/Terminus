@@ -1,7 +1,7 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { ThreadHeader } from "../src/components/ThreadHeader";
+import { ThreadHeader, ThreadRunBar } from "../src/components/ThreadHeader";
 import { InterventionTray } from "../src/components/InterventionTray";
 import type { TaskPresentation } from "../src/lib/task-presentation";
 
@@ -43,30 +43,29 @@ function presentation(overrides: Partial<TaskPresentation> = {}): TaskPresentati
 describe("ThreadHeader", () => {
   test("shows the authoritative summary and only actions with real callbacks", async () => {
     const onOpenChanges = vi.fn();
-    const onStop = vi.fn();
     render(
-      <ThreadHeader
-        presentation={presentation()}
-        repository="Terminus"
-        workspace="auth-refresh-worktree"
-        onOpenChanges={onOpenChanges}
-        onStop={onStop}
-      />,
+      <>
+        <ThreadHeader
+          presentation={presentation()}
+          repository="Terminus"
+          workspace="auth-refresh-worktree"
+          onOpenChanges={onOpenChanges}
+        />
+        <ThreadRunBar presentation={presentation()} />
+      </>,
     );
 
     expect(screen.getByRole("heading", { name: "Fix the refresh-token race" })).toBeInTheDocument();
     expect(screen.getByText("Running focused tests")).toBeInTheDocument();
     expect(screen.getByText("2m 14s")).toBeInTheDocument();
-    expect(screen.getByText("3 files changed")).toBeInTheDocument();
+    expect(screen.getByText("3 files")).toBeInTheDocument();
     expect(screen.getByText("1 check failed")).toBeInTheDocument();
-    expect(screen.getByText("2 subagents active")).toBeInTheDocument();
+    expect(screen.getByText("2 agents")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open in Editor" })).not.toBeInTheDocument();
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Changes" }));
-    await user.click(screen.getByRole("button", { name: "Stop" }));
     expect(onOpenChanges).toHaveBeenCalledOnce();
-    expect(onStop).toHaveBeenCalledOnce();
   });
 });
 

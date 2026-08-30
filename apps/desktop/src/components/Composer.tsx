@@ -1078,7 +1078,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
              The 16px radius is the one soft corner in the app. Everything else
              is ≤12px; this is the surface you type into and it is allowed to
              read as a physical field. `-mt-1.5` laps it over the context tab. */
-          className="composer-surface relative z-[1] -mt-1.5 flex flex-col rounded-2xl bg-composer"
+          className="composer-surface relative z-[1] -mt-1.5 flex flex-col rounded-xl bg-composer"
         >
           {/* Textarea. */}
           <textarea
@@ -1092,7 +1092,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
             aria-label="Message composer"
             role="textbox"
             aria-multiline="true"
-            spellCheck={false}
+            spellCheck
             data-gramm="false"
             data-gramm_editor="false"
             className={cn(
@@ -1143,7 +1143,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
           <div className="composer-controls flex min-h-8 items-center gap-1 px-2 pb-1.5">
             {addMenuItems.length > 0 ? <ComposerAddMenu items={addMenuItems} /> : null}
 
-            {showPermission && isStartSurface ? (
+            {showPermission ? (
               <PermissionProfilePicker
                 profile={permissionProfileId}
                 raw={storedPermission}

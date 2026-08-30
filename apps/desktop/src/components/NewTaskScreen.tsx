@@ -8,9 +8,9 @@
  *   - Only actionable project context
  *   - No dashboard, no statistics, no wall of recent activity
  *
- * The heading and composer form one start surface. Pinning the composer to the
- * window's bottom left a dead half-screen between the question and the only
- * control that can answer it, especially on a tall display.
+ * The heading and composer form one compact start surface. The prompt belongs
+ * close to the question it answers; tall windows add breathing room around the
+ * group, never a dead half-screen inside it.
  *
  * No starter chips. Four generic prompts ("Explain this codebase",
  * "Find a bug", …) occupied the space under the composer on every launch and
@@ -133,14 +133,18 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
   }, [session, recordStartedTurn, refreshTasks, selectTask, taskMutation]);
 
   return (
-    <div className={cn("flex h-full w-full flex-col overflow-hidden bg-canvas", className)}>
+    <div className={cn("relative flex h-full w-full flex-col overflow-hidden bg-canvas", className)}>
+      <div className="titlebar-drag absolute inset-x-0 top-0 z-10 h-[30px]" aria-hidden />
       <main className="scrollable flex min-h-0 flex-1 justify-center overflow-y-auto px-8">
-        <div className="flex w-full max-w-[var(--content-width)] flex-col items-center pt-[clamp(112px,22vh,190px)]">
-          <h1 id="new-task-heading" className="ui-display-title max-w-[24ch] text-balance text-center text-primary">
-            What should we build in {session?.title ?? "this project"}?
+        <div className="flex w-full max-w-[var(--content-width)] flex-col items-center pt-[clamp(96px,18vh,156px)]">
+          <h1 id="new-task-heading" className="ui-display-title text-balance text-center text-primary">
+            What should Terminus do?
           </h1>
+          <p className="ui-body mt-2 max-w-[42ch] text-balance text-center text-secondary">
+            Working in <span className="font-medium text-primary">{session?.title ?? "this project"}</span>. Describe the outcome; Terminus will plan, act, and verify it.
+          </p>
 
-          <div className="mt-[clamp(92px,16vh,148px)] w-full pb-8">
+          <div className="mt-9 w-full pb-8">
             <Composer
               onCreateTask={createTask}
               {...(onOpenProject ? { onChangeProject: onOpenProject } : {})}

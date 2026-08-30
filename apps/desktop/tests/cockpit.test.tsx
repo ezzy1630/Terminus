@@ -390,7 +390,8 @@ describe("truthful operator cockpit", () => {
     const openAllTasks = vi.fn();
     render(<Sidebar activeDestination="chat" />);
 
-    expect(screen.queryByRole("button", { name: /Sessions|Board|Kanban/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Board" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Sessions|Kanban/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Mission Ledger" })).not.toBeInTheDocument();
     // Agents has no complete, actionable control-plane surface, so it is not
     // exposed as a permanent destination.
@@ -635,7 +636,7 @@ describe("truthful operator cockpit", () => {
     expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
   });
 
-  test("keeps sidebar modes on their own row and floats only the reopen control", async () => {
+  test("keeps sidebar modes on their own row and exposes native history controls", async () => {
     const refreshAll = vi.fn(async () => {});
     useTerminusStore.setState({ refreshAll });
     window.localStorage.setItem("terminus-desktop.onboarding.completed.v1", "true");
@@ -645,8 +646,9 @@ describe("truthful operator cockpit", () => {
     const hide = screen.getByRole("button", { name: "Hide sidebar" });
     const aside = hide.closest("aside");
     expect(aside).not.toBeNull();
-    expect(aside).toContainElement(screen.getByRole("tab", { name: "Threads" }));
-    expect(document.querySelector(".window-control")).toBeNull();
+    expect(aside).toContainElement(screen.getByRole("button", { name: "Threads" }));
+    expect(screen.getByRole("button", { name: "Back" }).closest(".window-control")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Forward" }).closest(".window-control")).not.toBeNull();
 
     await userEvent.click(hide);
     const show = screen.getByRole("button", { name: "Show sidebar" });
@@ -657,7 +659,8 @@ describe("truthful operator cockpit", () => {
     expect(screen.getByRole("button", { name: "Hide sidebar" }).closest("aside")).not.toBeNull();
   });
 
-  test("opens Board-only canonical task context in the shared inspector", async () => {
+  test("keeps Board-only canonical context selected without inventing conversation tabs", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1400 });
     const refreshAll = vi.fn(async () => {});
     useTerminusStore.setState({ refreshAll });
     window.localStorage.setItem("terminus-desktop.onboarding.completed.v1", "true");
@@ -682,9 +685,8 @@ describe("truthful operator cockpit", () => {
     await user.click(await screen.findByRole("button", { name: "Actions for Polish the desktop UI" }));
     await user.click(screen.getByRole("menuitem", { name: "Show context" }));
 
-    const taskPanel = await screen.findByTestId("task-v2-panel");
-    await waitFor(() => expect(taskPanel).toHaveTextContent("Polish the desktop UI"));
-    expect(taskPanel).toHaveTextContent("RUNNING");
+    expect(useTerminusStore.getState().selectedTaskId).toBe("canonical-task-1");
+    expect(screen.getByRole("button", { name: "Open Polish the desktop UI" })).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Session" })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Changes" })).not.toBeInTheDocument();
   });

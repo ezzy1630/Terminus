@@ -46,8 +46,7 @@ describe("Inspector relevance", () => {
   test("omits task groups that have no supporting runtime evidence", () => {
     render(<Inspector />);
 
-    expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
-    expect(screen.getByText("Status")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Status" })).toBeInTheDocument();
     expect(screen.queryByText("Context Compiler")).not.toBeInTheDocument();
     for (const name of ["Environment", "Activity", "Approvals"]) {
       expect(screen.queryByRole("heading", { name })).not.toBeInTheDocument();
@@ -92,14 +91,13 @@ describe("Inspector relevance", () => {
     expect(onShowChanges).toHaveBeenCalledTimes(1);
   });
 
-  test("keeps raw protocol fields behind Evidence advanced details", async () => {
+  test("keeps raw protocol fields behind Advanced details", async () => {
     vi.spyOn(arpV2, "getTask").mockResolvedValue(null);
     const user = userEvent.setup();
     render(<Inspector />);
 
     expect(screen.queryByText("Risk class")).not.toBeInTheDocument();
     expect(screen.queryByText("Contract")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("tab", { name: "Evidence" }));
     expect(screen.queryByText("Risk class")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Advanced details, Protocol and receipts/ }));
@@ -136,7 +134,6 @@ describe("Inspector relevance", () => {
     const user = userEvent.setup();
     render(<Inspector />);
 
-    await user.click(screen.getByRole("tab", { name: "Environment" }));
     await user.click(await screen.findByRole("button", { name: /^(Sandbox|Permissions), Enforced/ }));
     expect(screen.getByText("seatbelt-v1")).toBeInTheDocument();
     const refresh = screen.getByRole("button", { name: "Refresh sandbox snapshot" });
@@ -160,7 +157,6 @@ describe("Inspector relevance", () => {
     const user = userEvent.setup();
     render(<Inspector />);
 
-    await user.click(screen.getByRole("tab", { name: "Evidence" }));
     await user.click(screen.getByRole("button", { name: /Advanced details, Protocol and receipts/ }));
     expect(await screen.findByText("canonical probe timed out")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Retry (task record|canonical task)/ }));

@@ -17,7 +17,7 @@ A declared test is not a passing run. Executed-test evidence lives in CI
 | Mini-services | 2 | directories in mini-services/ |
 | Declared Rust tests | 592 | `#[test]` + `#[tokio::test]` occurrences in crates/** (excl. generated) |
 | TypeScript test files | 173 | `*.test.{ts,tsx}` in packages/ + apps/ |
-| Declared TypeScript test blocks | 1650 | `test(/it(` occurrences in those files |
+| Declared TypeScript test blocks | 1653 | `test(/it(` occurrences in those files |
 | Declared Python tests | 482 | `def test_*` in python/** |
 | ADRs | 53 | docs/decisions/ADR-*.md |
 | Runbooks | 15 | docs/runbooks/*.md |
