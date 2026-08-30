@@ -31,6 +31,7 @@ import {
   ReasoningReplayLedger,
   resolveModelFamily,
 } from "@terminus/provider-core";
+import { computeContentHash } from "@terminus/context-ir";
 import type { TokenCount } from "@terminus/domain";
 
 export { ReasoningReplayLedger };
@@ -111,20 +112,39 @@ export interface OpenAiResponsesReasoningSummaryPart {
   readonly text: string;
 }
 
+export interface OpenAiPromptCacheBreakpoint {
+  readonly mode: "explicit";
+}
+
+export interface OpenAiResponsesInputTextContent {
+  readonly type: "input_text";
+  readonly text: string;
+  readonly prompt_cache_breakpoint?: OpenAiPromptCacheBreakpoint | undefined;
+}
+
+export type OpenAiResponsesMessageContent =
+  | string
+  | readonly OpenAiResponsesInputTextContent[];
+
 export interface OpenAiResponsesInputItem {
   readonly role?: "system" | "developer" | "user" | "assistant" | undefined;
-  readonly content?: string | undefined;
+  readonly content?: OpenAiResponsesMessageContent | undefined;
   readonly type?: "message" | "function_call" | "function_call_output" | "reasoning" | undefined;
   readonly call_id?: string | undefined;
   readonly name?: string | undefined;
   readonly arguments?: string | undefined;
-  readonly output?: string | undefined;
+  readonly output?: OpenAiResponsesMessageContent | undefined;
   /** `reasoning` items only: the provider's own item id (`rs_…`). */
   readonly id?: string | undefined;
   /** `reasoning` items only: the opaque blob from `include`. */
   readonly encrypted_content?: string | undefined;
   /** `reasoning` items only: the summary parts, replayed as received. */
   readonly summary?: readonly OpenAiResponsesReasoningSummaryPart[] | undefined;
+}
+
+export interface OpenAiPromptCacheOptions {
+  readonly mode: "implicit" | "explicit";
+  readonly ttl?: "30m" | undefined;
 }
 
 export interface OpenAiResponsesRequestBody {
@@ -143,6 +163,7 @@ export interface OpenAiResponsesRequestBody {
   readonly parallel_tool_calls?: boolean | undefined;
   readonly truncation?: "auto" | "disabled" | undefined;
   readonly prompt_cache_key?: string | undefined;
+  readonly prompt_cache_options?: OpenAiPromptCacheOptions | undefined;
   readonly previous_response_id?: string | undefined;
   readonly stream: true;
   readonly metadata?: Readonly<Record<string, string>> | undefined;
@@ -758,6 +779,9 @@ export function reasoningInputItem(item: ProviderReasoningItem): OpenAiResponses
  * changes per task and belongs with the task, in `input`.
  */
 const INSTRUCTION_FRAGMENT_KINDS: ReadonlySet<string> = new Set(["authority", "project_rule"]);
+const OPENAI_PROMPT_CACHE_KEY_MAX_CHARS = 64;
+const SHA256_PREFIX = "sha256:";
+const EXPLICIT_PROMPT_CACHE_BREAKPOINT = { mode: "explicit" } as const;
 
 export interface InstructionSplit {
   readonly instructions: string;
@@ -780,6 +804,90 @@ export function splitInstructionFragments(
   return { instructions: instructions.join("\n\n"), remaining };
 }
 
+/**
+ * Bound cache-routing affinity without leaking a long human-readable scope.
+ *
+ * Context hashes already have the right 64-character payload, so stripping
+ * their algorithm prefix preserves identity. Other oversized keys are
+ * content-addressed instead of truncated because the end often carries the
+ * distinguishing session or epoch component.
+ */
+export function normalizePromptCacheKey(key: string): string {
+  if (key.length > 0 && key.length <= OPENAI_PROMPT_CACHE_KEY_MAX_CHARS) return key;
+  if (/^sha256:[0-9a-f]{64}$/i.test(key)) return key.slice(SHA256_PREFIX.length);
+  return computeContentHash(key).slice(SHA256_PREFIX.length);
+}
+
+function usesExplicitPromptCaching(input: CanonicalRenderInput): boolean {
+  return input.provider.caching.mode === "explicit_breakpoints"
+    && resolveModelFamily(String(input.model.modelKey)) === "gpt-5.6";
+}
+
+/** Mark the last cacheable content part produced by one canonical fragment. */
+function markExplicitPromptCacheBreakpoint(
+  items: readonly OpenAiResponsesInputItem[],
+): readonly OpenAiResponsesInputItem[] {
+  if (items.length === 0) return items;
+  const lastIndex = items.length - 1;
+  const last = items[lastIndex]!;
+  if (typeof last.content === "string") {
+    const text = last.content;
+    return items.map((item, index) => index === lastIndex
+      ? {
+          ...item,
+          content: [{
+            type: "input_text" as const,
+            text,
+            prompt_cache_breakpoint: EXPLICIT_PROMPT_CACHE_BREAKPOINT,
+          }],
+        }
+      : item);
+  }
+  if (last.type === "function_call_output" && typeof last.output === "string") {
+    const text = last.output;
+    return items.map((item, index) => index === lastIndex
+      ? {
+          ...item,
+          output: [{
+            type: "input_text" as const,
+            text,
+            prompt_cache_breakpoint: EXPLICIT_PROMPT_CACHE_BREAKPOINT,
+          }],
+        }
+      : item);
+  }
+  return items;
+}
+
+/**
+ * Preserve the compiler's fragment-index cache plan while translating the
+ * transcript into the Responses item dialect. Top-level instructions are
+ * skipped here; a later input marker still includes them in the cached prefix.
+ */
+function renderResponsesInputItems(
+  input: CanonicalRenderInput,
+  reasoningReplay?: ReasoningReplayLedger | undefined,
+): readonly OpenAiResponsesInputItem[] {
+  const explicitCaching = usesExplicitPromptCaching(input);
+  const breakpoints = new Set(input.cachePlan.breakpoints);
+  const items: OpenAiResponsesInputItem[] = [];
+  for (const [fragmentIndex, fragment] of input.fragments.entries()) {
+    if (INSTRUCTION_FRAGMENT_KINDS.has(fragment.kind)) continue;
+    const fragmentMessages = renderMessages({
+      ...input,
+      fragments: [fragment],
+      cachePlan: { ...input.cachePlan, breakpoints: [] },
+    });
+    const fragmentItems = toResponsesInputItems(fragmentMessages, reasoningReplay);
+    items.push(...(
+      explicitCaching && breakpoints.has(fragmentIndex)
+        ? markExplicitPromptCacheBreakpoint(fragmentItems)
+        : fragmentItems
+    ));
+  }
+  return items;
+}
+
 /** Render a native OpenAI Responses API request body. */
 export async function renderResponsesRequest(
   input: CanonicalRenderInput,
@@ -788,16 +896,15 @@ export async function renderResponsesRequest(
   const renderer = new OpenAiRenderer(options);
   const rendered = await renderer.render(input);
   const body = rendered.body as unknown as OpenAiRequestBody;
-  const { instructions, remaining } = splitInstructionFragments(input.fragments);
-  const items = toResponsesInputItems(
-    renderMessages({ ...input, fragments: remaining }),
-    options.reasoningReplay,
-  );
-  const promptCacheKey = typeof options.promptCacheKey === "string" && options.promptCacheKey !== ""
+  const { instructions } = splitInstructionFragments(input.fragments);
+  const items = renderResponsesInputItems(input, options.reasoningReplay);
+  const rawPromptCacheKey = typeof options.promptCacheKey === "string" && options.promptCacheKey !== ""
     ? options.promptCacheKey
     // Not a session id, but the next best stable thing this layer can see: the
     // hash of the prefix whose cache entry the key is meant to route to.
     : String(input.cachePlan.stablePrefixHash);
+  const promptCacheKey = normalizePromptCacheKey(rawPromptCacheKey);
+  const explicitPromptCaching = usesExplicitPromptCaching(input);
   const hasTools = body.tools !== undefined && body.tools.length > 0;
   const responsesBody: OpenAiResponsesRequestBody = {
     model: body.model,
@@ -833,6 +940,14 @@ export async function renderResponsesRequest(
     // request when the compiled prompt overshoots the window.
     truncation: "auto",
     prompt_cache_key: promptCacheKey,
+    ...(explicitPromptCaching
+      ? {
+          prompt_cache_options: {
+            mode: "explicit" as const,
+            ...(input.provider.caching.ttlOptions.includes("30m") ? { ttl: "30m" as const } : {}),
+          },
+        }
+      : {}),
   };
   return {
     ...rendered,

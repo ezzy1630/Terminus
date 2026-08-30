@@ -177,7 +177,9 @@ describe("OpenAI Responses Connector", () => {
     expect(body.parallel_tool_calls).toBe(true);
     expect(body.text).toEqual({ verbosity: "low" });
     // No explicit key was supplied, so the compiled prefix hash routes it.
-    expect(body.prompt_cache_key).toBe(`sha256:${"0".repeat(64)}`);
+    // The wire value stays within OpenAI's bounded cache-key field.
+    expect(body.prompt_cache_key).toBe("0".repeat(64));
+    expect(body.prompt_cache_options).toBeUndefined();
 
     const reasoning = body.reasoning as { effort: string; summary: string };
     expect(reasoning).toBeDefined();
@@ -339,6 +341,142 @@ describe("OpenAI Responses Connector", () => {
     expect(JSON.stringify(rendered.body)).not.toContain("cache_control");
     const items = (rendered.body as Record<string, unknown>).input as Array<Record<string, unknown>>;
     expect(items[0]).toEqual({ role: "user", content: "Search for main.rs" });
+  });
+
+  test("uses compiler breakpoints to avoid cache writes for a changing GPT-5.6 suffix", async () => {
+    const provider: ProviderCapabilitySnapshot = {
+      ...DEFAULT_PROVIDER_CAPS,
+      caching: {
+        ...DEFAULT_PROVIDER_CAPS.caching,
+        mode: "explicit_breakpoints",
+        minimumTokens: 1_024,
+        ttlOptions: ["30m"],
+      },
+    };
+    const model: ModelCapabilitySnapshot = {
+      ...DEFAULT_MODEL_CAPS,
+      modelKey: "gpt-5.6-terra" as ModelKey,
+      snapshot: provider,
+    };
+    const input: CanonicalRenderInput = {
+      provider,
+      model,
+      manifestId: "01934567-89ab-7000-8000-cdef01234567" as Uuid7,
+      fragments: [
+        mkFragment("authority", "authority", "Stable platform instructions."),
+        mkFragment("contract", "task_contract", "Stable task contract."),
+        mkFragment("latest", "user_attachment", "Changing current request."),
+      ],
+      toolSchemas: [DUMMY_TOOL],
+      cachePlan: { stablePrefixHash: `sha256:${"a".repeat(64)}` as ContentHash, breakpoints: [1] },
+      continuationId: null,
+      outputProfile: "terse",
+      reasoningReserveTokens: 500n as TokenCount,
+      outputReserveTokens: 4096n as TokenCount,
+      hardInputLimit: 100000n as TokenCount,
+      signal: null,
+    };
+
+    const rendered = await renderResponsesRequest(input);
+    const body = rendered.body as Record<string, unknown>;
+    expect(body.prompt_cache_key).toBe("a".repeat(64));
+    expect(body.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
+    expect(body.input).toEqual([
+      {
+        role: "developer",
+        content: [{
+          type: "input_text",
+          text: "Stable task contract.",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        }],
+      },
+      { role: "user", content: "Changing current request." },
+    ]);
+  });
+
+  test("marks a tool result when the transcript breakpoint lands on it", async () => {
+    const provider: ProviderCapabilitySnapshot = {
+      ...DEFAULT_PROVIDER_CAPS,
+      caching: {
+        ...DEFAULT_PROVIDER_CAPS.caching,
+        mode: "explicit_breakpoints",
+        minimumTokens: 1_024,
+        ttlOptions: ["30m"],
+      },
+    };
+    const model: ModelCapabilitySnapshot = {
+      ...DEFAULT_MODEL_CAPS,
+      modelKey: "gpt-5.6-sol" as ModelKey,
+      snapshot: provider,
+    };
+    const input: CanonicalRenderInput = {
+      provider,
+      model,
+      manifestId: "01934567-89ab-7000-8000-cdef01234567" as Uuid7,
+      fragments: [
+        mkFragment("authority", "authority", "Stable platform instructions."),
+        mkFragment("call", "recent_episode", JSON.stringify({
+          protocol: "terminus.tool-call.v1",
+          provider_call_id: "call_1",
+          tool_name: "search",
+          arguments: { query: "cache" },
+        })),
+        mkFragment("result", "tool_result", JSON.stringify({
+          protocol: "terminus.tool-result.v1",
+          provider_call_id: "call_1",
+          result: "cached evidence",
+        })),
+      ],
+      toolSchemas: [DUMMY_TOOL],
+      cachePlan: { stablePrefixHash: `sha256:${"b".repeat(64)}` as ContentHash, breakpoints: [2] },
+      continuationId: null,
+      outputProfile: "terse",
+      reasoningReserveTokens: 500n as TokenCount,
+      outputReserveTokens: 4096n as TokenCount,
+      hardInputLimit: 100000n as TokenCount,
+      signal: null,
+    };
+
+    const rendered = await renderResponsesRequest(input);
+    const body = rendered.body as Record<string, unknown>;
+    expect(body.input).toEqual([
+      { type: "function_call", call_id: "call_1", name: "search", arguments: "{\"query\":\"cache\"}" },
+      {
+        type: "function_call_output",
+        call_id: "call_1",
+        output: [{
+          type: "input_text",
+          text: "cached evidence",
+          prompt_cache_breakpoint: { mode: "explicit" },
+        }],
+      },
+    ]);
+  });
+
+  test("bounds an oversized caller cache key deterministically", async () => {
+    const base: CanonicalRenderInput = {
+      provider: DEFAULT_PROVIDER_CAPS,
+      model: DEFAULT_MODEL_CAPS,
+      manifestId: "01934567-89ab-7000-8000-cdef01234567" as Uuid7,
+      fragments: [mkFragment("f1", "authority", "System instructions.")],
+      toolSchemas: [],
+      cachePlan: { stablePrefixHash: `sha256:${"0".repeat(64)}` as ContentHash, breakpoints: [] },
+      continuationId: null,
+      outputProfile: "terse",
+      reasoningReserveTokens: 0n as TokenCount,
+      outputReserveTokens: 4096n as TokenCount,
+      hardInputLimit: 100000n as TokenCount,
+      signal: null,
+    };
+    const key = "workspace:customer-visible-name:" + "x".repeat(80);
+
+    const first = await renderResponsesRequest(base, { promptCacheKey: key });
+    const second = await renderResponsesRequest(base, { promptCacheKey: key });
+    const firstKey = (first.body as Record<string, unknown>).prompt_cache_key;
+    expect(firstKey).toBe((second.body as Record<string, unknown>).prompt_cache_key);
+    expect(typeof firstKey).toBe("string");
+    expect((firstKey as string).length).toBeLessThanOrEqual(64);
+    expect(firstKey).not.toContain("customer-visible-name");
   });
 
   test("streams and decodes Responses API SSE frames", async () => {

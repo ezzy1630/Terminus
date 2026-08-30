@@ -105,6 +105,12 @@ describe("direct provider configuration (audit P0-2)", () => {
     expect(gptSnapshot.context.testedSafeTokens).toBe(270_000);
     expect(gptSnapshot.context.maxOutputTokens).toBe(128_000);
     expect(gptSnapshot.context.parallelToolCalls).toBe(true);
+    expect(gptSnapshot.caching).toMatchObject({
+      mode: "explicit_breakpoints",
+      exactPrefixRequired: true,
+      minimumTokens: 1_024,
+      ttlOptions: ["30m"],
+    });
 
     const claude = parseDirectProviderConfiguration(JSON.stringify({
       vendor: "anthropic", protocol: "messages", model: "claude-opus-5",
@@ -122,6 +128,7 @@ describe("direct provider configuration (audit P0-2)", () => {
     if (legacy === null) throw new Error("expected config");
     const legacySnapshot = configuredDirectProviderSnapshot(legacy, "2026-08-24T00:00:00Z" as never);
     expect(legacySnapshot.context.testedSafeTokens).toBe(128_000);
+    expect(legacySnapshot.caching.mode).toBe("automatic_prefix");
   });
 
   test("Responses accounts are stateless: no continuation id to resume from", () => {

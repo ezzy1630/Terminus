@@ -1,4 +1,8 @@
-import { decodeOpenAiStream, renderRequest } from "@terminus/provider-openai";
+import {
+  decodeOpenAiStream,
+  normalizePromptCacheKey,
+  renderRequest,
+} from "@terminus/provider-openai";
 import {
   dispatchNativeRequest,
   type NativeDispatchInput,
@@ -68,7 +72,10 @@ export async function dispatchOpenAI(
     ? baseRendered
     : {
         ...baseRendered,
-        body: { ...baseRendered.body, prompt_cache_key: promptCacheKey },
+        body: {
+          ...baseRendered.body,
+          prompt_cache_key: normalizePromptCacheKey(promptCacheKey),
+        },
       };
   return dispatchNativeRequest(openaiNativeConfig(protocol), openaiTransportDeps(postSse, now, onChunk), {
     ...rest,
