@@ -170,7 +170,7 @@ class RunRequest:
     random_seed: int
     budgets: Budgets = field(default_factory=Budgets)
     experiment_assignments: list[dict[str, Any]] = field(default_factory=list)
-    # Live steering. `reasoning_effort` is one of low|medium|high|max and maps
+    # Live steering. `reasoning_effort` is one of low|medium|high|xhigh|max and maps
     # to the control plane's `reasoning_effort` / `default_reasoning_effort`;
     # `provider_account_id` pins which discovered account serves the model.
     # Both are None for fixture harnesses, which have nothing to steer.
@@ -222,9 +222,7 @@ def build_evaluation_identity(
     """
     package_dir = request.task_package_dir or request.task_dir
     resolved_model_snapshot = (
-        dict(model_snapshot)
-        if model_snapshot is not None
-        else request.model_snapshot.to_dict()
+        dict(model_snapshot) if model_snapshot is not None else request.model_snapshot.to_dict()
     )
     source_commit = _read_or(package_dir / "task.yaml", "source_commit")
     if source_commit.startswith("source_commit="):
@@ -256,9 +254,17 @@ def build_evaluation_identity(
         tool_schema_hash=request.tool_schema_hash or "missing:tool_schema_hash",
         instruction_hash=request.instruction_hash or "missing:instruction_hash",
         provider_endpoint_hash=request.provider_endpoint_hash
-        or (_stable_hash(request.provider_endpoint) if request.provider_endpoint else "missing:provider_endpoint_hash"),
+        or (
+            _stable_hash(request.provider_endpoint)
+            if request.provider_endpoint
+            else "missing:provider_endpoint_hash"
+        ),
         provider_account_hash=request.provider_account_hash
-        or (_stable_hash(request.provider_account_id) if request.provider_account_id else "missing:provider_account_hash"),
+        or (
+            _stable_hash(request.provider_account_id)
+            if request.provider_account_id
+            else "missing:provider_account_hash"
+        ),
     )
 
 
@@ -305,6 +311,10 @@ class HarnessResult:
     evidence_class: EvidenceClass = EvidenceClass.FIXTURE_ONLY
     independently_verified: bool = False
     provider_receipts: list[dict[str, Any]] = field(default_factory=list)
+    # Full benchmark-only evidence for external integrity review. Ordinary
+    # RunRecords deliberately do not persist this potentially sensitive body;
+    # adapters such as Harbor write it into their isolated trial artifacts.
+    review_trajectory: dict[str, Any] | None = None
 
 
 class Harness(Protocol):
@@ -581,8 +591,6 @@ class HarnessRunner:
             risk_class=self.risk_class,
             metadata=metadata,
         )
-
-
 
 
 def apply_metrics_to_record(record: RunRecord, metrics: Mapping[str, Any] | None) -> None:

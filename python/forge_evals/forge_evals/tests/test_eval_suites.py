@@ -9,6 +9,12 @@ import pytest
 import yaml
 
 from forge_evals.runners import (
+    DEEP_SWE_DATASET,
+    DEEP_SWE_PIER_COMMIT,
+    DEEP_SWE_TASK_COMMIT,
+    SWE_ATLAS_QNA_DATASET,
+    SWE_ATLAS_QNA_HARBOR_COMMIT,
+    SWE_ATLAS_QNA_TASK_COMMIT,
     SWE_BENCH_HARNESS_COMMIT,
     SWE_BENCH_VERIFIED_REVISION,
     TERMINAL_BENCH_HARBOR_COMMIT,
@@ -28,12 +34,14 @@ def _find_suite_files() -> list[Path]:
 
 
 def test_suite_files_exist() -> None:
-    """At least swe-bench-verified.yaml, terminal-bench.yaml, and forge-internal.yaml must exist."""
+    """The internal and declared external suite manifests must exist."""
     files = _find_suite_files()
     assert len(files) >= 3
     file_names = {f.name for f in files}
     assert "swe-bench-verified.yaml" in file_names
     assert "terminal-bench.yaml" in file_names
+    assert "deepswe.yaml" in file_names
+    assert "swe-atlas-qna.yaml" in file_names
     assert "forge-internal.yaml" in file_names
 
 
@@ -71,13 +79,28 @@ def test_external_manifests_pin_exact_sources_and_scopes() -> None:
     """External suites must use exact upstream pins and honest image policies."""
     terminal = load_benchmark_manifest(SUITES_DIR / "terminal-bench.yaml")
     assert terminal.adapter_kind == "harbor"
-    assert terminal.dataset == "terminal-bench/terminal-bench-2"
-    assert terminal.dataset_version == "2.0"
-    # 89 task directories at the exact Harbor registry task-source commit.
+    assert terminal.dataset == "terminal-bench/terminal-bench-2-1"
+    assert terminal.dataset_version == "2.1"
     assert terminal.task_count == 89
-    assert terminal.registry_commit == TERMINAL_BENCH_HARBOR_COMMIT
+    assert terminal.harness_commit == TERMINAL_BENCH_HARBOR_COMMIT
     assert terminal.task_commit == TERMINAL_BENCH_TASK_COMMIT
     assert terminal.image_digest_policy == "per_task_required"
+
+    deepswe = load_benchmark_manifest(SUITES_DIR / "deepswe.yaml")
+    assert deepswe.adapter_kind == "pier"
+    assert deepswe.dataset == DEEP_SWE_DATASET
+    assert deepswe.harness_commit == DEEP_SWE_PIER_COMMIT
+    assert deepswe.task_commit == DEEP_SWE_TASK_COMMIT
+    assert deepswe.task_count == 113
+    assert deepswe.image_digest_policy == "per_task_required"
+
+    atlas = load_benchmark_manifest(SUITES_DIR / "swe-atlas-qna.yaml")
+    assert atlas.adapter_kind == "harbor"
+    assert atlas.dataset == SWE_ATLAS_QNA_DATASET
+    assert atlas.harness_commit == SWE_ATLAS_QNA_HARBOR_COMMIT
+    assert atlas.task_commit == SWE_ATLAS_QNA_TASK_COMMIT
+    assert atlas.task_count == 124
+    assert atlas.image_digest_policy == "per_task_required"
 
     swe = load_benchmark_manifest(SUITES_DIR / "swe-bench-verified.yaml")
     assert swe.adapter_kind == "swebench"
@@ -99,8 +122,8 @@ def test_terminal_bench_manifest_records_harbor_release_version() -> None:
     suite = data["suite"]
     adapter = suite["adapter"]
     assert adapter["harness"]["version"] == "0.22.0"
-    assert adapter["registry"]["commit"] == "41a50d62d7f35677cc34ba3a0c36f042a4fef68c"
-    assert adapter["task_source"]["commit"] == "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+    assert adapter["harness"]["commit"] == "4407eb5227a2ff4f0d3f16b2eb48849382fdf276"
+    assert adapter["task_source"]["commit"] == "7131e4375048a0e408a8fb404b5f499d726b695b"
     assert adapter["task_count"] == 89
 
 

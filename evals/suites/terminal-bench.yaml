@@ -1,11 +1,11 @@
 suite:
   id: terminal-bench
-  version: 2
+  version: 21
   description: |
-    Terminal-Bench 2.0, executed through Harbor 0.22.0 against the pinned
-    official 89-task dataset.
-  source: https://github.com/laude-institute/terminal-bench-2
-  license: MIT
+    Terminal-Bench 2.1, executed through Harbor 0.22.0 against the pinned
+    official 89-task dataset used by Artificial Analysis v1.4.
+  source: https://github.com/harbor-framework/terminal-bench-2-1
+  license: Apache-2.0
   task_count: 89
   default_timeout_seconds: 600
   default_budget:
@@ -13,19 +13,16 @@ suite:
     compute_seconds: 300
     wall_clock_seconds: 600
     human_approvals: 0
-  grader_version: terminal-bench-2.0
+  grader_version: terminal-bench-2.1
   metrics:
     primary: task_success
     secondary: [commands_issued, job_cancellations, pty_interactions, cost_usd]
   cohorts:
-    - terminal-bench-2.0
+    - terminal-bench-2.1
   notes: |
-    The canonical dataset identity is terminal-bench/terminal-bench-2. Harbor
-    0.22.0's legacy registry exposes the same official dataset as
-    terminal-bench@2.0; its registry entry lists 89 tasks and pins every task
-    to commit 69671fbaac6d67a7ef0dfec016cc38a64ef7a77c of
-    laude-institute/terminal-bench-2. The Harbor v0.22.0 registry snapshot is
-    pinned to commit 41a50d62d7f35677cc34ba3a0c36f042a4fef68c.
+    The canonical dataset identity is terminal-bench/terminal-bench-2-1.
+    Terminus passes the official repository and commit directly to Harbor, so
+    execution does not depend on a mutable Hub or registry alias.
 
     Terminal-Bench resolves container images per task, so no suite-wide image
     digest is declared. A live run must return the resolved image digest for
@@ -36,18 +33,15 @@ suite:
     by import path and which drives a live Terminus turn per task.
   adapter:
     kind: harbor
-    dataset: terminal-bench/terminal-bench-2
-    dataset_version: "2.0"
+    dataset: terminal-bench/terminal-bench-2-1
+    dataset_version: "2.1"
     task_count: 89
     image_digest_policy: per_task_required
     harness:
       repository: https://github.com/harbor-framework/harbor.git
-      commit: 41a50d62d7f35677cc34ba3a0c36f042a4fef68c
+      commit: 4407eb5227a2ff4f0d3f16b2eb48849382fdf276
       version: "0.22.0"
-    registry:
-      repository: https://github.com/harbor-framework/harbor.git
-      commit: 41a50d62d7f35677cc34ba3a0c36f042a4fef68c
-      path: registry.json
     task_source:
-      repository: https://github.com/laude-institute/terminal-bench-2.git
-      commit: 69671fbaac6d67a7ef0dfec016cc38a64ef7a77c
+      repository: https://github.com/harbor-framework/terminal-bench-2-1.git
+      commit: 7131e4375048a0e408a8fb404b5f499d726b695b
+      path: tasks

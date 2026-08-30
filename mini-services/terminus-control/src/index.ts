@@ -6415,8 +6415,8 @@ const routes: Route[] = [
 
   /**
    * Artifact inventory for a task (SPEC §29.3): every CAS artifact
-   * referenced by the task's provider attempts, episodes, verification
-   * results, and plans. Offset-paginated; `next_cursor` is null on the
+   * referenced by the task's provider attempts, tool calls, episodes,
+   * verification results, and plans. Offset-paginated; `next_cursor` is null on the
    * last page. Content itself is fetched via GET /v1/artifacts/:hash.
    */
   route("GET", "/v1/tasks/:id/artifacts", async (req, res, params) => {
@@ -6434,10 +6434,15 @@ const routes: Route[] = [
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 200) : 100;
     const skip = Math.max(0, Math.trunc(Number(url.searchParams.get("skip") ?? 0)) || 0);
 
-    const [attempts, episodes, plans] = await Promise.all([
+    const [attempts, toolCalls, episodes, plans] = await Promise.all([
       db.providerAttempt.findMany({
         where: { turn: { is: { taskId } } },
         select: { requestArtifact: true, responseArtifact: true },
+      }),
+      db.toolCall.findMany({
+        where: { turn: { is: { taskId } } },
+        orderBy: [{ proposedAt: "asc" }, { id: "asc" }],
+        select: { id: true, argumentsArtifact: true, resultArtifact: true },
       }),
       db.episode.findMany({
         where: { turn: { is: { taskId } }, contentArtifact: { not: null } },
@@ -6470,6 +6475,10 @@ const routes: Route[] = [
     attempts.forEach((a, i) => {
       add(a.requestArtifact, "provider_request", i);
       add(a.responseArtifact, "provider_response", i);
+    });
+    toolCalls.forEach((call, i) => {
+      add(call.argumentsArtifact, `tool_arguments:${call.id}`, i);
+      add(call.resultArtifact, `tool_result:${call.id}`, i);
     });
     episodes.forEach((e, i) => add(e.contentArtifact, `episode:${e.kind}`, i));
     plans.forEach((p, i) => {

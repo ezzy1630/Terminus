@@ -1,0 +1,32 @@
+suite:
+  id: swe-atlas-qna
+  version: 1
+  description: SWE Atlas Codebase QnA public 124-task dataset.
+  source: https://github.com/scaleapi/SWE-Atlas
+  license: Apache-2.0
+  task_count: 124
+  default_timeout_seconds: 3600
+  default_budget:
+    model_micros: 2000000
+    compute_seconds: 3600
+    wall_clock_seconds: 3600
+    human_approvals: 0
+  grader_version: scale-task-resolve-rate-binary
+  metrics:
+    primary: task_success
+    secondary: [cost_usd, wall_clock_seconds, tokens]
+  cohorts: [repository-qna]
+  adapter:
+    kind: harbor
+    dataset: ScaleAI/SWE-Atlas-QnA
+    dataset_version: public-124
+    task_count: 124
+    image_digest_policy: per_task_required
+    harness:
+      repository: https://github.com/laude-institute/harbor.git
+      commit: 527d50deb63a5d279e8c20593c18a2cbc7f61f9e
+      version: "0.18.0"
+    task_source:
+      repository: https://github.com/scaleapi/SWE-Atlas.git
+      commit: 49e4af3b6c803dd54a1cd60ead703aac25de4e21
+      path: data/qa

@@ -8,6 +8,7 @@ against a fake ``harbor`` executable on PATH that writes the same
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import stat
@@ -16,7 +17,8 @@ from typing import Any
 
 import pytest
 
-from forge_evals.run_record import Outcome
+from forge_evals.evidence import EvidenceClass
+from forge_evals.run_record import CostBreakdown, Outcome
 from forge_evals.runners.harbor_agent import (
     TERMINUS_HARBOR_AGENT_IMPORT_PATH,
     HarborWorkspaceBridge,
@@ -25,6 +27,7 @@ from forge_evals.runners.harbor_agent import (
 )
 from forge_evals.runners.harbor_runner import (
     HarborUnavailable,
+    benchmark_sources_cache_dir,
     build_harbor_argv,
     collect_trial_results,
     run_harbor_tasks,
@@ -48,12 +51,24 @@ def test_agent_env_requires_a_control_plane() -> None:
         harbor_agent_env({})
 
 
+def test_benchmark_sources_cache_is_outside_campaign_results(tmp_path: Path) -> None:
+    cache = benchmark_sources_cache_dir({"XDG_CACHE_HOME": str(tmp_path / "cache")})
+
+    assert cache == tmp_path / "cache" / "terminus" / "benchmark-sources"
+
+
 def test_agent_env_forwards_only_the_terminus_configuration() -> None:
     env = harbor_agent_env(
         {
             "TERMINUS_CONTROL_URL": "http://127.0.0.1:3050",
             "TERMINUS_CONTROL_TOKEN": "tok",
             "TERMINUS_MODEL": "gpt-5.6",
+            "TERMINUS_BENCHMARK_SUITE": "swe-atlas-qna",
+            "TERMINUS_PROVIDER_ACCOUNT_ID": "openai-primary",
+            "TERMINUS_PROVIDER": "openai",
+            "TERMINUS_RANDOM_SEED": "7",
+            "TERMINUS_MODEL_CONTEXT_WINDOW": "1050000",
+            "TERMINUS_MODEL_MAX_OUTPUT_TOKENS": "128000",
             "TERMINUS_HARNESS_COMMIT": "sha256:abc",
             "HOME": "/root",
         }
@@ -62,6 +77,12 @@ def test_agent_env_forwards_only_the_terminus_configuration() -> None:
         "TERMINUS_CONTROL_URL": "http://127.0.0.1:3050",
         "TERMINUS_CONTROL_TOKEN": "tok",
         "TERMINUS_MODEL": "gpt-5.6",
+        "TERMINUS_BENCHMARK_SUITE": "swe-atlas-qna",
+        "TERMINUS_PROVIDER_ACCOUNT_ID": "openai-primary",
+        "TERMINUS_PROVIDER": "openai",
+        "TERMINUS_RANDOM_SEED": "7",
+        "TERMINUS_MODEL_CONTEXT_WINDOW": "1050000",
+        "TERMINUS_MODEL_MAX_OUTPUT_TOKENS": "128000",
         "TERMINUS_HARNESS_COMMIT": "sha256:abc",
     }
 
@@ -99,6 +120,12 @@ class _FakeEnvironment:
             target = self.container / relative
             if target.exists():
                 target.unlink()
+        if command.startswith("rmdir -- "):
+            raw = command[len("rmdir -- ") :].split(" 2>/dev/null", 1)[0].strip().strip("'")
+            relative = raw[len("/app/") :] if raw.startswith("/app/") else raw
+            target = self.container / relative
+            if target.is_dir():
+                target.rmdir()
 
 
 def test_bridge_round_trips_edits_and_replays_deletions(tmp_path: Path) -> None:
@@ -106,6 +133,9 @@ def test_bridge_round_trips_edits_and_replays_deletions(tmp_path: Path) -> None:
     container.mkdir()
     (container / "keep.txt").write_text("keep", encoding="utf-8")
     (container / "remove.txt").write_text("remove", encoding="utf-8")
+    removed_dir = container / "remove-dir"
+    removed_dir.mkdir()
+    (removed_dir / "nested.txt").write_text("remove", encoding="utf-8")
 
     environment = _FakeEnvironment(container)
     bridge = HarborWorkspaceBridge(environment, "/app")
@@ -116,6 +146,8 @@ def test_bridge_round_trips_edits_and_replays_deletions(tmp_path: Path) -> None:
         (host / "keep.txt").write_text("edited", encoding="utf-8")
         (host / "new.txt").write_text("new", encoding="utf-8")
         (host / "remove.txt").unlink()
+        (host / "remove-dir" / "nested.txt").unlink()
+        (host / "remove-dir").rmdir()
         return await bridge.upload(host, before)
 
     summary = asyncio.run(scenario())
@@ -123,9 +155,15 @@ def test_bridge_round_trips_edits_and_replays_deletions(tmp_path: Path) -> None:
     assert (container / "keep.txt").read_text(encoding="utf-8") == "edited"
     assert (container / "new.txt").read_text(encoding="utf-8") == "new"
     assert not (container / "remove.txt").exists(), "a deletion must reach the container"
-    assert summary["files_deleted"] == ["remove.txt"]
+    assert not (container / "remove-dir").exists(), "an empty deleted directory must not survive"
+    assert summary["files_deleted"] == ["remove-dir/nested.txt", "remove.txt"]
+    assert summary["directories_deleted"] == ["remove-dir"]
     assert "new.txt" in summary["files_changed"]
-    assert environment.execs == ["rm -f -- '/app/remove.txt'"]
+    assert environment.execs == [
+        "rm -f -- '/app/remove-dir/nested.txt'",
+        "rm -f -- '/app/remove.txt'",
+        "rmdir -- '/app/remove-dir' 2>/dev/null || true",
+    ]
 
 
 # ──────────────────────────── the agent shim ──────────────────────────────
@@ -146,12 +184,32 @@ class _FakeHarness:
         return HarnessResult(
             outcome=Outcome.COMPLETED,
             final_revision="abc",
-            cost=None,
+            cost=CostBreakdown(
+                provider_reported_usd=0.01,
+                computed_usd=0.01,
+                input_tokens=100,
+                output_tokens=20,
+                cached_tokens=40,
+            ),
             artifacts=[],
             context_manifests=[],
             grader_outcomes=[],
             notes="{}",
-            metrics={"steps": 3, "token_source": "budget_ledger"},
+            metrics={
+                "steps": 3,
+                "tokens_input_fresh": 60,
+                "tokens_input_cached": 40,
+                "tokens_output": 20,
+                "wall_clock_ms": 1_500,
+                "token_source": "budget_ledger",
+                "model_snapshot": {
+                    "provider": "openai",
+                    "model": "gpt-5.6-luna",
+                    "reasoning_effort": "xhigh",
+                },
+            },
+            evidence_class=EvidenceClass.EXTERNAL_LIVE,
+            provider_receipts=[{"provider_request_id_hash": "sha256:" + "a" * 64}],
         )
 
 
@@ -189,7 +247,42 @@ def test_agent_runs_one_turn_and_writes_the_result_into_the_container(tmp_path: 
     summary = json.loads((logs_dir / "terminus-agent.json").read_text(encoding="utf-8"))
     assert summary["outcome"] == "completed"
     assert summary["metrics"]["steps"] == 3
+    assert summary["cost"]["computed_usd"] == 0.01
+    assert summary["provider_receipts"] == [{"provider_request_id_hash": "sha256:" + "a" * 64}]
+    assert summary["evidence_class"] == "external_live"
     assert summary["container_workdir"] == "/app"
+    trajectory_path = logs_dir / "trajectory.json"
+    trajectory_payload = trajectory_path.read_bytes()
+    assert summary["trajectory_artifact"] == {
+        "file": "trajectory.json",
+        "digest": "sha256:" + hashlib.sha256(trajectory_payload).hexdigest(),
+        "complete": False,
+        "event_count": 0,
+    }
+
+
+def test_agent_preserves_the_external_suite_identity(tmp_path: Path) -> None:
+    container = tmp_path / "app"
+    container.mkdir()
+    environment = _FakeEnvironment(container)
+    harness = _FakeHarness()
+    agent = TerminusHarborAgent(
+        logs_dir=tmp_path / "logs",
+        model_name="gpt-5.6-luna",
+        harness_factory=lambda: harness,
+        extra_env={
+            "TERMINUS_CONTROL_URL": "http://127.0.0.1:3050",
+            "TERMINUS_BENCHMARK_SUITE": "swe-atlas-qna",
+            "TERMINUS_PROVIDER_ACCOUNT_ID": "openai-primary",
+        },
+    )
+
+    asyncio.run(agent.run("Answer the repository question", environment, None))
+
+    assert harness.request is not None
+    assert harness.request.suite == "swe-atlas-qna"
+    assert harness.request.task == "swe-atlas-qna-task"
+    assert harness.request.provider_account_id == "openai-primary"
 
 
 def test_agent_setup_fails_closed_when_the_control_plane_is_silent(tmp_path: Path) -> None:
@@ -215,12 +308,17 @@ def test_agent_declares_the_name_harbor_will_show() -> None:
 # ──────────────────────────── the harbor runner ───────────────────────────
 
 
-def _request(tmp_path: Path) -> RunRequest:
+def _request(
+    tmp_path: Path,
+    *,
+    suite: str = "terminal-bench",
+    task: str = "chess-best-move",
+) -> RunRequest:
     task_dir = tmp_path / "task"
     task_dir.mkdir(exist_ok=True)
     return RunRequest(
-        suite="terminal-bench",
-        task="chess-best-move",
+        suite=suite,
+        task=task,
         task_dir=task_dir,
         harness_id="terminus-live",
         harness_commit="c" * 40,
@@ -236,12 +334,20 @@ def _request(tmp_path: Path) -> RunRequest:
         ),
         random_seed=1,
         budgets=Budgets(),
+        reasoning_effort="xhigh",
     )
 
 
 def test_build_harbor_argv_substitutes_the_agent_import_path(tmp_path: Path) -> None:
     argv = build_harbor_argv(
-        ("harbor", "run", "--dataset", "terminal-bench/terminal-bench-2@2.0", "--agent", "terminus-live"),
+        (
+            "harbor",
+            "run",
+            "--dataset",
+            "terminal-bench/terminal-bench-2@2.0",
+            "--agent",
+            "terminus-live",
+        ),
         agent_import_path=TERMINUS_HARBOR_AGENT_IMPORT_PATH,
         agent_env={"TERMINUS_CONTROL_URL": "http://x", "TERMINUS_CONTROL_TOKEN": "tok"},
         jobs_dir=tmp_path / "jobs",
@@ -260,7 +366,11 @@ def test_collect_trial_results_reads_harbors_result_json(tmp_path: Path) -> None
             {
                 "task_name": "terminal-bench/chess-best-move",
                 "task_checksum": "sha256:deadbeef",
-                "agent_info": {"name": "terminus", "version": "0.1.0", "model_info": {"name": "gpt-5.6"}},
+                "agent_info": {
+                    "name": "terminus",
+                    "version": "0.1.0",
+                    "model_info": {"name": "gpt-5.6"},
+                },
                 "verifier_result": {"rewards": {"reward": 1.0}},
             }
         ),
@@ -317,7 +427,7 @@ def _fake_harbor(bin_dir: Path, *, reward: float) -> None:
     script = bin_dir / "harbor"
     script.write_text(
         "#!/usr/bin/env python3\n"
-        "import json, sys, pathlib\n"
+        "import hashlib, json, sys, pathlib\n"
         "argv = sys.argv[1:]\n"
         "if '--version' in argv:\n"
         "    print('harbor 0.22.0'); sys.exit(0)\n"
@@ -325,10 +435,56 @@ def _fake_harbor(bin_dir: Path, *, reward: float) -> None:
         "task = argv[argv.index('--include-task-name') + 1]\n"
         "trial = jobs / 'job-1' / task\n"
         "trial.mkdir(parents=True, exist_ok=True)\n"
+        "agent = trial / 'agent'\n"
+        "agent.mkdir(parents=True, exist_ok=True)\n"
+        "trajectory = b'[]'\n"
+        "(agent / 'trajectory.json').write_bytes(trajectory)\n"
         "(trial / 'invocation.json').write_text(json.dumps(argv))\n"
+        "(agent / 'terminus-agent.json').write_text(json.dumps({\n"
+        "    'trajectory_artifact': {'file': 'trajectory.json', 'digest': 'sha256:' + hashlib.sha256(trajectory).hexdigest(), 'complete': True, 'event_count': 0},\n"
+        "    'metrics': {\n"
+        "        'steps': 4, 'tokens_input_fresh': 60, 'tokens_input_cached': 40,\n"
+        "        'tokens_output': 20, 'wall_clock_ms': 1500,\n"
+        "        'model_snapshot': {'provider': 'openai', 'model': 'gpt-5.6-luna', 'reasoning_effort': 'xhigh'},\n"
+        "    },\n"
+        "    'cost': {'provider_reported_usd': 0.01, 'computed_usd': 0.01, 'input_tokens': 100, 'output_tokens': 20, 'cached_tokens': 40, 'reasoning_tokens': 10, 'cache_write_tokens': 0, 'cache_read_tokens': 40, 'reconciliation_delta_usd': 0.0, 'reconciliation_flagged': False, 'source': 'provider_reported'},\n"
+        "    'provider_receipts': [{'provider_request_id_hash': 'sha256:' + 'a' * 64}],\n"
+        "}))\n"
         "(trial / 'result.json').write_text(json.dumps({\n"
         "    'task_name': 'terminal-bench/' + task,\n"
         "    'task_checksum': 'sha256:' + 'c' * 64,\n"
+        "    'agent_info': {'name': 'terminus', 'version': '0.1.0'},\n"
+        f"    'verifier_result': {{'rewards': {{'reward': {reward}}}}},\n"
+        "}))\n",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _fake_pier(bin_dir: Path, *, reward: float) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    script = bin_dir / "pier"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys, pathlib\n"
+        "argv = sys.argv[1:]\n"
+        "if '--version' in argv:\n"
+        "    print('pier 0.3.1'); sys.exit(0)\n"
+        "jobs = pathlib.Path(argv[argv.index('--jobs-dir') + 1])\n"
+        "task_path = pathlib.Path(argv[argv.index('--path') + 1])\n"
+        "task = task_path.name\n"
+        "trial = jobs / 'job-1' / task\n"
+        "agent = trial / 'agent'\n"
+        "agent.mkdir(parents=True, exist_ok=True)\n"
+        "(trial / 'invocation.json').write_text(json.dumps(argv))\n"
+        "(agent / 'terminus-agent.json').write_text(json.dumps({\n"
+        "    'metrics': {'tokens_input_fresh': 10, 'tokens_input_cached': 5, 'tokens_output': 2, 'steps': 2, 'model_snapshot': {'provider': 'openai', 'model': 'gpt-5.6-luna', 'reasoning_effort': 'xhigh'}},\n"
+        "    'cost': {'provider_reported_usd': 0.001, 'computed_usd': 0.001, 'input_tokens': 15, 'output_tokens': 2},\n"
+        "    'provider_receipts': [{'provider_request_id_hash': 'sha256:' + 'b' * 64}],\n"
+        "}))\n"
+        "(trial / 'result.json').write_text(json.dumps({\n"
+        "    'task_name': 'deepswe/' + task,\n"
+        "    'task_checksum': 'sha256:' + 'd' * 64,\n"
         "    'agent_info': {'name': 'terminus', 'version': '0.1.0'},\n"
         f"    'verifier_result': {{'rewards': {{'reward': {reward}}}}},\n"
         "}))\n",
@@ -349,15 +505,28 @@ def test_run_harbor_tasks_records_harbors_verdict(
         request=_request(tmp_path),
         seed=7,
         agent_import_path=TERMINUS_HARBOR_AGENT_IMPORT_PATH,
-        agent_env={"TERMINUS_CONTROL_URL": "http://127.0.0.1:3050", "TERMINUS_CONTROL_TOKEN": "s3cret"},
+        agent_env={
+            "TERMINUS_CONTROL_URL": "http://127.0.0.1:3050",
+            "TERMINUS_CONTROL_TOKEN": "s3cret",
+        },
         jobs_dir=tmp_path / "jobs",
+        harbor_executable="harbor",
     )
 
     assert record.outcome is Outcome.COMPLETED
     assert record.success is True
-    assert record.grader_results[0].grader_id.endswith("terminal-bench/terminal-bench-2@2.0")
+    assert record.grader_results[0].grader_id.endswith("terminal-bench/terminal-bench-2-1@2.1")
     assert record.environment_digest.startswith("sha256:")
     assert record.model_capability_snapshot["harbor_version"] == "harbor 0.22.0"
+    assert record.model_capability_snapshot["reasoning_effort"] == "xhigh"
+    assert record.tokens_input_fresh == 60
+    assert record.tokens_input_cached == 40
+    assert record.tokens_output == 20
+    assert record.steps == 4
+    assert record.cost is not None and record.cost.computed_usd == 0.01
+    assert record.provider_receipts
+    assert record.independently_verified is True
+    assert record.wall_clock_ms is not None and record.wall_clock_ms > 0
     assert record.end is not None
     assert record.end > record.start
 
@@ -365,18 +534,28 @@ def test_run_harbor_tasks_records_harbors_verdict(
     invocation = json.loads(
         (tmp_path / "jobs" / "job-1" / "chess-best-move" / "invocation.json").read_text()
     )
-    assert "terminal-bench/terminal-bench-2@2.0" in invocation
+    assert (
+        "https://github.com/harbor-framework/terminal-bench-2-1.git@"
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+    ) in invocation
     assert TERMINUS_HARBOR_AGENT_IMPORT_PATH in invocation
     assert "TERMINUS_CONTROL_URL=http://127.0.0.1:3050" in invocation
+    assert "TERMINUS_BENCHMARK_SUITE=terminal-bench" in invocation
 
     # The token must not be echoed into the durable record.
-    argv_artifact = next(a for a in record.artifacts if a.get("kind") == "benchmark_adapter_manifest")
+    argv_artifact = next(
+        a for a in record.artifacts if a.get("kind") == "benchmark_adapter_manifest"
+    )
     assert "TERMINUS_CONTROL_TOKEN=***" in argv_artifact["argv"]
     assert "s3cret" not in json.dumps(argv_artifact)
 
-    # The unresolved image digest is reported, not invented.
+    # The fixture has no task.toml, so missing image identity remains explicit.
     digest_note = next(a for a in record.artifacts if a.get("kind") == "resolved_image_digest")
-    assert digest_note["status"] == "unreported_by_harbor"
+    assert digest_note["status"] == "task_image_reference_missing"
+    trajectory_note = next(a for a in record.artifacts if a.get("kind") == "terminus_trajectory")
+    assert trajectory_note["status"] == "resolved"
+    assert trajectory_note["complete"] is True
+    assert trajectory_note["event_count"] == 0
 
 
 def test_run_harbor_tasks_records_a_failing_reward(
@@ -393,9 +572,48 @@ def test_run_harbor_tasks_records_a_failing_reward(
         agent_import_path=TERMINUS_HARBOR_AGENT_IMPORT_PATH,
         agent_env={"TERMINUS_CONTROL_URL": "http://127.0.0.1:3050"},
         jobs_dir=tmp_path / "jobs",
+        harbor_executable="harbor",
     )
     assert record.success is False
     assert record.grader_results[0].score == 0.0
+
+
+def test_run_deepswe_task_uses_the_pinned_pier_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    _fake_pier(bin_dir, reward=1.0)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    source = tmp_path / "deep-swe-source"
+    task_dir = source / "tasks" / "go-task"
+    task_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        "forge_evals.runners.harbor_runner.materialize_task_source",
+        lambda _manifest, _sources_dir: source,
+    )
+
+    record = run_harbor_tasks(
+        manifest_path=SUITES_DIR / "deepswe.yaml",
+        request=_request(tmp_path, suite="deepswe", task="go-task"),
+        seed=3,
+        agent_import_path=TERMINUS_HARBOR_AGENT_IMPORT_PATH,
+        agent_env={"TERMINUS_CONTROL_URL": "http://127.0.0.1:3050"},
+        jobs_dir=tmp_path / "jobs",
+        harbor_executable="pier",
+    )
+
+    invocation = json.loads(
+        (tmp_path / "jobs" / "job-1" / "go-task" / "invocation.json").read_text()
+    )
+    assert invocation[invocation.index("--path") + 1] == str(task_dir)
+    assert invocation[invocation.index("--agent-import-path") + 1] == (
+        TERMINUS_HARBOR_AGENT_IMPORT_PATH
+    )
+    assert "TERMINUS_BENCHMARK_SUITE=deepswe" in invocation
+    assert record.success is True
+    assert record.model_capability_snapshot["pier_version"] == "pier 0.3.1"
+    assert record.tokens_input_fresh == 10
+    assert record.provider_receipts
 
 
 def test_missing_harbor_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -408,6 +626,7 @@ def test_missing_harbor_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyP
             agent_import_path=TERMINUS_HARBOR_AGENT_IMPORT_PATH,
             agent_env={},
             jobs_dir=tmp_path / "jobs",
+            harbor_executable="harbor",
         )
 
 
@@ -422,6 +641,7 @@ def test_cli_routes_terminal_bench_to_harbor(
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("TERMINUS_CONTROL_URL", "http://127.0.0.1:3050")
     monkeypatch.setenv("TERMINUS_CONTROL_TOKEN", "tok")
+    monkeypatch.setenv("TERMINUS_BENCHMARK_RUNNER_EXECUTABLE", "harbor")
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     output_dir = tmp_path / "results"
@@ -446,7 +666,7 @@ def test_cli_routes_terminal_bench_to_harbor(
         ]
     )
     assert exit_code == 0
-    assert "harbor run 1/1" in capsys.readouterr().out
+    assert "external run 1/1" in capsys.readouterr().out
     payload = json.loads((output_dir / "runs.jsonl").read_text(encoding="utf-8").strip())
     assert payload["suite"] == "terminal-bench"
     assert payload["grader_results"][0]["passed"] is True

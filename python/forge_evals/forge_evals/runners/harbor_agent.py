@@ -1,4 +1,4 @@
-"""Terminus agent shim for Harbor (Terminal-Bench).
+"""Terminus agent shim for Harbor-compatible benchmark runners.
 
 Harbor drives one *agent* per task. The agent object is constructed by Harbor
 in the harness process and is handed a :class:`BaseEnvironment` handle onto the
@@ -30,9 +30,14 @@ Optional environment:
 
 ``TERMINUS_HARBOR_WORKDIR``   container path to treat as the workspace (default ``/app``)
 ``TERMINUS_MODEL``            model id to steer the turn with
-``TERMINUS_REASONING_EFFORT`` ``low`` | ``medium`` | ``high`` | ``max``
+``TERMINUS_REASONING_EFFORT`` ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``
 ``TERMINUS_TURN_TIMEOUT_S``   harness timeout in seconds (default 1800)
 ``TERMINUS_HARNESS_COMMIT``   immutable source digest or revision under test
+``TERMINUS_BENCHMARK_SUITE``  canonical Terminus suite id (default ``terminal-bench``)
+``TERMINUS_PROVIDER_ACCOUNT_ID`` exact control-plane provider account for the turn
+``TERMINUS_PROVIDER``         canonical provider id recorded for model identity
+``TERMINUS_RANDOM_SEED``      campaign attempt seed
+``TERMINUS_MAX_*``            explicit turn budget overrides used by campaigns
 
 The module imports cleanly without Harbor installed: the Harbor base class is
 resolved lazily and falls back to a local stand-in so the shim's logic stays
@@ -42,12 +47,13 @@ unit-testable on a machine with no Docker and no Harbor.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -78,7 +84,7 @@ def _resolve_base_agent() -> type:
     Harbor loads the shim by import path.
     """
     try:  # pragma: no cover - exercised only where Harbor is installed
-        from harbor.agents.base import BaseAgent
+        from harbor.agents.base import BaseAgent  # type: ignore[import-not-found]
 
         return cast(type, BaseAgent)
     except Exception:
@@ -129,6 +135,20 @@ def harbor_agent_env(environ: Mapping[str, str] | None = None) -> dict[str, str]
         "TERMINUS_REASONING_EFFORT",
         "TERMINUS_TURN_TIMEOUT_S",
         "TERMINUS_HARNESS_COMMIT",
+        "TERMINUS_BENCHMARK_SUITE",
+        "TERMINUS_PROVIDER_ACCOUNT_ID",
+        "TERMINUS_PROVIDER",
+        "TERMINUS_RANDOM_SEED",
+        "TERMINUS_MODEL_CONTEXT_WINDOW",
+        "TERMINUS_MODEL_MAX_OUTPUT_TOKENS",
+        "TERMINUS_LIVE_API_VERSION",
+        "TERMINUS_MAX_INPUT_TOKENS",
+        "TERMINUS_MAX_OUTPUT_TOKENS",
+        "TERMINUS_MAX_TOTAL_TOKENS",
+        "TERMINUS_MAX_COST_USD",
+        "TERMINUS_MAX_WALL_SECONDS",
+        "TERMINUS_MAX_TOOL_CALLS",
+        "TERMINUS_MAX_TURNS",
     ):
         value = source.get(name)
         if value:
@@ -136,15 +156,29 @@ def harbor_agent_env(environ: Mapping[str, str] | None = None) -> dict[str, str]
     return forwarded
 
 
-def _snapshot_tree(root: Path) -> dict[str, float]:
-    """Map every relative file path under ``root`` to its mtime."""
-    out: dict[str, float] = {}
+@dataclass(frozen=True)
+class _WorkspaceEntry:
+    kind: str
+    mtime_ns: int
+    size: int
+    mode: int
+
+
+def _snapshot_tree(root: Path) -> dict[str, _WorkspaceEntry]:
+    """Map the host tree using metadata precise enough for delta transfer."""
+    out: dict[str, _WorkspaceEntry] = {}
     for path in root.rglob("*"):
-        if path.is_file() or path.is_symlink():
-            try:
-                out[path.relative_to(root).as_posix()] = path.lstat().st_mtime
-            except OSError:  # pragma: no cover - defensive
-                continue
+        try:
+            metadata = path.lstat()
+        except OSError:  # pragma: no cover - defensive
+            continue
+        kind = "symlink" if path.is_symlink() else "directory" if path.is_dir() else "file"
+        out[path.relative_to(root).as_posix()] = _WorkspaceEntry(
+            kind=kind,
+            mtime_ns=metadata.st_mtime_ns,
+            size=metadata.st_size,
+            mode=metadata.st_mode,
+        )
     return out
 
 
@@ -161,28 +195,72 @@ class HarborWorkspaceBridge:
     environment: Any
     container_workdir: str = _DEFAULT_WORKDIR
 
-    async def download(self, host_root: Path) -> dict[str, float]:
+    async def download(self, host_root: Path) -> dict[str, _WorkspaceEntry]:
         """Copy the container workdir onto the host; return the initial tree."""
         host_root.mkdir(parents=True, exist_ok=True)
         await self.environment.download_dir(self.container_workdir, host_root)
         return _snapshot_tree(host_root)
 
-    async def upload(self, host_root: Path, before: Mapping[str, float]) -> dict[str, Any]:
-        """Write the host tree back, replaying deletions."""
+    async def upload(
+        self,
+        host_root: Path,
+        before: Mapping[str, _WorkspaceEntry],
+    ) -> dict[str, Any]:
+        """Write only the delta back, faithfully replaying deletions."""
         after = _snapshot_tree(host_root)
-        deleted = sorted(set(before) - set(after))
-        changed = sorted(
-            path for path, mtime in after.items() if before.get(path) != mtime
+        deleted_files = sorted(
+            path for path in set(before) - set(after) if before[path].kind != "directory"
         )
-        await self.environment.upload_dir(host_root, self.container_workdir)
-        for relative in deleted:
+        deleted_dirs = sorted(
+            (path for path in set(before) - set(after) if before[path].kind == "directory"),
+            key=lambda path: (-path.count("/"), path),
+        )
+        type_changes = {
+            path for path in set(before) & set(after) if before[path].kind != after[path].kind
+        }
+        removed_files = sorted(
+            set(deleted_files) | {path for path in type_changes if before[path].kind != "directory"}
+        )
+        removed_dirs = sorted(
+            set(deleted_dirs) | {path for path in type_changes if before[path].kind == "directory"},
+            key=lambda path: (-path.count("/"), path),
+        )
+        for relative in removed_files:
             target = f"{self.container_workdir.rstrip('/')}/{relative}"
             await self.environment.exec(command=f"rm -f -- {_shell_quote(target)}")
+        for relative in removed_dirs:
+            target = f"{self.container_workdir.rstrip('/')}/{relative}"
+            await self.environment.exec(
+                command=f"rmdir -- {_shell_quote(target)} 2>/dev/null || true"
+            )
+
+        changed = sorted(path for path, entry in after.items() if before.get(path) != entry)
+        delta_root = Path(tempfile.mkdtemp(prefix="terminus-harbor-delta-"))
+        try:
+            for relative in changed:
+                source = host_root / relative
+                destination = delta_root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if source.is_symlink():
+                    destination.symlink_to(os.readlink(source))
+                elif source.is_dir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    shutil.copystat(source, destination, follow_symlinks=False)
+                else:
+                    shutil.copy2(source, destination, follow_symlinks=False)
+            if changed:
+                await self.environment.upload_dir(delta_root, self.container_workdir)
+        finally:
+            shutil.rmtree(delta_root, ignore_errors=True)
+        before_files = sum(entry.kind != "directory" for entry in before.values())
+        after_files = sum(entry.kind != "directory" for entry in after.values())
         return {
-            "files_before": len(before),
-            "files_after": len(after),
-            "files_changed": changed,
-            "files_deleted": deleted,
+            "files_before": before_files,
+            "files_after": after_files,
+            "files_changed": [path for path in changed if after[path].kind != "directory"],
+            "files_deleted": deleted_files,
+            "directories_changed": [path for path in changed if after[path].kind == "directory"],
+            "directories_deleted": deleted_dirs,
         }
 
 
@@ -210,6 +288,7 @@ class TerminusHarborAgent(_resolve_base_agent()):  # type: ignore[misc]
         super().__init__(logs_dir, model_name, *args, **kwargs)
         self._harness_factory = harness_factory
         self._summary: dict[str, Any] = {}
+        self._trajectory: dict[str, Any] | None = None
 
     @staticmethod
     def name() -> str:
@@ -257,6 +336,7 @@ class TerminusHarborAgent(_resolve_base_agent()):  # type: ignore[misc]
 
     def _run_request(self, instruction: str, workspace: Path, task_name: str) -> RunRequest:
         model = self.model_name or self._env("TERMINUS_MODEL") or ""
+        suite = self._env("TERMINUS_BENCHMARK_SUITE", "terminal-bench") or "terminal-bench"
         # Harbor's task prose names the in-container workdir (normally
         # `/app`), while Terminus deliberately runs against a host snapshot at
         # a random path. Without this mapping, a correct model follows the
@@ -270,27 +350,72 @@ class TerminusHarborAgent(_resolve_base_agent()):  # type: ignore[misc]
             f"{self.container_workdir.rstrip('/')}/file.txt is file.txt). "
             "Do not access the host path named in this note."
         )
+        defaults = Budgets()
+        budgets = Budgets(
+            max_input_tokens=self._positive_int_env(
+                "TERMINUS_MAX_INPUT_TOKENS", defaults.max_input_tokens
+            ),
+            max_output_tokens=self._positive_int_env(
+                "TERMINUS_MAX_OUTPUT_TOKENS", defaults.max_output_tokens
+            ),
+            max_total_tokens=self._positive_int_env(
+                "TERMINUS_MAX_TOTAL_TOKENS", defaults.max_total_tokens
+            ),
+            max_cost_usd=self._positive_float_env("TERMINUS_MAX_COST_USD", defaults.max_cost_usd),
+            max_wall_seconds=self._positive_int_env(
+                "TERMINUS_MAX_WALL_SECONDS", defaults.max_wall_seconds
+            ),
+            max_tool_calls=self._positive_int_env(
+                "TERMINUS_MAX_TOOL_CALLS", defaults.max_tool_calls
+            ),
+            max_turns=self._positive_int_env("TERMINUS_MAX_TURNS", defaults.max_turns),
+        )
         return RunRequest(
-            suite="terminal-bench",
+            suite=suite,
             task=task_name,
             task_dir=workspace,
             harness_id="terminus-live",
             harness_commit=self._env("TERMINUS_HARNESS_COMMIT", "git:HEAD") or "git:HEAD",
             model_snapshot=ModelCapabilitySnapshot(
-                provider="terminus",
+                provider=self._env("TERMINUS_PROVIDER", "terminus") or "terminus",
                 model=model,
                 api_version=self._env("TERMINUS_LIVE_API_VERSION", "2026-08") or "2026-08",
-                context_window=200_000,
-                max_output_tokens=8_192,
+                context_window=self._positive_int_env("TERMINUS_MODEL_CONTEXT_WINDOW", 200_000),
+                max_output_tokens=self._positive_int_env("TERMINUS_MODEL_MAX_OUTPUT_TOKENS", 8_192),
                 supports_tool_calls=True,
                 supports_streaming=True,
                 supports_cache=True,
             ),
-            random_seed=0,
-            budgets=Budgets(),
+            random_seed=self._non_negative_int_env("TERMINUS_RANDOM_SEED", 0),
+            budgets=budgets,
             reasoning_effort=self._env("TERMINUS_REASONING_EFFORT"),
+            provider_account_id=self._env("TERMINUS_PROVIDER_ACCOUNT_ID"),
             instruction=bridged_instruction,
         )
+
+    def _positive_int_env(self, key: str, default: int) -> int:
+        raw = self._env(key)
+        try:
+            value = int(raw) if raw is not None else default
+        except ValueError:
+            return default
+        return value if value > 0 else default
+
+    def _non_negative_int_env(self, key: str, default: int) -> int:
+        raw = self._env(key)
+        try:
+            value = int(raw) if raw is not None else default
+        except ValueError:
+            return default
+        return value if value >= 0 else default
+
+    def _positive_float_env(self, key: str, default: float) -> float:
+        raw = self._env(key)
+        try:
+            value = float(raw) if raw is not None else default
+        except ValueError:
+            return default
+        return value if value > 0 else default
 
     # -- Harbor agent protocol --------------------------------------------
 
@@ -307,7 +432,8 @@ class TerminusHarborAgent(_resolve_base_agent()):  # type: ignore[misc]
 
     async def run(self, instruction: str, environment: Any, context: Any = None) -> None:
         """Run exactly one Terminus turn against the container's workdir."""
-        task_name = str(getattr(context, "task_name", None) or "terminal-bench-task")
+        suite = self._env("TERMINUS_BENCHMARK_SUITE", "terminal-bench") or "terminal-bench"
+        task_name = str(getattr(context, "task_name", None) or f"{suite}-task")
         bridge = HarborWorkspaceBridge(environment, self.container_workdir)
         host_root = Path(tempfile.mkdtemp(prefix="terminus-harbor-"))
         try:
@@ -315,20 +441,35 @@ class TerminusHarborAgent(_resolve_base_agent()):  # type: ignore[misc]
             harness = self._build_harness()
             request = self._run_request(instruction, host_root, task_name)
             recorder = TrajectoryRecorder(run_id=f"harbor-{task_name}")
-            result: HarnessResult = await asyncio.to_thread(harness.run, request, recorder)
-            sync = await bridge.upload(host_root, before)
-            self._summary.update(
-                {
-                    "task_name": task_name,
-                    "outcome": result.outcome.value
-                    if isinstance(result.outcome, Outcome)
-                    else str(result.outcome),
-                    "metrics": dict(result.metrics),
-                    "harness_notes": result.notes,
-                    "workspace_sync": sync,
-                    "container_workdir": self.container_workdir,
-                }
-            )
+            try:
+                result: HarnessResult = await asyncio.to_thread(harness.run, request, recorder)
+                sync = await bridge.upload(host_root, before)
+                self._summary.update(
+                    {
+                        "task_name": task_name,
+                        "outcome": result.outcome.value
+                        if isinstance(result.outcome, Outcome)
+                        else str(result.outcome),
+                        "metrics": dict(result.metrics),
+                        "cost": asdict(result.cost) if result.cost is not None else None,
+                        "provider_receipts": list(result.provider_receipts),
+                        "evidence_class": result.evidence_class.value,
+                        "independently_verified": result.independently_verified,
+                        "harness_notes": result.notes,
+                        "workspace_sync": sync,
+                        "container_workdir": self.container_workdir,
+                    }
+                )
+                if result.review_trajectory is not None:
+                    self._trajectory = dict(result.review_trajectory)
+            finally:
+                if self._trajectory is None:
+                    self._trajectory = {
+                        "schema": "terminus.harbor-review-trajectory.v1",
+                        "complete": False,
+                        "issues": ["live harness did not provide full review evidence"],
+                        "recorder_events": recorder.to_dicts(),
+                    }
         finally:
             self._write_summary()
             shutil.rmtree(host_root, ignore_errors=True)
@@ -337,6 +478,22 @@ class TerminusHarborAgent(_resolve_base_agent()):  # type: ignore[misc]
         """Persist what the shim did into Harbor's per-trial agent log dir."""
         try:
             self.logs_dir.mkdir(parents=True, exist_ok=True)
+            trajectory_payload = json.dumps(
+                self._trajectory or {},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+            trajectory_name = "trajectory.json"
+            (self.logs_dir / trajectory_name).write_bytes(trajectory_payload)
+            self._summary["trajectory_artifact"] = {
+                "file": trajectory_name,
+                "digest": "sha256:" + hashlib.sha256(trajectory_payload).hexdigest(),
+                "complete": bool((self._trajectory or {}).get("complete")),
+                "event_count": len(
+                    ((self._trajectory or {}).get("transcript") or {}).get("events") or []
+                ),
+            }
             (self.logs_dir / "terminus-agent.json").write_text(
                 json.dumps(self._summary, indent=2, sort_keys=True, default=str),
                 encoding="utf-8",

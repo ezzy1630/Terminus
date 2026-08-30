@@ -78,6 +78,18 @@ suites:
     license: MIT
     default_tier: tier3
     live_provider_required_for_promotion: true
+  - id: deepswe
+    manifest: evals/suites/deepswe.yaml
+    source: pinned_external
+    license: Apache-2.0
+    default_tier: tier3
+    live_provider_required_for_promotion: true
+  - id: swe-atlas-qna
+    manifest: evals/suites/swe-atlas-qna.yaml
+    source: pinned_external
+    license: Apache-2.0
+    default_tier: tier3
+    live_provider_required_for_promotion: true
   - id: swe-bench-verified
     manifest: evals/suites/swe-bench-verified.yaml
     source: pinned_external
@@ -90,6 +102,13 @@ suites:
     license: CC-BY-4.0
     default_tier: tier3
     live_provider_required_for_promotion: true
+
+campaigns:
+  - id: artificial-analysis-coding-agent-index-v1.4
+    manifest: evals/campaigns/artificial-analysis-coding-agent-index-v1.4.yaml
+    model_fixed: true
+    full_matrix_required: true
+    release_evidence_required: true
 
 # Canonical IDs mirror forge_evals.cohort_tasks.COHORTS. The Python catalog
 # owns descriptions, sample tasks, and target population sizes; this registry

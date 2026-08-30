@@ -18,7 +18,7 @@ run's success value.
 Steering actually applied (control plane contract, verbatim field names):
 
 * ``POST /v1/turns`` accepts ``model``, ``reasoning_effort``
-  (``low|medium|high|max``) and ``provider_account_id``. All three are sent.
+  (``low|medium|high|xhigh|max``) and ``provider_account_id``. All three are sent.
 * ``PATCH /v1/sessions/:id`` accepts ``default_model``,
   ``default_reasoning_effort`` and ``default_provider_account_id``. The
   session defaults are set as well so a repair turn the control plane
@@ -39,11 +39,13 @@ Configuration (all required unless a fake server supplies them in tests):
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import json
 import math
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -87,7 +89,7 @@ _TERMINAL_TASK_STATES = {"COMPLETED", "FAILED_VERIFICATION", "BLOCKED", "CANCELL
 _TASK_PENDING_STATE = "TASK_PENDING"
 
 # `parseReasoningEffort` accepts exactly these (packages/provider-core).
-REASONING_EFFORTS = ("low", "medium", "high", "max")
+REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 # Model ids that mean "no live model was requested". Sending one of these as a
 # turn's `model` would earn a 409 MODEL_NOT_ADMITTED from a real control plane.
@@ -95,6 +97,9 @@ _FIXTURE_MODEL_IDS = frozenset({"", "fake", "fake-1", "unknown"})
 
 _TRANSCRIPT_PAGE_LIMIT = 1_000
 _TRANSCRIPT_MAX_EVENTS = 20_000
+_ARTIFACT_PAGE_LIMIT = 200
+_REVIEW_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024
+_REVIEW_TRAJECTORY_MAX_BYTES = 128 * 1024 * 1024
 
 
 _MUTATING_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -127,6 +132,15 @@ class _TranscriptEvents:
     source_available: bool
     truncated: bool
     continuation_cursor: str | None
+
+
+@dataclass(frozen=True)
+class _TaskArtifactInventory:
+    """One complete paginated task artifact inventory, or an explicit gap."""
+
+    artifacts: list[dict[str, Any]]
+    complete: bool
+    issue: str | None
 
 
 @dataclass(frozen=True)
@@ -211,7 +225,8 @@ class TerminusHarness:
             turn_id, task_id=task_id, timeout_seconds=admission.timeout_seconds
         )
 
-        context_manifests, verification = self._collect_artifacts(task_id)
+        artifact_inventory = self._collect_task_artifact_inventory(task_id)
+        context_manifests, verification = self._split_artifacts(artifact_inventory.artifacts)
         transcript = self._collect_events(task_id)
         events = transcript.events
         task_detail = self._optional("GET", f"/v1/tasks/{task_id}") or {}
@@ -289,6 +304,13 @@ class TerminusHarness:
             truncated=transcript.truncated,
             continuation_cursor=transcript.continuation_cursor,
         )
+        review_trajectory = self._build_review_trajectory(
+            task_id=task_id,
+            instruction=user_message,
+            transcript=transcript,
+            inventory=artifact_inventory,
+            model_snapshot=resolved_model_snapshot,
+        )
         metrics_payload = {
             **metrics.to_dict(),
             "model_snapshot": resolved_model_snapshot,
@@ -348,6 +370,7 @@ class TerminusHarness:
             evidence_class=_evidence_class(provider_receipts, receipt_projection_status),
             metrics=metrics_payload,
             provider_receipts=provider_receipts,
+            review_trajectory=review_trajectory,
             notes=json.dumps(
                 {
                     "harness": self.harness_id,
@@ -954,14 +977,15 @@ class TerminusHarness:
 
     def _collect_artifacts(self, task_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Split the task's artifact inventory into manifests and verification."""
+        inventory = self._collect_task_artifact_inventory(task_id)
+        return self._split_artifacts(inventory.artifacts)
+
+    @staticmethod
+    def _split_artifacts(
+        items: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         manifests: list[dict[str, Any]] = []
         verification: list[dict[str, Any]] = []
-        try:
-            page = self._request("GET", f"/v1/tasks/{task_id}/artifacts?limit=100")
-        except TerminusControlError:
-            return manifests, verification
-        raw_items = page.get("artifacts")
-        items = [a for a in raw_items if isinstance(a, dict)] if isinstance(raw_items, list) else []
         for artifact in items:
             # The inventory exposes ingest `purpose`, not a kind field.
             purpose = str(artifact.get("purpose") or "")
@@ -970,6 +994,186 @@ class TerminusHarness:
             elif "context" in purpose or "manifest" in purpose:
                 manifests.append(artifact)
         return manifests, verification
+
+    def _collect_task_artifact_inventory(self, task_id: str) -> _TaskArtifactInventory:
+        """Read every task artifact page; never treat the first page as complete."""
+        artifacts: list[dict[str, Any]] = []
+        skip = 0
+        total: int | None = None
+        while True:
+            try:
+                page = self._request(
+                    "GET",
+                    f"/v1/tasks/{task_id}/artifacts?limit={_ARTIFACT_PAGE_LIMIT}&skip={skip}",
+                )
+            except TerminusControlError as error:
+                return _TaskArtifactInventory(artifacts, False, str(error))
+            raw_items = page.get("artifacts")
+            if not isinstance(raw_items, list) or not all(
+                isinstance(item, dict) for item in raw_items
+            ):
+                return _TaskArtifactInventory(
+                    artifacts,
+                    False,
+                    "task artifact page contained malformed entries",
+                )
+            items = [dict(item) for item in raw_items]
+            page_total = page.get("total")
+            if isinstance(page_total, bool) or not isinstance(page_total, int) or page_total < 0:
+                return _TaskArtifactInventory(
+                    artifacts,
+                    False,
+                    "task artifact page omitted a valid total",
+                )
+            if total is None:
+                total = page_total
+            elif total != page_total:
+                return _TaskArtifactInventory(
+                    artifacts,
+                    False,
+                    "task artifact total changed during pagination",
+                )
+            artifacts.extend(items)
+            next_cursor = page.get("next_cursor")
+            if next_cursor is None:
+                if len(artifacts) != total:
+                    return _TaskArtifactInventory(
+                        artifacts,
+                        False,
+                        f"task artifact inventory ended at {len(artifacts)} of {total}",
+                    )
+                return _TaskArtifactInventory(artifacts, True, None)
+            if not isinstance(next_cursor, str) or not next_cursor.isdigit():
+                return _TaskArtifactInventory(
+                    artifacts,
+                    False,
+                    "task artifact continuation was not a numeric offset",
+                )
+            next_skip = int(next_cursor)
+            if next_skip != skip + len(items) or next_skip <= skip:
+                return _TaskArtifactInventory(
+                    artifacts,
+                    False,
+                    "task artifact continuation did not advance exactly",
+                )
+            skip = next_skip
+
+    def _build_review_trajectory(
+        self,
+        *,
+        task_id: str,
+        instruction: str,
+        transcript: _TranscriptEvents,
+        inventory: _TaskArtifactInventory,
+        model_snapshot: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Assemble full Harbor-review evidence outside the ordinary RunRecord."""
+        relevant = [
+            artifact
+            for artifact in inventory.artifacts
+            if str(artifact.get("purpose") or "").startswith(
+                ("provider_request", "provider_response", "tool_arguments:", "tool_result:")
+            )
+        ]
+        fetched: list[dict[str, Any]] = []
+        consumed = 0
+        complete = inventory.complete and not transcript.truncated
+        issues = [issue for issue in (inventory.issue,) if issue]
+        if transcript.truncated:
+            issues.append(
+                "task transcript exceeded the in-memory review bound; continuation="
+                + str(transcript.continuation_cursor)
+            )
+        for artifact in relevant:
+            remaining = _REVIEW_TRAJECTORY_MAX_BYTES - consumed
+            if remaining <= 0:
+                complete = False
+                issues.append("review artifact total exceeded the trajectory byte bound")
+                break
+            body, issue = self._fetch_review_artifact(
+                task_id,
+                artifact,
+                max_bytes=min(_REVIEW_ARTIFACT_MAX_BYTES, remaining),
+            )
+            fetched.append(body)
+            consumed += int(body.get("size_bytes") or 0)
+            if issue is not None:
+                complete = False
+                issues.append(issue)
+        return {
+            "schema": "terminus.harbor-review-trajectory.v1",
+            "complete": complete,
+            "issues": issues,
+            "task_id": task_id,
+            "instruction": instruction,
+            "model": dict(model_snapshot),
+            "transcript": {
+                "events": transcript.events,
+                "source_available": transcript.source_available,
+                "truncated": transcript.truncated,
+                "continuation_cursor": transcript.continuation_cursor,
+            },
+            "artifacts": fetched,
+        }
+
+    def _fetch_review_artifact(
+        self,
+        task_id: str,
+        artifact: Mapping[str, Any],
+        *,
+        max_bytes: int,
+    ) -> tuple[dict[str, Any], str | None]:
+        """Fetch one task-owned CAS value with an explicit hard byte ceiling."""
+        digest = artifact.get("hash")
+        purpose = str(artifact.get("purpose") or "")
+        if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+            issue = f"{purpose or 'artifact'} has no exact CAS digest"
+            return {**dict(artifact), "status": "invalid_digest", "size_bytes": 0}, issue
+        path = (
+            f"/v1/artifacts/{urllib.parse.quote(digest, safe=':')}"
+            f"?task_id={urllib.parse.quote(task_id)}"
+        )
+        url = f"{self._config.base_url}{path}"
+        request = urllib.request.Request(url, method="GET")
+        if self._config.token:
+            request.add_header("authorization", f"Bearer {self._config.token}")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = response.read(max_bytes + 1)
+                media_type = response.headers.get("content-type", "application/octet-stream")
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as error:
+            issue = f"{purpose} could not be fetched for review: {error}"
+            return {**dict(artifact), "status": "fetch_failed", "size_bytes": 0}, issue
+        if len(payload) > max_bytes:
+            issue = f"{purpose} exceeded the {max_bytes}-byte review artifact bound"
+            return {
+                **dict(artifact),
+                "status": "oversized",
+                "size_bytes": len(payload),
+            }, issue
+        observed = "sha256:" + hashlib.sha256(payload).hexdigest()
+        if observed != digest:
+            issue = f"{purpose} content digest {observed} did not match {digest}"
+            return {
+                **dict(artifact),
+                "status": "digest_mismatch",
+                "observed_digest": observed,
+                "size_bytes": len(payload),
+            }, issue
+        try:
+            content = payload.decode("utf-8")
+            encoding = "utf-8"
+        except UnicodeDecodeError:
+            content = base64.b64encode(payload).decode("ascii")
+            encoding = "base64"
+        return {
+            **dict(artifact),
+            "status": "resolved",
+            "media_type": media_type,
+            "size_bytes": len(payload),
+            "encoding": encoding,
+            "content": content,
+        }, None
 
     def _collect_events(self, task_id: str) -> _TranscriptEvents:
         """Read the task's durable event log oldest-first.

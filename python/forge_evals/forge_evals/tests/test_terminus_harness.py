@@ -111,14 +111,16 @@ class _StubControlPlane(BaseHTTPRequestHandler):
         elif self.path == "/v1/tasks/task-1":
             self._json(200, {"repair_attempts": self.repair_attempts})
         elif self.path.startswith("/v1/tasks/task-1/artifacts"):
-            assert self.path.endswith("limit=100")
+            assert self.path.endswith("limit=200&skip=0")
             self._json(
                 200,
                 {
                     "artifacts": [
                         {"purpose": "context-epoch-baseline", "hash": "sha256:" + "a" * 64},
                         {"purpose": "verification-repair-directive", "hash": "sha256:" + "b" * 64},
-                    ]
+                    ],
+                    "total": 2,
+                    "next_cursor": None,
                 },
             )
         elif self.path == "/v1/workspaces/ws-1/revision":

@@ -10,6 +10,13 @@ import yaml
 from forge_evals.evidence import EvidenceClass
 from forge_evals.run_record import Outcome
 from forge_evals.runners import (
+    DEEP_SWE_DATASET,
+    DEEP_SWE_DATASET_VERSION,
+    DEEP_SWE_PIER_COMMIT,
+    DEEP_SWE_TASK_COMMIT,
+    SWE_ATLAS_QNA_DATASET,
+    SWE_ATLAS_QNA_HARBOR_COMMIT,
+    SWE_ATLAS_QNA_TASK_COMMIT,
     TERMINAL_BENCH_DATASET,
     TERMINAL_BENCH_DATASET_VERSION,
     TERMINAL_BENCH_HARBOR_COMMIT,
@@ -21,10 +28,12 @@ from forge_evals.runners import (
     BenchmarkInvocation,
     ExternalHarnessContract,
     ExternalHarnessUnavailable,
+    HarborSweAtlasQnaAdapter,
     HarborTerminalBenchAdapter,
     HarnessResult,
     LiveHarnessContract,
     ModelCapabilitySnapshot,
+    PierDeepSweAdapter,
     RunRequest,
     SweBenchProAdapter,
     SweBenchVerifiedAdapter,
@@ -133,8 +142,13 @@ def test_harbor_translation_uses_pinned_dataset_and_task_filter(tmp_path: Path) 
     assert invocation.argv == (
         "harbor",
         "run",
-        "--dataset",
-        f"{TERMINAL_BENCH_DATASET}@{TERMINAL_BENCH_DATASET_VERSION}",
+        "--repo",
+        (
+            "https://github.com/harbor-framework/terminal-bench-2-1.git"
+            f"@{TERMINAL_BENCH_TASK_COMMIT}"
+        ),
+        "--path",
+        "tasks",
         "--agent",
         "terminus-2",
         "--model",
@@ -144,7 +158,7 @@ def test_harbor_translation_uses_pinned_dataset_and_task_filter(tmp_path: Path) 
         "--include-task-name",
         "chess-best-move",
     )
-    assert invocation.task_manifest.dataset_revision == TERMINAL_BENCH_HARBOR_COMMIT
+    assert invocation.task_manifest.dataset_revision == TERMINAL_BENCH_TASK_COMMIT
     assert invocation.task_manifest.task_commit == TERMINAL_BENCH_TASK_COMMIT
     assert adapter.manifest.task_count == TERMINAL_BENCH_TASK_COUNT
 
@@ -161,8 +175,76 @@ def test_terminal_bench_adapter_constants_match_manifest_identity() -> None:
     assert adapter["task_count"] == TERMINAL_BENCH_TASK_COUNT
     assert adapter["harness"]["version"] == TERMINAL_BENCH_HARBOR_VERSION
     assert adapter["harness"]["commit"] == TERMINAL_BENCH_HARBOR_COMMIT
-    assert adapter["registry"]["commit"] == TERMINAL_BENCH_HARBOR_COMMIT
     assert adapter["task_source"]["commit"] == TERMINAL_BENCH_TASK_COMMIT
+
+
+def test_terminal_bench_uses_current_artificial_analysis_v14_dataset() -> None:
+    """The public comparison moved from Terminal-Bench 2.0 to 2.1 in AA v1.4."""
+    manifest = yaml.safe_load(
+        (SUITES_DIR / "terminal-bench.yaml").read_text(encoding="utf-8")
+    )
+    suite = manifest["suite"]
+    adapter = suite["adapter"]
+
+    assert suite["version"] == 21
+    assert suite["grader_version"] == "terminal-bench-2.1"
+    assert adapter["dataset"] == "terminal-bench/terminal-bench-2-1"
+    assert adapter["dataset_version"] == "2.1"
+    assert adapter["task_source"]["repository"] == (
+        "https://github.com/harbor-framework/terminal-bench-2-1.git"
+    )
+
+
+def test_deepswe_translation_uses_pinned_pier_and_task_source(tmp_path: Path) -> None:
+    adapter = adapter_for_suite(SUITES_DIR / "deepswe.yaml")
+    assert isinstance(adapter, PierDeepSweAdapter)
+
+    invocation = adapter.translate(_request(tmp_path, suite="deepswe", task="go-task"))
+
+    assert invocation.argv == (
+        "pier",
+        "run",
+        "--path",
+        "tasks/go-task",
+        "--agent-import-path",
+        "forge_evals.runners.harbor_agent:TerminusHarborAgent",
+        "--model",
+        "test-model",
+        "--n-concurrent",
+        "1",
+    )
+    assert invocation.task_manifest.dataset == DEEP_SWE_DATASET
+    assert invocation.task_manifest.dataset_version == DEEP_SWE_DATASET_VERSION
+    assert invocation.task_manifest.dataset_revision == DEEP_SWE_TASK_COMMIT
+    assert invocation.task_manifest.harness_commit == DEEP_SWE_PIER_COMMIT
+
+
+def test_swe_atlas_translation_uses_pinned_official_repository(tmp_path: Path) -> None:
+    adapter = adapter_for_suite(SUITES_DIR / "swe-atlas-qna.yaml")
+    assert isinstance(adapter, HarborSweAtlasQnaAdapter)
+
+    invocation = adapter.translate(
+        _request(tmp_path, suite="swe-atlas-qna", task="task-6905333b74f22949d97ba998")
+    )
+
+    assert invocation.argv == (
+        "harbor",
+        "run",
+        "--repo",
+        f"https://github.com/scaleapi/SWE-Atlas.git@{SWE_ATLAS_QNA_TASK_COMMIT}",
+        "--path",
+        "data/qa",
+        "--agent",
+        "terminus-2",
+        "--model",
+        "test-model",
+        "--n-concurrent",
+        "1",
+        "--include-task-name",
+        "task-6905333b74f22949d97ba998",
+    )
+    assert invocation.task_manifest.dataset == SWE_ATLAS_QNA_DATASET
+    assert invocation.task_manifest.harness_commit == SWE_ATLAS_QNA_HARBOR_COMMIT
 
 
 def test_swebench_translation_does_not_invent_a_patch_command(tmp_path: Path) -> None:

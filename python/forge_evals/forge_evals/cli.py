@@ -22,6 +22,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import uuid
 from collections.abc import Sequence
@@ -30,6 +32,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .aa_coding_index import (
+    AaCodingIndexContract,
+    aa_record_issues,
+    evaluate_aa_coding_index,
+)
 from .analysis.aggregate import summarize_runs
 from .analysis.load_runs import (
     RunCatalog,
@@ -105,6 +112,10 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_exit_gate_cmd(sub)
     _add_conformance_cmd(sub)
     _add_bench_check_cmd(sub)
+    _add_aa_coding_index_cmd(sub)
+    _add_aa_run_cmd(sub)
+    _add_aa_admit_review_cmd(sub)
+    _add_aa_analyze_review_cmd(sub)
     return p
 
 
@@ -260,7 +271,7 @@ def _add_run_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     p.add_argument("--model", default="fake-1", help="Model id.")
     p.add_argument(
         "--effort",
-        choices=["low", "medium", "high", "max"],
+        choices=["low", "medium", "high", "xhigh", "max"],
         default=None,
         help="Reasoning effort; sets the turn's reasoning_effort and the "
         "session's default_reasoning_effort.",
@@ -387,7 +398,11 @@ def _add_compare_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     p.add_argument("--provider", required=True, help="Canonical model provider id.")
     p.add_argument("--model", required=True)
     p.add_argument("--api-version", default="catalog-1")
-    p.add_argument("--effort", choices=["low", "medium", "high", "max"], default="high")
+    p.add_argument(
+        "--effort",
+        choices=["low", "medium", "high", "xhigh", "max"],
+        default="high",
+    )
     p.add_argument("--seeds", type=int, default=1)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-steps", type=int, default=50)
@@ -442,7 +457,11 @@ def _isolation_attestation(path_value: str | None) -> tuple[bool, str | None]:
     if decoded.get("schema") != "terminus.external-isolation-attestation.v1":
         raise ValueError("isolation attestation has an unsupported schema")
     verifier = decoded.get("verifier")
-    if not isinstance(verifier, str) or not verifier.strip() or verifier in {"self", "terminus-eval"}:
+    if (
+        not isinstance(verifier, str)
+        or not verifier.strip()
+        or verifier in {"self", "terminus-eval"}
+    ):
         raise ValueError("isolation attestation requires an external verifier identity")
     if decoded.get("verified") is not True:
         raise ValueError("isolation attestation is not verified")
@@ -684,8 +703,8 @@ def _cmd_run_live(args: argparse.Namespace) -> int:
 
     Three suite families are routed here:
 
-    * ``terminal-bench`` / ``harbor`` — delegated to Harbor through the pinned
-      adapter, with the Terminus agent shim registered as Harbor's agent.
+    * ``terminal-bench``, ``swe-atlas-qna``, and ``deepswe`` — delegated to
+      their pinned Harbor-compatible runner with the Terminus agent shim.
     * ``swe-bench-pro`` / ``swe-bench*`` — one Terminus turn on a materialised
       instance checkout, then the pinned evaluator (or an honest
       ``evaluation_pending`` with the prediction path).
@@ -778,9 +797,14 @@ def _internal_workspace(args: argparse.Namespace, seed: int) -> Path:
 
 
 def _is_harbor_suite(suite: str) -> bool:
-    """Whether a suite id routes to the Harbor / Terminal-Bench adapter."""
+    """Whether a suite routes to a Harbor-compatible external task runner."""
     normalized = suite.strip().lower()
-    return normalized in {"terminal-bench", "harbor"} or normalized.startswith("terminal-bench")
+    return normalized in {
+        "deepswe",
+        "harbor",
+        "swe-atlas-qna",
+        "terminal-bench",
+    } or normalized.startswith("terminal-bench")
 
 
 def _is_swebench_pro_suite(suite: str) -> bool:
@@ -795,11 +819,12 @@ def _suite_manifest_path(suite: str) -> Path:
 
 
 def _cmd_run_harbor(args: argparse.Namespace) -> int:
-    """Run Terminal-Bench through Harbor with the Terminus agent shim."""
+    """Run a Harbor-format suite with the Terminus agent shim."""
     from .runners.harbor_agent import TERMINUS_HARBOR_AGENT_IMPORT_PATH, harbor_agent_env
     from .runners.harbor_runner import HarborUnavailable, run_harbor_tasks
 
-    manifest_path = _suite_manifest_path("terminal-bench")
+    suite_id = "terminal-bench" if args.suite.strip().lower() == "harbor" else args.suite
+    manifest_path = _suite_manifest_path(suite_id)
     if not manifest_path.exists():
         print(f"error: suite manifest not found: {manifest_path}", file=sys.stderr)
         return 1
@@ -823,13 +848,14 @@ def _cmd_run_harbor(args: argparse.Namespace) -> int:
                 agent_import_path=TERMINUS_HARBOR_AGENT_IMPORT_PATH,
                 agent_env=env,
                 jobs_dir=output_dir / "harbor-jobs",
+                harbor_executable=os.environ.get("TERMINUS_BENCHMARK_RUNNER_EXECUTABLE"),
             )
         except HarborUnavailable as error:
             print(f"harbor run unavailable: {error}", file=sys.stderr)
             return 2
         _write_record(record, output_dir, args.format)
         n += 1
-        print(f"  harbor run {n}/{args.seeds}: {record.run_id} outcome={record.outcome.value}")
+        print(f"  external run {n}/{args.seeds}: {record.run_id} outcome={record.outcome.value}")
     print(f"live runs completed: {n}")
     return 0
 
@@ -1389,6 +1415,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         "run": _cmd_run,
         "compare": _cmd_compare,
         "bench-check": _cmd_bench_check,
+        "aa-coding-index": _cmd_aa_coding_index,
+        "aa-run": _cmd_aa_run,
+        "aa-admit-review": _cmd_aa_admit_review,
+        "aa-analyze-review": _cmd_aa_analyze_review,
         "aggregate": _cmd_aggregate,
         "dashboard": _cmd_dashboard,
         "promote": _cmd_promote,
@@ -1403,6 +1433,515 @@ def _dispatch(args: argparse.Namespace) -> int:
         print(f"unknown command: {args.command}", file=sys.stderr)
         return 1
     return handler(args)
+
+
+def _add_aa_coding_index_cmd(sub: argparse._SubParsersAction[Any]) -> None:
+    p = sub.add_parser(
+        "aa-coding-index",
+        help="Score a complete Artificial Analysis v1.4-compatible campaign.",
+    )
+    p.add_argument("--campaign", required=True, help="Pinned campaign contract YAML.")
+    p.add_argument("--runs-dir", required=True, help="Directory of immutable run records.")
+    p.add_argument("--harness", required=True, help="Harness id to score.")
+    p.add_argument("--output", default="-", help="Result JSON path or '-' for stdout.")
+
+
+def _cmd_aa_coding_index(args: argparse.Namespace) -> int:
+    contract = AaCodingIndexContract.load(args.campaign)
+    catalog = _load_runs_dir(args.runs_dir)
+    result = evaluate_aa_coding_index(catalog.records, contract, args.harness)
+    _write_json(result.to_dict(), args.output)
+    return 0 if result.passed else 1
+
+
+def _add_aa_admit_review_cmd(sub: argparse._SubParsersAction[Any]) -> None:
+    p = sub.add_parser(
+        "aa-admit-review",
+        help="Admit one externally reviewed Terminal-Bench result into a campaign.",
+    )
+    p.add_argument("--campaign", required=True, help="Pinned campaign contract YAML.")
+    p.add_argument("--record", required=True, help="Pending immutable run record JSON.")
+    p.add_argument("--review", required=True, help="External reward-hacking review JSON.")
+    p.add_argument("--runs-dir", required=True, help="Durable campaign output directory.")
+    p.add_argument("--harness", default="terminus-live", help="Harness id to admit.")
+
+
+def _cmd_aa_admit_review(args: argparse.Namespace) -> int:
+    from .reward_hacking_review import (
+        admit_reward_hacking_review,
+        load_reward_hacking_review,
+    )
+    from .run_record import write_jsonl
+
+    contract = AaCodingIndexContract.load(args.campaign)
+    record = RunRecord.from_json(args.record)
+    pre_review_issues = aa_record_issues(record, contract)
+    if {issue.key for issue in pre_review_issues} != {"reward_hacking_review"}:
+        detail = "; ".join(f"{issue.key}: {issue.detail}" for issue in pre_review_issues)
+        raise ValueError(
+            "pending record has defects beyond the required reward-hacking review: " + detail
+        )
+    review = load_reward_hacking_review(args.review)
+    if review.verdict != "not_hacked":
+        raise ValueError("a hacked verdict cannot be admitted as benchmark evidence")
+    admitted = admit_reward_hacking_review(record, review)
+    defects = aa_record_issues(admitted, contract)
+    if defects:
+        detail = "; ".join(f"{issue.key}: {issue.detail}" for issue in defects)
+        raise ValueError("reviewed record remains inadmissible: " + detail)
+
+    runs_dir = Path(args.runs_dir).resolve()
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    existing = _load_runs_dir(str(runs_dir)).records
+    key = (admitted.harness, admitted.suite, admitted.task, admitted.random_seed)
+    if any((row.harness, row.suite, row.task, row.random_seed) == key for row in existing):
+        raise ValueError("the reviewed campaign cell is already admitted")
+    if admitted.harness != args.harness:
+        raise ValueError(
+            f"reviewed record harness {admitted.harness!r} does not match {args.harness!r}"
+        )
+    write_jsonl((admitted,), runs_dir / "runs.jsonl")
+    admitted.to_json(
+        runs_dir
+        / "admitted-reviews"
+        / f"run-{_safe_record_filename_component(admitted.run_id)}.json"
+    )
+    print(f"admitted reviewed result: {admitted.suite}/{admitted.task} seed={admitted.random_seed}")
+    return 0
+
+
+def _add_aa_analyze_review_cmd(sub: argparse._SubParsersAction[Any]) -> None:
+    p = sub.add_parser(
+        "aa-analyze-review",
+        help="Run the pinned Harbor reward-hacking judge and admit its verdict.",
+    )
+    p.add_argument("--campaign", required=True, help="Pinned campaign contract YAML.")
+    p.add_argument("--record", required=True, help="Pending Terminal-Bench run JSON.")
+    p.add_argument("--runs-dir", required=True, help="Durable campaign output directory.")
+    p.add_argument("--harness", default="terminus-live", help="Harness id to admit.")
+    p.add_argument("--runner-timeout-seconds", type=float, default=7_200.0)
+
+
+def _cmd_aa_analyze_review(args: argparse.Namespace) -> int:
+    from .reward_hacking_review import harbor_reward_hacking_review_payload
+
+    if args.runner_timeout_seconds <= 0:
+        raise ValueError("--runner-timeout-seconds must be positive")
+    contract = AaCodingIndexContract.load(args.campaign)
+    record = RunRecord.from_json(args.record)
+    defects = aa_record_issues(record, contract)
+    if {issue.key for issue in defects} != {"reward_hacking_review"}:
+        detail = "; ".join(f"{issue.key}: {issue.detail}" for issue in defects)
+        raise ValueError("record is not ready for reward-hacking analysis: " + detail)
+    if record.suite != "terminal-bench" or not record.success:
+        raise ValueError("only passing Terminal-Bench records require reward-hacking analysis")
+
+    trial_artifact = next(
+        (artifact for artifact in record.artifacts if artifact.get("kind") == "harbor_trials"),
+        None,
+    )
+    trials = trial_artifact.get("trials") if isinstance(trial_artifact, dict) else None
+    if not isinstance(trials, list) or len(trials) != 1 or not isinstance(trials[0], dict):
+        raise ValueError("record has no unambiguous Harbor trial artifact")
+    results_path = trials[0].get("results_path")
+    if not isinstance(results_path, str):
+        raise ValueError("Harbor trial artifact has no results path")
+    trial_dir = Path(results_path).resolve().parent
+    if not (trial_dir / "result.json").is_file():
+        raise ValueError("Harbor trial directory no longer contains result.json")
+
+    trajectory = next(
+        (
+            artifact
+            for artifact in record.artifacts
+            if artifact.get("kind") == "terminus_trajectory"
+            and artifact.get("status") == "resolved"
+            and artifact.get("complete") is True
+        ),
+        None,
+    )
+    if trajectory is None:
+        raise ValueError("record has no complete Terminus review trajectory")
+    trajectory_path = trial_dir / "agent" / "trajectory.json"
+    if not trajectory_path.is_file():
+        raise ValueError("Harbor trial directory no longer contains agent/trajectory.json")
+    observed_trajectory_digest = (
+        "sha256:" + hashlib.sha256(trajectory_path.read_bytes()).hexdigest()
+    )
+    if trajectory.get("digest") != observed_trajectory_digest:
+        raise ValueError("Harbor trajectory no longer matches the immutable run record")
+
+    runner_source = contract.runner_sources.get("terminal-bench")
+    if runner_source is None:
+        raise ValueError("campaign has no pinned Terminal-Bench Harbor source")
+    uvx = shutil.which("uvx")
+    if uvx is None:
+        raise ValueError("uvx is required to run the pinned Harbor analyzer")
+    repo_root = Path(__file__).resolve().parents[3]
+    rubric_path = repo_root / "evals" / "rubrics" / "terminal-bench-reward-hacking-v1.4.toml"
+    if not rubric_path.is_file():
+        raise ValueError("pinned reward-hacking rubric is missing")
+    runs_dir = Path(args.runs_dir).resolve()
+    analysis_jobs = runs_dir / "review-jobs" / uuid.uuid4().hex
+    command = [
+        uvx,
+        "--from",
+        runner_source,
+        "harbor",
+        "analyze",
+        str(trial_dir),
+        "--rubric",
+        str(rubric_path),
+        "--agent",
+        "claude-code",
+        "--model",
+        "claude-sonnet-5",
+        "--passing",
+        "--n-concurrent",
+        "1",
+        "--n-attempts",
+        "1",
+        "--jobs-dir",
+        str(analysis_jobs),
+        "--quiet",
+    ]
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=args.runner_timeout_seconds,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ValueError(
+            "pinned Harbor reward-hacking analysis failed: "
+            + (completed.stderr or completed.stdout)[-4_000:]
+        )
+    reports: list[tuple[Path, dict[str, Any]]] = []
+    for candidate in analysis_jobs.rglob("analysis.json"):
+        try:
+            raw_report = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(raw_report, dict) and isinstance(raw_report.get("results"), list):
+            reports.append((candidate, raw_report))
+    if len(reports) != 1:
+        raise ValueError(
+            f"Harbor analyzer produced {len(reports)} fresh job reports; expected exactly one"
+        )
+    report_results = reports[0][1]["results"]
+    if len(report_results) != 1 or not isinstance(report_results[0], dict):
+        raise ValueError("Harbor analyzer job report did not contain exactly one trial result")
+    report_result = report_results[0]
+    if report_result.get("error"):
+        raise ValueError(f"Harbor reward-hacking judge failed: {report_result['error']}")
+    report_checks = report_result.get("checks")
+    report_reward = report_checks.get("reward_hacking") if isinstance(report_checks, dict) else None
+    if not isinstance(report_reward, dict) or report_reward.get("outcome") not in {
+        "pass",
+        "fail",
+    }:
+        raise ValueError("Harbor job report has no decisive reward_hacking outcome")
+    analysis_path = analysis_jobs / "validated-analysis.json"
+    _write_json(report_result, str(analysis_path))
+    review_payload = harbor_reward_hacking_review_payload(
+        record,
+        analysis_path=analysis_path,
+        runner_source=runner_source,
+        rubric_path=rubric_path,
+    )
+    review_path = (
+        runs_dir / "reviews" / f"review-{_safe_record_filename_component(record.run_id)}.json"
+    )
+    _write_json(review_payload, str(review_path))
+    return _cmd_aa_admit_review(
+        argparse.Namespace(
+            campaign=args.campaign,
+            record=args.record,
+            review=str(review_path),
+            runs_dir=args.runs_dir,
+            harness=args.harness,
+        )
+    )
+
+
+def _add_aa_run_cmd(sub: argparse._SubParsersAction[Any]) -> None:
+    p = sub.add_parser(
+        "aa-run",
+        help="Run or resume the pinned full AA v1.4 campaign through Terminus.",
+    )
+    p.add_argument("--campaign", required=True, help="Pinned campaign contract YAML.")
+    p.add_argument("--runs-dir", required=True, help="Durable campaign output directory.")
+    p.add_argument("--harness", default="terminus-live", help="Harness id to record.")
+    p.add_argument(
+        "--harness-commit",
+        required=True,
+        help="Exact 40-character Git commit or sha256 source identity.",
+    )
+    p.add_argument(
+        "--provider-account",
+        required=True,
+        help="Exact Terminus provider account that serves the frozen model.",
+    )
+    p.add_argument("--concurrency", type=int, default=1)
+    p.add_argument("--starting-seed", type=int, default=0)
+    p.add_argument(
+        "--max-attempts",
+        type=int,
+        default=None,
+        help="Run only this many pending cells; intended for diagnostic shakedowns.",
+    )
+    p.add_argument("--max-input-tokens", type=int, default=1_000_000)
+    p.add_argument("--max-output-tokens", type=int, default=128_000)
+    p.add_argument("--max-total-tokens", type=int, default=2_000_000)
+    p.add_argument("--max-cost-usd", type=float, default=5.0)
+    p.add_argument("--max-wall-seconds", type=int, default=10_800)
+    p.add_argument("--max-tool-calls", type=int, default=500)
+    p.add_argument("--max-turns", type=int, default=50)
+    p.add_argument("--runner-timeout-seconds", type=float, default=14_400.0)
+    p.add_argument(
+        "--runner-executable",
+        default=None,
+        help="Diagnostic executable override; its records are intentionally ineligible.",
+    )
+    p.add_argument("--output", default=None, help="Campaign status JSON path.")
+
+
+def _cmd_aa_run(args: argparse.Namespace) -> int:
+    """Execute one resumable pass over the exact 978-cell campaign."""
+    from .aa_campaign import AaCampaignPlan, build_aa_campaign_plan, execute_aa_campaign_plan
+    from .reward_hacking_review import reward_hacking_review_request
+    from .run_record import write_jsonl
+    from .runners.harbor_agent import TERMINUS_HARBOR_AGENT_IMPORT_PATH, harbor_agent_env
+    from .runners.harbor_runner import benchmark_sources_cache_dir, run_harbor_tasks
+
+    contract = AaCodingIndexContract.load(args.campaign)
+    if re.fullmatch(r"[0-9a-f]{40}", args.harness_commit) is None:
+        raise ValueError("--harness-commit must be the exact Git commit of this checkout")
+    positive_values = {
+        "--concurrency": args.concurrency,
+        "--max-input-tokens": args.max_input_tokens,
+        "--max-output-tokens": args.max_output_tokens,
+        "--max-total-tokens": args.max_total_tokens,
+        "--max-cost-usd": args.max_cost_usd,
+        "--max-wall-seconds": args.max_wall_seconds,
+        "--max-tool-calls": args.max_tool_calls,
+        "--max-turns": args.max_turns,
+        "--runner-timeout-seconds": args.runner_timeout_seconds,
+    }
+    for name, value in positive_values.items():
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
+    if args.max_attempts is not None and args.max_attempts <= 0:
+        raise ValueError("--max-attempts must be positive")
+
+    repo_root = Path(__file__).resolve().parents[3]
+    _verify_exact_harness_checkout(repo_root, args.harness_commit)
+    runs_dir = Path(args.runs_dir).resolve()
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    existing = _load_runs_dir(str(runs_dir)).records
+    invalid_existing = [
+        record
+        for record in existing
+        if record.harness == args.harness and aa_record_issues(record, contract)
+    ]
+    if invalid_existing:
+        raise ValueError(
+            f"{len(invalid_existing)} canonical records are inadmissible; preserve them outside "
+            "runs.jsonl before resuming so duplicate cells cannot contaminate the campaign"
+        )
+
+    manifests = {
+        component.suite: repo_root / "evals" / "suites" / f"{component.suite}.yaml"
+        for component in contract.components
+    }
+    plan = build_aa_campaign_plan(
+        contract,
+        manifest_paths=manifests,
+        sources_dir=benchmark_sources_cache_dir(),
+        existing_records=existing,
+        harness=args.harness,
+        starting_seed=args.starting_seed,
+        admissible_record=lambda record: not aa_record_issues(record, contract),
+    )
+    if args.max_attempts is not None:
+        plan = AaCampaignPlan(
+            attempts=plan.attempts,
+            pending=plan.pending[: args.max_attempts],
+            completed_keys=plan.completed_keys,
+        )
+
+    base_agent_env = harbor_agent_env()
+    agent_env = {
+        **base_agent_env,
+        "TERMINUS_MODEL": contract.model,
+        "TERMINUS_PROVIDER": contract.provider,
+        "TERMINUS_REASONING_EFFORT": contract.reasoning_effort,
+        "TERMINUS_PROVIDER_ACCOUNT_ID": args.provider_account,
+        "TERMINUS_HARNESS_COMMIT": args.harness_commit,
+        "TERMINUS_MAX_INPUT_TOKENS": str(args.max_input_tokens),
+        "TERMINUS_MAX_OUTPUT_TOKENS": str(args.max_output_tokens),
+        "TERMINUS_MAX_TOTAL_TOKENS": str(args.max_total_tokens),
+        "TERMINUS_MAX_COST_USD": str(args.max_cost_usd),
+        "TERMINUS_MAX_WALL_SECONDS": str(args.max_wall_seconds),
+        "TERMINUS_MAX_TOOL_CALLS": str(args.max_tool_calls),
+        "TERMINUS_MAX_TURNS": str(args.max_turns),
+        "TERMINUS_MODEL_CONTEXT_WINDOW": "1050000",
+        "TERMINUS_MODEL_MAX_OUTPUT_TOKENS": "128000",
+    }
+    budgets = Budgets(
+        max_input_tokens=args.max_input_tokens,
+        max_output_tokens=args.max_output_tokens,
+        max_total_tokens=args.max_total_tokens,
+        max_cost_usd=args.max_cost_usd,
+        max_wall_seconds=args.max_wall_seconds,
+        max_tool_calls=args.max_tool_calls,
+        max_turns=args.max_turns,
+    )
+    execution_id = uuid.uuid4().hex
+    rejected_dir = runs_dir / "rejected" / execution_id
+    pending_review_dir = runs_dir / "pending-reviews" / execution_id
+
+    def run_attempt(attempt: Any) -> RunRecord:
+        attempt_agent_env = {
+            **agent_env,
+            "TERMINUS_RANDOM_SEED": str(attempt.seed),
+        }
+        request = RunRequest(
+            suite=attempt.suite,
+            task=attempt.task,
+            task_dir=attempt.task_dir,
+            harness_id=args.harness,
+            harness_commit=args.harness_commit,
+            model_snapshot=ModelCapabilitySnapshot(
+                provider=contract.provider,
+                model=contract.model,
+                api_version=os.environ.get("TERMINUS_LIVE_API_VERSION", "2026-08"),
+                context_window=1_050_000,
+                max_output_tokens=128_000,
+                supports_tool_calls=True,
+                supports_streaming=True,
+                supports_cache=True,
+                pricing={"input": 0.20, "cached_input": 0.02, "output": 1.20},
+            ),
+            random_seed=attempt.seed,
+            budgets=budgets,
+            reasoning_effort=contract.reasoning_effort,
+            provider_account_id=args.provider_account,
+        )
+        safe_task = _safe_record_filename_component(attempt.task)
+        record = run_harbor_tasks(
+            manifest_path=attempt.manifest_path,
+            request=request,
+            seed=attempt.seed,
+            agent_import_path=TERMINUS_HARBOR_AGENT_IMPORT_PATH,
+            agent_env=attempt_agent_env,
+            jobs_dir=(
+                runs_dir / "jobs" / execution_id / attempt.suite / safe_task / str(attempt.seed)
+            ),
+            harbor_executable=args.runner_executable,
+            sources_dir=benchmark_sources_cache_dir(),
+            timeout_seconds=args.runner_timeout_seconds,
+        )
+        defects = aa_record_issues(record, contract)
+        if defects:
+            safe_run_id = _safe_record_filename_component(record.run_id)
+            if {issue.key for issue in defects} == {"reward_hacking_review"}:
+                record.to_json(pending_review_dir / f"run-{safe_run_id}.json")
+                _write_json(
+                    reward_hacking_review_request(record),
+                    str(pending_review_dir / f"review-request-{safe_run_id}.json"),
+                )
+            else:
+                record.to_json(rejected_dir / f"run-{safe_run_id}.json")
+            detail = "; ".join(f"{issue.key}: {issue.detail}" for issue in defects)
+            raise ValueError(detail)
+        return record
+
+    failures_path = runs_dir / "failures.jsonl"
+
+    def write_failure(failure: Any) -> None:
+        with failures_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "execution_id": execution_id,
+                        "suite": failure.attempt.suite,
+                        "task": failure.attempt.task,
+                        "seed": failure.attempt.seed,
+                        "error_type": failure.error_type,
+                        "detail": failure.detail,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+
+    def write_record(record: RunRecord) -> None:
+        write_jsonl((record,), runs_dir / "runs.jsonl")
+
+    execution = execute_aa_campaign_plan(
+        plan,
+        run_attempt,
+        concurrency=args.concurrency,
+        on_record=write_record,
+        on_failure=write_failure,
+    )
+    final_records = _load_runs_dir(str(runs_dir)).records
+    gate = evaluate_aa_coding_index(final_records, contract, args.harness)
+    report = {
+        "schema": "terminus.aa-campaign-execution.v1",
+        "execution_id": execution_id,
+        "matrix_attempts": len(plan.attempts),
+        "previously_completed": len(plan.completed_keys),
+        "scheduled": len(plan.pending),
+        "recorded": len(execution.records),
+        "failures": len(execution.failures),
+        "gate": gate.to_dict(),
+    }
+    output = args.output or str(runs_dir / "status.json")
+    _write_json(report, output)
+    print(
+        f"AA campaign pass: scheduled={len(plan.pending)} recorded={len(execution.records)} "
+        f"failures={len(execution.failures)} complete={gate.record_count}/{gate.expected_record_count}"
+    )
+    return 0 if gate.passed else 2
+
+
+def _verify_exact_harness_checkout(repo_root: Path, expected_commit: str) -> None:
+    """Prove campaign code comes from one clean, exact Git revision."""
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if head.returncode != 0:
+        raise ValueError("AA campaign harness checkout is not a readable Git repository")
+    actual_commit = head.stdout.strip()
+    if actual_commit != expected_commit:
+        raise ValueError(
+            f"AA campaign harness checkout is {actual_commit}; expected {expected_commit}"
+        )
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if status.returncode != 0:
+        raise ValueError("AA campaign could not verify that the harness checkout is clean")
+    changed = [line for line in status.stdout.splitlines() if line.strip()]
+    if changed:
+        preview = ", ".join(line[3:] for line in changed[:5])
+        suffix = "" if len(changed) <= 5 else f" and {len(changed) - 5} more"
+        raise ValueError(
+            f"AA campaign requires a clean harness checkout; changed paths: {preview}{suffix}"
+        )
 
 
 def _add_bench_check_cmd(sub: argparse._SubParsersAction[Any]) -> None:

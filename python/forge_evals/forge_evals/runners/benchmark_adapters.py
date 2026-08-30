@@ -26,6 +26,13 @@ from .harness_runner import HarnessResult, RunRequest
 from .trajectory_recorder import TrajectoryRecorder
 
 __all__ = [
+    "DEEP_SWE_DATASET",
+    "DEEP_SWE_DATASET_VERSION",
+    "DEEP_SWE_PIER_COMMIT",
+    "DEEP_SWE_TASK_COMMIT",
+    "SWE_ATLAS_QNA_DATASET",
+    "SWE_ATLAS_QNA_HARBOR_COMMIT",
+    "SWE_ATLAS_QNA_TASK_COMMIT",
     "SWE_BENCH_HARNESS_COMMIT",
     "SWE_BENCH_PRO_HARNESS_COMMIT",
     "SWE_BENCH_PRO_REVISION",
@@ -44,8 +51,10 @@ __all__ = [
     "BenchmarkManifestError",
     "ExternalHarnessContract",
     "HarborAdapter",
+    "HarborSweAtlasQnaAdapter",
     "HarborTerminalBenchAdapter",
     "LiveBenchmarkHarness",
+    "PierDeepSweAdapter",
     "SWEBenchProAdapter",
     "SWEBenchVerifiedAdapter",
     "SweBenchProAdapter",
@@ -55,19 +64,33 @@ __all__ = [
     "load_benchmark_manifest",
 ]
 
-BenchmarkKind = Literal["harbor", "swebench"]
+BenchmarkKind = Literal["harbor", "pier", "swebench"]
 
-# Terminal-Bench 2.0, executed through Harbor v0.22.0. These pins mirror the
-# exact registry entry in the suite manifest: Harbor's registry snapshot names
-# the official 89-task dataset and points at the task-source commit below.
+# Terminal-Bench 2.1, executed through Harbor v0.22.0. Harbor receives the
+# official task repository and commit directly, rather than resolving a mutable
+# Hub or registry alias. This is the dataset used by Artificial Analysis v1.4.
 TERMINAL_BENCH_REGISTRY_REPOSITORY = "https://github.com/harbor-framework/harbor.git"
 TERMINAL_BENCH_HARBOR_VERSION = "0.22.0"
-TERMINAL_BENCH_HARBOR_COMMIT = "41a50d62d7f35677cc34ba3a0c36f042a4fef68c"
-TERMINAL_BENCH_TASK_REPOSITORY = "https://github.com/laude-institute/terminal-bench-2.git"
-TERMINAL_BENCH_TASK_COMMIT = "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
-TERMINAL_BENCH_DATASET = "terminal-bench/terminal-bench-2"
-TERMINAL_BENCH_DATASET_VERSION = "2.0"
+TERMINAL_BENCH_HARBOR_COMMIT = "4407eb5227a2ff4f0d3f16b2eb48849382fdf276"
+TERMINAL_BENCH_TASK_REPOSITORY = "https://github.com/harbor-framework/terminal-bench-2-1.git"
+TERMINAL_BENCH_TASK_COMMIT = "7131e4375048a0e408a8fb404b5f499d726b695b"
+TERMINAL_BENCH_DATASET = "terminal-bench/terminal-bench-2-1"
+TERMINAL_BENCH_DATASET_VERSION = "2.1"
 TERMINAL_BENCH_TASK_COUNT = 89
+DEEP_SWE_DATASET = "datacurve-ai/deep-swe"
+DEEP_SWE_DATASET_VERSION = "1.1"
+DEEP_SWE_TASK_REPOSITORY = "https://github.com/datacurve-ai/deep-swe.git"
+DEEP_SWE_TASK_COMMIT = "0b9fabbb63b9104d678fe965e1632f2dd9eaa2ea"
+DEEP_SWE_PIER_REPOSITORY = "https://github.com/datacurve-ai/pier.git"
+DEEP_SWE_PIER_COMMIT = "df89f994623a0a6a57229103b6fe910766693c30"
+DEEP_SWE_TASK_COUNT = 113
+SWE_ATLAS_QNA_DATASET = "ScaleAI/SWE-Atlas-QnA"
+SWE_ATLAS_QNA_DATASET_VERSION = "public-124"
+SWE_ATLAS_QNA_TASK_REPOSITORY = "https://github.com/scaleapi/SWE-Atlas.git"
+SWE_ATLAS_QNA_TASK_COMMIT = "49e4af3b6c803dd54a1cd60ead703aac25de4e21"
+SWE_ATLAS_QNA_HARBOR_REPOSITORY = "https://github.com/laude-institute/harbor.git"
+SWE_ATLAS_QNA_HARBOR_COMMIT = "527d50deb63a5d279e8c20593c18a2cbc7f61f9e"
+SWE_ATLAS_QNA_TASK_COUNT = 124
 SWE_BENCH_DATASET = "SWE-bench/SWE-bench_Verified"
 SWE_BENCH_VERIFIED_REVISION = "78f471bf655a3137b2e8a75af1501690ec009ec3"
 SWE_BENCH_HARNESS_REPOSITORY = "https://github.com/SWE-bench/SWE-bench.git"
@@ -112,6 +135,7 @@ class BenchmarkManifest:
     harness_commit: str
     task_repository: str | None = None
     task_commit: str | None = None
+    task_path: str | None = None
     split: str | None = None
     language: str | None = None
     registry_repository: str | None = None
@@ -133,7 +157,7 @@ class BenchmarkManifest:
         source = _https_url(suite, "source", "suite.source")
         cohorts = _string_tuple(suite, "cohorts", "suite.cohorts")
         adapter = _mapping(suite.get("adapter"), "suite.adapter")
-        kind = _literal(adapter, "kind", "suite.adapter.kind", ("harbor", "swebench"))
+        kind = _literal(adapter, "kind", "suite.adapter.kind", ("harbor", "pier", "swebench"))
 
         # A benchmark with per-task or per-instance images must never be
         # represented by a guessed suite-wide image digest.
@@ -155,6 +179,18 @@ class BenchmarkManifest:
 
         if kind == "harbor":
             return cls._from_harbor(
+                suite_id=suite_id,
+                suite_version=suite_version,
+                task_count=task_count,
+                source=source,
+                cohorts=cohorts,
+                adapter=adapter,
+                harness_repository=harness_repository,
+                harness_commit=harness_commit,
+            )
+
+        if kind == "pier":
+            return cls._from_pier(
                 suite_id=suite_id,
                 suite_version=suite_version,
                 task_count=task_count,
@@ -280,9 +316,18 @@ class BenchmarkManifest:
         harness_repository: str,
         harness_commit: str,
     ) -> BenchmarkManifest:
-        if suite_id != "terminal-bench":
-            raise BenchmarkManifestError(
-                f"Harbor adapter must be used by suite terminal-bench, got {suite_id!r}"
+        if suite_id not in {"terminal-bench", "swe-atlas-qna"}:
+            raise BenchmarkManifestError(f"Harbor adapter does not support suite {suite_id!r}")
+        if suite_id == "swe-atlas-qna":
+            return cls._from_swe_atlas_qna(
+                suite_id=suite_id,
+                suite_version=suite_version,
+                task_count=task_count,
+                source=source,
+                cohorts=cohorts,
+                adapter=adapter,
+                harness_repository=harness_repository,
+                harness_commit=harness_commit,
             )
         if task_count != TERMINAL_BENCH_TASK_COUNT:
             raise BenchmarkManifestError(
@@ -306,29 +351,16 @@ class BenchmarkManifest:
                 f"{TERMINAL_BENCH_DATASET}@{TERMINAL_BENCH_DATASET_VERSION} dataset"
             )
 
-        registry = _mapping(adapter.get("registry"), "suite.adapter.registry")
-        registry_repository = _https_url(
-            registry, "repository", "suite.adapter.registry.repository"
-        )
-        registry_commit = _commit(registry, "commit", "suite.adapter.registry.commit")
-        registry_path = _string(registry, "path", "suite.adapter.registry.path")
-        if registry_repository != TERMINAL_BENCH_REGISTRY_REPOSITORY:
-            raise BenchmarkManifestError(
-                "terminal-bench registry repository does not match the Harbor pin"
-            )
-        if registry_commit != TERMINAL_BENCH_HARBOR_COMMIT or registry_path != "registry.json":
-            raise BenchmarkManifestError(
-                "terminal-bench registry path or commit does not match the exact pin"
-            )
-
         task_source = _mapping(adapter.get("task_source"), "suite.adapter.task_source")
         task_repository = _https_url(
             task_source, "repository", "suite.adapter.task_source.repository"
         )
         task_commit = _commit(task_source, "commit", "suite.adapter.task_source.commit")
+        task_path = _string(task_source, "path", "suite.adapter.task_source.path")
         if (
             task_repository != TERMINAL_BENCH_TASK_REPOSITORY
             or task_commit != TERMINAL_BENCH_TASK_COMMIT
+            or task_path != "tasks"
         ):
             raise BenchmarkManifestError(
                 "terminal-bench task source does not match the exact Harbor registry pin"
@@ -348,7 +380,7 @@ class BenchmarkManifest:
             adapter_kind="harbor",
             dataset=dataset,
             dataset_version=dataset_version,
-            dataset_revision=registry_commit,
+            dataset_revision=task_commit,
             task_count=task_count,
             source=source,
             cohorts=cohorts,
@@ -357,9 +389,116 @@ class BenchmarkManifest:
             harness_commit=harness_commit,
             task_repository=task_repository,
             task_commit=task_commit,
-            registry_repository=registry_repository,
-            registry_commit=registry_commit,
-            registry_path=registry_path,
+            task_path=task_path,
+        )
+
+    @classmethod
+    def _from_pier(
+        cls,
+        *,
+        suite_id: str,
+        suite_version: int,
+        task_count: int,
+        source: str,
+        cohorts: tuple[str, ...],
+        adapter: Mapping[str, object],
+        harness_repository: str,
+        harness_commit: str,
+    ) -> BenchmarkManifest:
+        if suite_id != "deepswe":
+            raise BenchmarkManifestError(f"Pier adapter does not support suite {suite_id!r}")
+        if task_count != DEEP_SWE_TASK_COUNT:
+            raise BenchmarkManifestError(f"DeepSWE v1.1 must contain {DEEP_SWE_TASK_COUNT} tasks")
+        if harness_repository != DEEP_SWE_PIER_REPOSITORY or harness_commit != DEEP_SWE_PIER_COMMIT:
+            raise BenchmarkManifestError("DeepSWE must use the pinned Pier v0.3.1 runner")
+        dataset = _string(adapter, "dataset", "suite.adapter.dataset")
+        dataset_version = _string(adapter, "dataset_version", "suite.adapter.dataset_version")
+        if dataset != DEEP_SWE_DATASET or dataset_version != DEEP_SWE_DATASET_VERSION:
+            raise BenchmarkManifestError("DeepSWE adapter must pin the v1.1 dataset")
+        task_repository, task_commit, task_path = _task_source(adapter)
+        if (
+            task_repository != DEEP_SWE_TASK_REPOSITORY
+            or task_commit != DEEP_SWE_TASK_COMMIT
+            or task_path != "tasks"
+        ):
+            raise BenchmarkManifestError("DeepSWE task source does not match the exact pin")
+        image_digest_policy = _string(
+            adapter, "image_digest_policy", "suite.adapter.image_digest_policy"
+        )
+        if image_digest_policy != "per_task_required":
+            raise BenchmarkManifestError("DeepSWE requires one image digest per task")
+        return cls(
+            suite_id=suite_id,
+            suite_version=suite_version,
+            adapter_kind="pier",
+            dataset=dataset,
+            dataset_version=dataset_version,
+            dataset_revision=task_commit,
+            task_count=task_count,
+            source=source,
+            cohorts=cohorts,
+            image_digest_policy=image_digest_policy,
+            harness_repository=harness_repository,
+            harness_commit=harness_commit,
+            task_repository=task_repository,
+            task_commit=task_commit,
+            task_path=task_path,
+        )
+
+    @classmethod
+    def _from_swe_atlas_qna(
+        cls,
+        *,
+        suite_id: str,
+        suite_version: int,
+        task_count: int,
+        source: str,
+        cohorts: tuple[str, ...],
+        adapter: Mapping[str, object],
+        harness_repository: str,
+        harness_commit: str,
+    ) -> BenchmarkManifest:
+        if task_count != SWE_ATLAS_QNA_TASK_COUNT:
+            raise BenchmarkManifestError(
+                f"SWE-Atlas-QnA must contain {SWE_ATLAS_QNA_TASK_COUNT} tasks"
+            )
+        if (
+            harness_repository != SWE_ATLAS_QNA_HARBOR_REPOSITORY
+            or harness_commit != SWE_ATLAS_QNA_HARBOR_COMMIT
+        ):
+            raise BenchmarkManifestError("SWE-Atlas-QnA must use the pinned Harbor v0.18.0")
+        dataset = _string(adapter, "dataset", "suite.adapter.dataset")
+        dataset_version = _string(adapter, "dataset_version", "suite.adapter.dataset_version")
+        if dataset != SWE_ATLAS_QNA_DATASET or dataset_version != SWE_ATLAS_QNA_DATASET_VERSION:
+            raise BenchmarkManifestError("SWE-Atlas-QnA dataset identity is not pinned")
+        task_repository, task_commit, task_path = _task_source(adapter)
+        if (
+            task_repository != SWE_ATLAS_QNA_TASK_REPOSITORY
+            or task_commit != SWE_ATLAS_QNA_TASK_COMMIT
+            or task_path != "data/qa"
+        ):
+            raise BenchmarkManifestError("SWE-Atlas-QnA task source does not match the exact pin")
+        image_digest_policy = _string(
+            adapter, "image_digest_policy", "suite.adapter.image_digest_policy"
+        )
+        if image_digest_policy != "per_task_required":
+            raise BenchmarkManifestError("SWE-Atlas-QnA requires one image digest per task")
+        return cls(
+            suite_id=suite_id,
+            suite_version=suite_version,
+            adapter_kind="harbor",
+            dataset=dataset,
+            dataset_version=dataset_version,
+            dataset_revision=task_commit,
+            task_count=task_count,
+            source=source,
+            cohorts=cohorts,
+            image_digest_policy=image_digest_policy,
+            harness_repository=harness_repository,
+            harness_commit=harness_commit,
+            task_repository=task_repository,
+            task_commit=task_commit,
+            task_path=task_path,
         )
 
     @classmethod
@@ -458,7 +597,7 @@ class BenchmarkManifest:
             adapter["split"] = self.split
         if self.language is not None:
             adapter["language"] = self.language
-        if self.adapter_kind == "harbor":
+        if self.adapter_kind == "harbor" and self.registry_repository is not None:
             adapter["registry"] = {
                 "repository": self.registry_repository,
                 "commit": self.registry_commit,
@@ -467,6 +606,12 @@ class BenchmarkManifest:
             adapter["task_source"] = {
                 "repository": self.task_repository,
                 "commit": self.task_commit,
+            }
+        if self.adapter_kind in {"harbor", "pier"}:
+            adapter["task_source"] = {
+                "repository": self.task_repository,
+                "commit": self.task_commit,
+                "path": self.task_path,
             }
         return {
             "suite": {
@@ -496,6 +641,7 @@ class TranslatedTaskManifest:
     harness_commit: str
     task_repository: str | None = None
     task_commit: str | None = None
+    task_path: str | None = None
     split: str | None = None
     language: str | None = None
 
@@ -515,6 +661,7 @@ class TranslatedTaskManifest:
             "harness_commit": self.harness_commit,
             "task_repository": self.task_repository,
             "task_commit": self.task_commit,
+            "task_path": self.task_path,
             "split": self.split,
             "language": self.language,
         }
@@ -576,13 +723,16 @@ class ExternalHarnessContract:
         if self.execution_mode != "external_live":
             raise BenchmarkAdapterError("external benchmark runner is not marked external_live")
         if not self.harness_id.strip() or not self.runner_version.strip():
-            raise BenchmarkAdapterError("external benchmark contract requires id and runner version")
+            raise BenchmarkAdapterError(
+                "external benchmark contract requires id and runner version"
+            )
         if self.repository != manifest.harness_repository or self.commit != manifest.harness_commit:
             raise BenchmarkAdapterError(
                 "external benchmark runner pin does not match the suite harness manifest"
             )
         if not self.pin_verified:
             raise BenchmarkAdapterError("external benchmark runner pin is not verified")
+
 
 class LiveBenchmarkHarness(Protocol):
     """The only execution dependency accepted by an external adapter."""
@@ -659,6 +809,7 @@ class _ExternalBenchmarkAdapter(ABC):
             harness_commit=self.manifest.harness_commit,
             task_repository=self.manifest.task_repository,
             task_commit=self.manifest.task_commit,
+            task_path=self.manifest.task_path,
             split=self.manifest.split,
             language=self.manifest.language,
         )
@@ -696,9 +847,7 @@ class _ExternalBenchmarkAdapter(ABC):
                 "live benchmark harness returned no BenchmarkExecution boundary result"
             )
         if execution.harness_result.evidence_class is not EvidenceClass.EXTERNAL_LIVE:
-            raise BenchmarkAdapterError(
-                "external benchmark runner returned fixture-only evidence"
-            )
+            raise BenchmarkAdapterError("external benchmark runner returned fixture-only evidence")
         environment_digest = _validate_execution(execution, self.manifest)
 
         evidence_artifact = {
@@ -721,7 +870,7 @@ class _ExternalBenchmarkAdapter(ABC):
 
 
 class HarborTerminalBenchAdapter(_ExternalBenchmarkAdapter):
-    """Translate Terminal-Bench 2.0 requests into Harbor invocations."""
+    """Translate pinned Terminal-Bench 2.1 requests into Harbor invocations."""
 
     _adapter_kind: BenchmarkKind = "harbor"
     _executable = "harbor"
@@ -734,12 +883,17 @@ class HarborTerminalBenchAdapter(_ExternalBenchmarkAdapter):
             raise BenchmarkAdapterError("a model is required for a Harbor invocation")
         if self.manifest.dataset_version is None:
             raise BenchmarkManifestError("Harbor manifest is missing dataset_version")
-        dataset_ref = f"{self.manifest.dataset}@{self.manifest.dataset_version}"
+        task_repository = self.manifest.task_repository
+        task_commit = self.manifest.task_commit
+        if task_repository is None or task_commit is None:
+            raise BenchmarkManifestError("Harbor manifest is missing its pinned task source")
         argv = (
             self._executable,
             "run",
-            "--dataset",
-            dataset_ref,
+            "--repo",
+            f"{task_repository}@{task_commit}",
+            "--path",
+            self.manifest.task_path or "tasks",
             "--agent",
             request.harness_id,
             "--model",
@@ -754,8 +908,57 @@ class HarborTerminalBenchAdapter(_ExternalBenchmarkAdapter):
             argv=argv,
             task_manifest=task_manifest,
             notes=(
-                "Harbor resolves the exact registry/task pins. The live runner must "
+                "Harbor checks out the exact task-source commit. The live runner must "
                 "return the task image digest before this result is usable."
+            ),
+        )
+
+
+class HarborSweAtlasQnaAdapter(HarborTerminalBenchAdapter):
+    """Translate SWE-Atlas-QnA tasks through the pinned official Harbor runner."""
+
+    def translate(self, request: RunRequest) -> BenchmarkInvocation:
+        invocation = super().translate(request)
+        return replace(
+            invocation,
+            notes=(
+                "Harbor runs the pinned public QnA task and its rubric evaluator. "
+                "Judge credentials are verifier-only and must never enter agent context."
+            ),
+        )
+
+
+class PierDeepSweAdapter(_ExternalBenchmarkAdapter):
+    """Translate DeepSWE v1.1 tasks through the pinned Pier runner."""
+
+    _adapter_kind: BenchmarkKind = "pier"
+    _executable = "pier"
+
+    def translate(self, request: RunRequest) -> BenchmarkInvocation:
+        task_manifest = self._translated_task_manifest(request)
+        if not request.model_snapshot.model.strip():
+            raise BenchmarkAdapterError("a model is required for a Pier invocation")
+        task_path = self.manifest.task_path
+        if task_path is None:
+            raise BenchmarkManifestError("Pier manifest is missing task_source.path")
+        return BenchmarkInvocation(
+            executable=self._executable,
+            argv=(
+                self._executable,
+                "run",
+                "--path",
+                f"{task_path}/{request.task}",
+                "--agent-import-path",
+                "forge_evals.runners.harbor_agent:TerminusHarborAgent",
+                "--model",
+                request.model_snapshot.model,
+                "--n-concurrent",
+                "1",
+            ),
+            task_manifest=task_manifest,
+            notes=(
+                "The live runner checks out the exact DeepSWE task-source commit before "
+                "invoking Pier and must preserve its separate verifier environment."
             ),
         )
 
@@ -838,7 +1041,11 @@ def adapter_for_suite(
 
     manifest = load_benchmark_manifest(path)
     if manifest.adapter_kind == "harbor":
+        if manifest.suite_id == "swe-atlas-qna":
+            return HarborSweAtlasQnaAdapter(manifest, live_harness=live_harness)
         return HarborTerminalBenchAdapter(manifest, live_harness=live_harness)
+    if manifest.adapter_kind == "pier":
+        return PierDeepSweAdapter(manifest, live_harness=live_harness)
     if manifest.suite_id == "swe-bench-pro":
         return SweBenchProAdapter(manifest, live_harness=live_harness)
     return SweBenchVerifiedAdapter(manifest, live_harness=live_harness)
@@ -916,3 +1123,12 @@ def _literal(
         choices_text = ", ".join(choices)
         raise BenchmarkManifestError(f"{field_name} must be one of {choices_text}")
     return value
+
+
+def _task_source(adapter: Mapping[str, object]) -> tuple[str, str, str]:
+    source = _mapping(adapter.get("task_source"), "suite.adapter.task_source")
+    return (
+        _https_url(source, "repository", "suite.adapter.task_source.repository"),
+        _commit(source, "commit", "suite.adapter.task_source.commit"),
+        _string(source, "path", "suite.adapter.task_source.path"),
+    )

@@ -1,0 +1,32 @@
+suite:
+  id: deepswe
+  version: 11
+  description: DeepSWE v1.1, 113 original long-horizon software engineering tasks.
+  source: https://github.com/datacurve-ai/deep-swe
+  license: Apache-2.0
+  task_count: 113
+  default_timeout_seconds: 3600
+  default_budget:
+    model_micros: 2000000
+    compute_seconds: 3600
+    wall_clock_seconds: 3600
+    human_approvals: 0
+  grader_version: deepswe-1.1
+  metrics:
+    primary: task_success
+    secondary: [cost_usd, wall_clock_seconds, tokens]
+  cohorts: [long-horizon-software-engineering]
+  adapter:
+    kind: pier
+    dataset: datacurve-ai/deep-swe
+    dataset_version: "1.1"
+    task_count: 113
+    image_digest_policy: per_task_required
+    harness:
+      repository: https://github.com/datacurve-ai/pier.git
+      commit: df89f994623a0a6a57229103b6fe910766693c30
+      version: "0.3.1"
+    task_source:
+      repository: https://github.com/datacurve-ai/deep-swe.git
+      commit: 0b9fabbb63b9104d678fe965e1632f2dd9eaa2ea
+      path: tasks

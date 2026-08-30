@@ -1,0 +1,48 @@
+schema: terminus.aa-coding-index-campaign.v1
+methodology:
+  name: Artificial Analysis Coding Agent Index
+  version: "1.4"
+  retrieved_at: "2026-08-30"
+  source: https://artificialanalysis.ai/methodology/coding-agents-benchmarking/
+  attempts_per_task: 3
+  task_weighting: equal_within_component
+  component_weighting: equal
+model:
+  provider: openai
+  id: gpt-5.6-luna
+  reasoning_effort: xhigh
+components:
+  - id: deepswe
+    suite: deepswe
+    task_count: 113
+    score_must_exceed: 57.0
+  - id: terminal-bench-2.1
+    suite: terminal-bench
+    task_count: 89
+    score_must_exceed: 71.0
+  - id: swe-atlas-qna
+    suite: swe-atlas-qna
+    task_count: 124
+    score_must_exceed: 31.0
+index_must_exceed: 53.0
+efficiency:
+  cost_usd_per_task_must_be_below: 0.24
+  wall_minutes_per_task_must_be_below: 6.9
+  tokens_per_task_must_be_below: 12800000
+integrity:
+  require_external_live: true
+  require_independent_verification: true
+  require_provider_receipts: true
+  require_exact_harness_revision: true
+  require_pinned_runner_source: true
+  runner_sources:
+    deepswe: git+https://github.com/datacurve-ai/pier.git@df89f994623a0a6a57229103b6fe910766693c30
+    terminal-bench: git+https://github.com/harbor-framework/harbor.git@4407eb5227a2ff4f0d3f16b2eb48849382fdf276
+    swe-atlas-qna: git+https://github.com/laude-institute/harbor.git@527d50deb63a5d279e8c20593c18a2cbc7f61f9e
+  require_resolved_image_digest: true
+  terminal_bench_reward_hacking_review: true
+notes:
+  - All seven comparisons are strict. Ties fail.
+  - Cost, wall time, and tokens use the same 978 task attempts as the quality scores.
+  - OpenAI reasoning tokens are already included in output-token accounting and are not counted twice.
+  - Benchmark success does not replace Terminus release, reliability, safety, or product usability gates.
