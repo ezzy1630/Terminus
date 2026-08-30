@@ -81,6 +81,8 @@ def test_runner_binds_complete_model_fixed_identity_from_request(tmp_path: Path)
         network_policy="proxy-only",
         tool_schema_hash="sha256:tools",
         instruction_hash="sha256:instructions",
+        provider_endpoint="https://provider.example.test/v1",
+        provider_account_id="fixture-account",
     )
     runner = HarnessRunner(
         harness=FakeScriptHarness(
@@ -104,6 +106,8 @@ def test_runner_binds_complete_model_fixed_identity_from_request(tmp_path: Path)
     assert identity.harness_id == request.harness_id
     assert identity.model_fixed_key.startswith("sha256:")
     assert identity.sampling_config_hash == "sha256:sampling"
+    assert identity.provider_endpoint_hash.startswith("sha256:")
+    assert identity.provider_account_hash.startswith("sha256:")
 
 
 def test_runner_marks_unconfigured_identity_ineligible_for_promotion(tmp_path: Path) -> None:
