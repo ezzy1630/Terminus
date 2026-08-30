@@ -32,12 +32,11 @@ import {
   type GatewayDiscoveryResult,
   type GatewayModel,
 } from "@terminus/provider-zen";
+import { createHash } from "node:crypto";
 import type { CredentialBoundGatewayClient } from "@terminus/provider-zen";
 import { getOfflineCatalogSnapshotJson } from "@terminus/provider-core";
 import { z } from "zod";
 
-const MODELS_DEV_HOST = "models.dev";
-const MODELS_DEV_URL = `https://${MODELS_DEV_HOST}/api.json`;
 const MAX_GATEWAY_LIST_BYTES = 1 * 1024 * 1024;
 
 const GATEWAY_BASE_URLS: Readonly<Record<GatewayDeployment, string>> = {
@@ -60,7 +59,6 @@ export interface ProviderModelsResult extends GatewayDiscoveryResult {
  * field is not a trade worth making.
  */
 const CACHE_TTL_MS = 5 * 60 * 1_000;
-const CATALOG_CACHE_TTL_MS = 15 * 60 * 1_000;
 
 let cache: {
   readonly deployment: GatewayDeployment;
@@ -85,8 +83,14 @@ let catalogCache: {
 let rawCatalogCache: {
   readonly raw: unknown;
   readonly offline: boolean;
-  readonly expiresAt: number;
 } | null = null;
+
+/** Immutable identity of the reviewed provider metadata shipped in this build. */
+export function modelsDevCatalogDigest(): string {
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(getOfflineCatalogSnapshotJson()))
+    .digest("hex")}`;
+}
 
 // ─────────────── Durable discovery (H4) ────────────────
 //
@@ -239,59 +243,26 @@ export interface FetchModelsDevCatalogOptions {
   readonly signal?: AbortSignal | null | undefined;
   readonly timeoutMs?: number | undefined;
   readonly forceOffline?: boolean | undefined;
-  readonly fetchFn?: typeof fetch | undefined;
 }
 
 /**
- * Fetch the Models.dev document without decoding it.
- *
- * `offline` reports which source answered, so a caller that cannot find its
- * provider can say "the catalogue was unreachable" instead of "your provider
- * does not exist" — the committed snapshot holds five providers, not the
- * catalogue's two hundred.
+ * Read the reviewed Models.dev snapshot without decoding it. Product code
+ * never refreshes this through ambient TypeScript networking; updating the
+ * snapshot is an explicit source and review operation.
  */
 export async function fetchModelsDevRaw(
-  options?: FetchModelsDevCatalogOptions,
+  _options?: FetchModelsDevCatalogOptions,
 ): Promise<{ readonly catalog: unknown; readonly offline: boolean }> {
-  const now = Date.now();
-  if (rawCatalogCache !== null && rawCatalogCache.expiresAt > now && !options?.forceOffline) {
+  if (rawCatalogCache !== null) {
     return { catalog: rawCatalogCache.raw, offline: rawCatalogCache.offline };
   }
-  if (options?.forceOffline !== true) {
-    const fetchImpl = options?.fetchFn ?? globalThis.fetch;
-    if (typeof fetchImpl === "function") {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), options?.timeoutMs ?? 3_000);
-        if (options?.signal) {
-          options.signal.addEventListener("abort", () => controller.abort(), { once: true });
-        }
-        const response = await fetchImpl(MODELS_DEV_URL, {
-          headers: { accept: "application/json" },
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        if (response.ok) {
-          const raw: unknown = await response.json();
-          rawCatalogCache = { raw, offline: false, expiresAt: now + CATALOG_CACHE_TTL_MS };
-          return { catalog: raw, offline: false };
-        }
-      } catch {
-        // Fall back seamlessly to the offline catalog snapshot.
-      }
-    }
-  }
   const raw = getOfflineCatalogSnapshotJson();
-  rawCatalogCache = { raw, offline: true, expiresAt: now + CATALOG_CACHE_TTL_MS };
+  rawCatalogCache = { raw, offline: true };
   return { catalog: raw, offline: true };
 }
 
 /**
- * Fetch the Models.dev catalogue.
- *
- * Checks in-memory cache, attempts network fetch with timeout, and falls back
- * seamlessly to the committed offline snapshot from `@terminus/provider-core`
- * when offline or on network failure.
+ * Decode the reviewed Models.dev catalogue shipped with this build.
  */
 export async function fetchModelsDevCatalog(
   options?: FetchModelsDevCatalogOptions,
@@ -300,19 +271,11 @@ export async function fetchModelsDevCatalog(
   if (catalogCache !== null && catalogCache.expiresAt > now && !options?.forceOffline) {
     return catalogCache.catalog;
   }
-  const { catalog: raw, offline } = await fetchModelsDevRaw(options);
-  if (!offline) {
-    try {
-      const parsed = parseModelsDevCatalog(raw);
-      catalogCache = { catalog: parsed, expiresAt: now + CATALOG_CACHE_TTL_MS };
-      return parsed;
-    } catch {
-      // A live document Terminus cannot decode is no better than no document:
-      // fall back to the snapshot rather than failing discovery outright.
-    }
-  }
+  await fetchModelsDevRaw(options);
   const offlineCatalog = parseModelsDevCatalog(getOfflineCatalogSnapshotJson());
-  catalogCache = { catalog: offlineCatalog, expiresAt: now + CATALOG_CACHE_TTL_MS };
+  // The checked-in snapshot changes only with the build. A process-local
+  // cache therefore needs no wall-clock expiry or ambient refresh path.
+  catalogCache = { catalog: offlineCatalog, expiresAt: Number.POSITIVE_INFINITY };
   return offlineCatalog;
 }
 
@@ -324,7 +287,6 @@ export interface DiscoverProviderModelsInput {
   readonly signal?: AbortSignal | null | undefined;
   readonly timeoutMs?: number | undefined;
   readonly forceOffline?: boolean | undefined;
-  readonly fetchFn?: typeof fetch | undefined;
 }
 
 export async function discoverProviderModels(
@@ -334,7 +296,6 @@ export async function discoverProviderModels(
     signal: input.signal,
     timeoutMs: input.timeoutMs,
     forceOffline: input.forceOffline,
-    fetchFn: input.fetchFn,
   });
 
   const available = await fetchAvailableModels(input);

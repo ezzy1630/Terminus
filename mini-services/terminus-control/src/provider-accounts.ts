@@ -92,7 +92,6 @@ export interface ProviderAccountMetadata {
   readonly account_id?: string;
   readonly plan_type?: string;
   readonly email?: string;
-  readonly provider_metadata?: Readonly<Record<string, unknown>>;
   /** Non-secret provenance for an account Terminus synthesized locally. */
   readonly connection_origin?: "installed_opencode";
 }
@@ -110,6 +109,12 @@ export interface ProviderAccountWire {
   readonly protocol: GatewayProtocol;
   readonly is_default: boolean;
   readonly model_count: number;
+  /** Non-reversible digest used to bind an explicit connect approval. */
+  readonly credential_fingerprint: string;
+  /** Exact reviewed destination the approved credential may reach. */
+  readonly connection_destination: string;
+  /** Immutable provider-catalog snapshot used to derive that destination. */
+  readonly catalog_digest: string;
   readonly metadata: { account_id?: string; plan_type?: string; email?: string };
   readonly discovered_at: string;
   readonly last_verified_at: string | null;
@@ -147,12 +152,10 @@ export function parseProviderAccountMetadata(json: string): ProviderAccountMetad
     return {};
   }
   if (!isRecord(parsed)) return {};
-  const providerMetadata = isRecord(parsed.provider_metadata) ? parsed.provider_metadata : undefined;
   return {
     ...(typeof parsed.account_id === "string" ? { account_id: parsed.account_id } : {}),
     ...(typeof parsed.plan_type === "string" ? { plan_type: parsed.plan_type } : {}),
     ...(typeof parsed.email === "string" ? { email: parsed.email } : {}),
-    ...(providerMetadata === undefined ? {} : { provider_metadata: providerMetadata }),
     ...(parsed.connection_origin === "installed_opencode"
       ? { connection_origin: parsed.connection_origin }
       : {}),
@@ -168,6 +171,7 @@ export function parseProviderAccountMetadata(json: string): ProviderAccountMetad
 export function providerAccountWire(
   account: ProviderAccountRecord,
   modelCount: number,
+  catalogDigest: string,
 ): ProviderAccountWire {
   const metadata = parseProviderAccountMetadata(account.metadataJson);
   return {
@@ -183,6 +187,9 @@ export function providerAccountWire(
     protocol: admittedProtocol(account.protocol),
     is_default: account.isDefault,
     model_count: Math.max(0, Math.floor(modelCount)),
+    credential_fingerprint: account.fingerprint,
+    connection_destination: account.baseUrl,
+    catalog_digest: catalogDigest,
     metadata: {
       ...(metadata.account_id === undefined ? {} : { account_id: metadata.account_id }),
       ...(metadata.plan_type === undefined ? {} : { plan_type: metadata.plan_type }),
@@ -507,7 +514,7 @@ export function mapLocalCredential(input: MapLocalCredentialInput): ProviderAcco
     });
   }
 
-  const resolved = resolveAccountBaseUrl(provider, metadata.provider_metadata);
+  const resolved = resolveAccountBaseUrl(provider, metadata.account_id);
   if (resolved.baseUrl === null) {
     return {
       source: credential.source,
@@ -553,7 +560,7 @@ export function mapLocalCredential(input: MapLocalCredentialInput): ProviderAcco
  */
 function resolveAccountBaseUrl(
   provider: ModelsDevProviderRecord,
-  providerMetadata: Readonly<Record<string, unknown>> | undefined,
+  accountId: string | undefined,
 ): { readonly baseUrl: string | null; readonly reason: string } {
   const template = provider.api ?? SDK_DEFAULT_BASE_URLS[provider.id] ?? null;
   if (template === null) {
@@ -561,7 +568,7 @@ function resolveAccountBaseUrl(
   }
   let missing: string | null = null;
   const substituted = template.replace(BASE_URL_PLACEHOLDER, (_match, name: string) => {
-    const value = accountPlaceholderValue(name, providerMetadata);
+    const value = accountPlaceholderValue(name, accountId);
     if (value === null) {
       missing = name;
       return "";
@@ -583,6 +590,12 @@ function resolveAccountBaseUrl(
   if (url.protocol !== "https:") {
     return { baseUrl: null, reason: `base URL '${substituted}' for '${provider.id}' is not HTTPS` };
   }
+  if (url.username !== "" || url.password !== "" || url.hash !== "" || (url.port !== "" && url.port !== "443")) {
+    return { baseUrl: null, reason: `base URL '${substituted}' for '${provider.id}' has forbidden URL components` };
+  }
+  if (!isPublicProviderHost(url.hostname)) {
+    return { baseUrl: null, reason: `base URL '${substituted}' for '${provider.id}' is not a public DNS origin` };
+  }
   return { baseUrl: trimTrailingSlashes(substituted), reason: "" };
 }
 
@@ -593,19 +606,20 @@ function resolveAccountBaseUrl(
  */
 function accountPlaceholderValue(
   name: string,
-  providerMetadata: Readonly<Record<string, unknown>> | undefined,
+  accountId: string | undefined,
 ): string | null {
-  if (providerMetadata === undefined) return null;
-  const candidates = name === "CLOUDFLARE_ACCOUNT_ID"
-    ? ["accountId", "account_id"]
-    : [camelCase(name), name.toLowerCase()];
-  for (const key of candidates) {
-    const value = providerMetadata[key];
-    if (typeof value === "string" && value.trim() !== "" && /^[A-Za-z0-9_.-]+$/.test(value)) {
-      return value;
-    }
-  }
-  return null;
+  if (name !== "CLOUDFLARE_ACCOUNT_ID") return null;
+  return accountId !== undefined && /^[A-Za-z0-9_.-]{1,128}$/.test(accountId)
+    ? accountId
+    : null;
+}
+
+/** Provider credentials may never be routed to local or IP-literal origins. */
+function isPublicProviderHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost") || host.includes(":")) return false;
+  if (/^\d+(?:\.\d+){3}$/.test(host)) return false;
+  return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host);
 }
 
 function unsupported(input: {
@@ -700,6 +714,7 @@ export interface LocalCredentialDiscovery {
   readonly warnings: readonly string[];
   readonly codexInstalled: boolean;
   readonly opencodeInstalled: boolean;
+  readonly opencodeStoreStatus: "available" | "missing" | "rejected";
 }
 
 export interface ProviderAccountUpsert {
@@ -752,6 +767,8 @@ export interface ProviderAccountDiscoveryDependencies {
    * that cannot probe keep the previous behaviour.
    */
   readonly credentialResolves?: (credentialUri: string) => Promise<boolean>;
+  /** Revoke a copied local credential after logout or rotation. */
+  readonly revokeCredential?: (credentialUri: string) => Promise<boolean>;
   /** Creates the row, or updates the existing row for the same source. */
   readonly upsertAccount: (input: ProviderAccountUpsert) => Promise<ProviderAccountRecord>;
   readonly readGatewayConfiguration: () => Promise<GatewayConfigurationSnapshot | null>;
@@ -768,22 +785,37 @@ export interface ProviderAccountDiscoveryResult {
   readonly warnings: readonly string[];
   readonly codexInstalled: boolean;
   readonly opencodeInstalled: boolean;
+  readonly opencodeStoreStatus: "available" | "missing" | "rejected" | "unavailable";
   readonly lastRunAt: string;
 }
 
 export interface ProviderAccountConnectDependencies {
   readonly account: ProviderAccountRecord;
   readonly expectedRevision: number;
+  /** Fingerprint shown with the consent surface; binds approval to exact bytes. */
+  readonly expectedFingerprint: string;
+  readonly expectedDestination: string;
+  /** Fresh per-connect destination so a failed CAS cannot overwrite a live key. */
+  readonly capabilityUri: string;
   /** The user-visible confirmation must be true; discovery cannot supply it. */
   readonly userConsent: boolean;
   readonly discoverLocal: () => Promise<LocalCredentialDiscovery>;
   readonly importLocal: (input: {
     readonly source: string;
     readonly capabilityUri: string;
+    readonly expectedFingerprint: string;
+  }) => Promise<{
+    readonly capabilityUri: string;
+    readonly stored: boolean;
     readonly fingerprint: string;
-  }) => Promise<{ readonly capabilityUri: string; readonly stored: boolean }>;
+  }>;
   readonly fetchCatalog: () => Promise<{ readonly catalog: unknown; readonly offline: boolean }>;
-  readonly upsertAccount: (input: ProviderAccountUpsert) => Promise<ProviderAccountRecord>;
+  /** Commit only if revision and fingerprint still match the approved row. */
+  readonly commitAccount: (
+    input: ProviderAccountUpsert,
+    expectedRevision: number,
+    expectedFingerprint: string,
+  ) => Promise<ProviderAccountRecord | null>;
   readonly now?: () => Date;
 }
 
@@ -801,14 +833,26 @@ export async function connectLocalProviderAccount(
   if (dependencies.account.revision !== dependencies.expectedRevision) {
     throw new Error("provider account changed; reload it before connecting");
   }
+  if (
+    dependencies.expectedFingerprint === ""
+    || dependencies.account.fingerprint !== dependencies.expectedFingerprint
+  ) {
+    throw new Error("provider credential changed; run discovery and approve the current credential");
+  }
   if (dependencies.account.source === CODEX_SOURCE || dependencies.account.renderProfile === "chatgpt_codex") {
     throw new Error("ChatGPT subscriptions require the separate Codex App Server lane");
+  }
+  if (dependencies.account.credentialUri !== "") {
+    throw new Error("provider account already has a credential binding; reconcile or disconnect it before connecting");
   }
 
   const discovery = await dependencies.discoverLocal();
   const credential = discovery.credentials.find((candidate) => candidate.source === dependencies.account.source);
   if (credential === undefined) {
     throw new Error("the local credential is no longer available; run discovery again");
+  }
+  if (credential.fingerprint !== dependencies.expectedFingerprint) {
+    throw new Error("provider credential changed after approval; run discovery and approve it again");
   }
   const { catalog, offline } = await dependencies.fetchCatalog();
   const mapping = mapLocalCredential({
@@ -820,7 +864,10 @@ export async function connectLocalProviderAccount(
   if (mapping.status !== "connected" && mapping.status !== "expired") {
     throw new Error(mapping.statusDetail || "this local credential is not supported by Terminus");
   }
-  const capabilityUri = providerAccountSecretUri(dependencies.account.id);
+  if (mapping.baseUrl !== dependencies.expectedDestination) {
+    throw new Error("provider destination changed after approval; reload it before connecting");
+  }
+  const capabilityUri = dependencies.capabilityUri;
   const importLocal = dependencies.importLocal;
   if (importLocal === undefined) {
     throw new Error("local credential import is unavailable");
@@ -828,18 +875,26 @@ export async function connectLocalProviderAccount(
   const result = await importLocal({
     source: credential.source,
     capabilityUri,
-    fingerprint: credential.fingerprint,
+    expectedFingerprint: dependencies.expectedFingerprint,
   });
-  if (!result.stored || result.capabilityUri !== capabilityUri) {
+  if (
+    !result.stored
+    || result.capabilityUri !== capabilityUri
+    || result.fingerprint !== dependencies.expectedFingerprint
+  ) {
     throw new Error("kernel did not confirm credential storage");
   }
-  return dependencies.upsertAccount({
+  const committed = await dependencies.commitAccount({
     id: dependencies.account.id,
     ...mappingColumns(mapping),
     credentialUri: capabilityUri,
     fingerprint: credential.fingerprint,
     discoveredAt: dependencies.account.discoveredAt,
-  });
+  }, dependencies.expectedRevision, dependencies.expectedFingerprint);
+  if (committed === null) {
+    throw new Error("provider account changed while connecting; reload it before retrying");
+  }
+  return committed;
 }
 
 /**
@@ -888,18 +943,48 @@ export async function discoverAndConnectLocalAccounts(
     discovery = await dependencies.discoverLocal();
   } catch (error: unknown) {
     warn(`local credential discovery failed: ${errorMessage(error)}`);
+    for (const current of existing.values()) {
+      if (!current.source.startsWith(OPENCODE_SOURCE_PREFIX) || current.status !== "connected") continue;
+      const disabled = await dependencies.upsertAccount(existingAccountUpsert(current, {
+        status: "error",
+        statusDetail: "The OpenCode credential store is unavailable; routing is disabled until it can be verified.",
+      }));
+      existing.set(current.source, disabled);
+    }
     return {
       accounts: [...existing.values()].sort(byDisplayName),
       imported,
       warnings: [`local credential discovery failed: ${errorMessage(error)}`],
       codexInstalled: false,
       opencodeInstalled: false,
+      opencodeStoreStatus: "unavailable",
+      lastRunAt: now().toISOString(),
+    };
+  }
+
+  if (discovery.opencodeStoreStatus === "rejected") {
+    for (const current of existing.values()) {
+      if (!current.source.startsWith(OPENCODE_SOURCE_PREFIX) || current.status !== "connected") continue;
+      const disabled = await dependencies.upsertAccount(existingAccountUpsert(current, {
+        status: "error",
+        statusDetail: "The OpenCode credential store was rejected; routing is disabled until it can be verified.",
+      }));
+      existing.set(current.source, disabled);
+    }
+    return {
+      accounts: [...existing.values()].sort(byDisplayName),
+      imported,
+      warnings: [...discovery.warnings],
+      codexInstalled: discovery.codexInstalled,
+      opencodeInstalled: discovery.opencodeInstalled,
+      opencodeStoreStatus: discovery.opencodeStoreStatus,
       lastRunAt: now().toISOString(),
     };
   }
 
   const { catalog, offline } = await dependencies.fetchCatalog();
   const warnings = [...discovery.warnings];
+  const observedSources = new Set(discovery.credentials.map((credential) => credential.source));
 
   // A fresh Terminus install has no legacy gateway row. Installation discovery
   // is sufficient for the credential-free Zen surface: model discovery still
@@ -929,7 +1014,6 @@ export async function discoverAndConnectLocalAccounts(
     });
     const current = existing.get(credential.source) ?? null;
     const accountId = current?.id ?? newAccountId();
-    const credentialUri = providerAccountSecretUri(accountId);
     // An account Terminus cannot route is stored for visibility, but its
     // secret is not copied into the keyring: nothing would ever read it.
     const routable = mapping.status === "connected" || mapping.status === "expired";
@@ -938,26 +1022,49 @@ export async function discoverAndConnectLocalAccounts(
     // can still resolve it. Switching the kernel's secret backend, or losing
     // the keychain entry, otherwise leaves the account broken forever: the
     // fingerprint has not rotated, so nothing would ever re-import it.
-    const stale = routable
+    const resolution = routable
       && !rotated
       && current !== null
       && current.credentialUri !== ""
-      && !(await credentialStillResolves(dependencies, current.credentialUri, warn));
+      ? await credentialStillResolves(dependencies, current.credentialUri, warn)
+      : true;
+    const stale = resolution === false;
     const needsImport = routable
       && (current === null || rotated || current.credentialUri === "" || stale);
 
     let status = mapping.status;
     let statusDetail = mapping.statusDetail;
     let storedUri = routable ? (current?.credentialUri ?? "") : "";
+    if (resolution === null) {
+      status = "error";
+      statusDetail = "The copied credential could not be verified; routing is disabled until the kernel recovers.";
+      storedUri = current?.credentialUri ?? "";
+    }
     // Discovery never imports or rotates secrets. A newly observed or rotated
     // credential is visible, but remains disconnected until the user approves
     // the explicit connect operation.
-    if (needsImport) {
-      storedUri = "";
-      status = "disconnected";
-      statusDetail = current === null
-        ? "Credential detected in the local OpenCode store; connect to approve copying it into the Terminus keyring."
-        : "Credential changed or is no longer present in the Terminus keyring; connect again to approve import.";
+    if (needsImport && resolution !== null) {
+      const oldSecretNeedsRevocation = rotated && current !== null && current.credentialUri !== "";
+      const revoked = !oldSecretNeedsRevocation
+        || await revokeCopiedCredential(dependencies, current.credentialUri, warn);
+      if (revoked) {
+        storedUri = "";
+        status = "disconnected";
+        statusDetail = current === null
+          ? "Credential detected in the local OpenCode store; connect to approve copying it into the Terminus keyring."
+          : "Credential changed or is no longer present in the Terminus keyring; connect again to approve import.";
+      } else {
+        storedUri = current?.credentialUri ?? "";
+        status = "error";
+        statusDetail = "The previous copied credential could not be revoked; routing is disabled until cleanup succeeds.";
+      }
+    } else if (!routable && current !== null && current.credentialUri !== "") {
+      const revoked = await revokeCopiedCredential(dependencies, current.credentialUri, warn);
+      storedUri = revoked ? "" : current.credentialUri;
+      if (!revoked) {
+        status = "error";
+        statusDetail = "An unusable copied credential could not be revoked; routing remains disabled.";
+      }
     }
 
     const upserted = await dependencies.upsertAccount({
@@ -972,6 +1079,28 @@ export async function discoverAndConnectLocalAccounts(
     existing.set(credential.source, upserted);
   }
 
+  // A valid empty/missing store is authoritative logout. Revoke Terminus's
+  // copied key and keep a disconnected row explaining why it disappeared.
+  // A rejected/unavailable store returned earlier and never reaches this path.
+  for (const current of [...existing.values()]) {
+    if (
+      current.source === ZEN_SOURCE
+      || !current.source.startsWith(OPENCODE_SOURCE_PREFIX)
+      || observedSources.has(current.source)
+    ) continue;
+    const revoked = current.credentialUri === ""
+      || await revokeCopiedCredential(dependencies, current.credentialUri, warn);
+    const updated = await dependencies.upsertAccount(existingAccountUpsert(current, {
+      credentialUri: revoked ? "" : current.credentialUri,
+      fingerprint: "",
+      status: revoked ? "disconnected" : "error",
+      statusDetail: revoked
+        ? "Credential is no longer present in the OpenCode store; connect again after signing in."
+        : "Credential left the OpenCode store, but the copied key could not be revoked; routing is disabled.",
+    }));
+    existing.set(current.source, updated);
+  }
+
   // 3. Discovery never chooses or changes a default. An explicit connect or
   //    Settings action owns that user decision; the anonymous Zen account is
   //    selected in-memory by `resolveTurnProvider` when no default exists.
@@ -982,6 +1111,7 @@ export async function discoverAndConnectLocalAccounts(
     warnings,
     codexInstalled: discovery.codexInstalled,
     opencodeInstalled: discovery.opencodeInstalled,
+    opencodeStoreStatus: discovery.opencodeStoreStatus,
     lastRunAt: now().toISOString(),
   };
 }
@@ -989,22 +1119,34 @@ export async function discoverAndConnectLocalAccounts(
 /**
  * Ask the kernel whether `credentialUri` still resolves.
  *
- * Fails *open*: when no probe is wired, or the probe itself throws (kernel
- * restarting, transport hiccup), the credential is assumed present. Treating a
- * transport failure as a missing credential would re-import on every run and
- * turn a blip into repeated keychain writes.
+ * `null` means the kernel could not answer. Callers disable routing but retain
+ * the URI for a later probe; they neither import nor delete on uncertainty.
  */
 async function credentialStillResolves(
   dependencies: ProviderAccountDiscoveryDependencies,
   credentialUri: string,
   warn: (message: string) => void,
-): Promise<boolean> {
-  if (dependencies.credentialResolves === undefined) return true;
+): Promise<boolean | null> {
+  if (dependencies.credentialResolves === undefined) return null;
   try {
     return await dependencies.credentialResolves(credentialUri);
   } catch (error: unknown) {
     warn(`credential resolution probe failed for ${credentialUri}: ${errorMessage(error)}`);
-    return true;
+    return null;
+  }
+}
+
+async function revokeCopiedCredential(
+  dependencies: ProviderAccountDiscoveryDependencies,
+  credentialUri: string,
+  warn: (message: string) => void,
+): Promise<boolean> {
+  if (dependencies.revokeCredential === undefined) return false;
+  try {
+    return await dependencies.revokeCredential(credentialUri);
+  } catch (error: unknown) {
+    warn(`credential revocation failed for ${credentialUri}: ${errorMessage(error)}`);
+    return false;
   }
 }
 
@@ -1039,6 +1181,32 @@ function mappingColumns(mapping: ProviderAccountMapping): Omit<ProviderAccountUp
     billing: mapping.billing,
     metadataJson: mapping.metadataJson,
     expiresAt: mapping.expiresAt,
+  };
+}
+
+function existingAccountUpsert(
+  account: ProviderAccountRecord,
+  changes: Partial<Pick<ProviderAccountUpsert, "credentialUri" | "fingerprint" | "status" | "statusDetail">>,
+): ProviderAccountUpsert {
+  return {
+    id: account.id,
+    source: account.source,
+    displayName: account.displayName,
+    vendorId: account.vendorId,
+    authKind: account.authKind,
+    credentialUri: changes.credentialUri ?? account.credentialUri,
+    fingerprint: changes.fingerprint ?? account.fingerprint,
+    baseUrl: account.baseUrl,
+    host: account.host,
+    protocol: account.protocol,
+    connectorId: account.connectorId,
+    renderProfile: account.renderProfile,
+    status: changes.status ?? account.status,
+    statusDetail: changes.statusDetail ?? account.statusDetail,
+    billing: account.billing,
+    metadataJson: account.metadataJson,
+    discoveredAt: account.discoveredAt,
+    expiresAt: account.expiresAt,
   };
 }
 
@@ -1124,13 +1292,7 @@ function canonicalMetadata(metadata: ProviderAccountMetadata): string {
   if (metadata.account_id !== undefined) ordered.account_id = metadata.account_id;
   if (metadata.email !== undefined) ordered.email = metadata.email;
   if (metadata.plan_type !== undefined) ordered.plan_type = metadata.plan_type;
-  if (metadata.provider_metadata !== undefined) ordered.provider_metadata = metadata.provider_metadata;
   return JSON.stringify(ordered);
-}
-
-function camelCase(name: string): string {
-  const parts = name.toLowerCase().split("_").filter((part) => part.length > 0);
-  return parts.map((part, index) => (index === 0 ? part : part[0]!.toUpperCase() + part.slice(1))).join("");
 }
 
 function trimTrailingSlashes(value: string): string {

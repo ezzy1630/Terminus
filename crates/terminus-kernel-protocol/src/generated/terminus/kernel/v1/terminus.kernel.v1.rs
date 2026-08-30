@@ -1121,13 +1121,13 @@ pub struct LocalProviderCredentialMessage {
     /// "api" | "oauth" | "wellknown" | "chatgpt".
     #[prost(string, tag="2")]
     pub auth_kind: ::prost::alloc::string::String,
-    /// First 12 hex characters of SHA-256 over the secret bytes, so a rotated
-    /// key is noticed without the key ever being seen.
+    /// Full lowercase SHA-256 digest over the secret bytes, so approval binds to
+    /// exact bytes without the key ever being seen.
     #[prost(string, tag="3")]
     pub fingerprint: ::prost::alloc::string::String,
-    /// Non-secret metadata as canonical JSON. Keys: "account_id", "plan_type",
-    /// "email" (chatgpt), and "provider_metadata" (the store's own metadata
-    /// object, e.g. a Cloudflare account id). Absent keys are omitted.
+    /// Non-secret metadata as canonical JSON. Only allowlisted identity keys are
+    /// carried. Arbitrary provider/plugin metadata never crosses this boundary.
+    /// Current key: "account_id". Absent keys are omitted.
     #[prost(string, tag="4")]
     pub metadata_json: ::prost::alloc::string::String,
     /// Unix seconds at which the credential expires; 0 when it does not.
@@ -1156,6 +1156,10 @@ pub struct DiscoverLocalProviderCredentialsResponse {
     pub codex_installed: bool,
     #[prost(bool, tag="4")]
     pub opencode_installed: bool,
+    /// "available" | "missing" | "rejected". Callers must not treat a
+    /// rejected store as authoritative absence.
+    #[prost(string, tag="5")]
+    pub opencode_store_status: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ImportLocalProviderCredentialRequest {
@@ -1169,6 +1173,11 @@ pub struct ImportLocalProviderCredentialRequest {
     /// scoped to exactly this URI, as SecretService.Store does.
     #[prost(string, tag="3")]
     pub capability_uri: ::prost::alloc::string::String,
+    /// Full lowercase SHA-256 digest returned by the discovery record the user
+    /// approved. Import re-reads the store and refuses a rotated credential
+    /// rather than copying different bytes under stale consent.
+    #[prost(string, tag="4")]
+    pub expected_fingerprint: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ImportLocalProviderCredentialResponse {

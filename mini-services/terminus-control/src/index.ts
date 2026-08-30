@@ -106,6 +106,7 @@ import {
   discoverProviderModels,
   fetchModelsDevRaw,
   lastProviderModels,
+  modelsDevCatalogDigest,
   parseProviderModelsResult,
   providerModelsResultJson,
   providerModelsWire,
@@ -8518,7 +8519,7 @@ const routes: Route[] = [
         res,
         400,
         "PROVIDER_ACCOUNT_INPUT_INVALID",
-        "expected_revision, expected_fingerprint, and consent: true are required",
+        "expected_revision, expected_fingerprint, expected_destination, expected_catalog_digest, and consent: true are required",
         "validation",
       );
     }
@@ -8541,9 +8542,20 @@ const routes: Route[] = [
         res,
         409,
         "PROVIDER_ACCOUNT_CONFLICT",
-        "provider credential changed; reload discovery before connecting",
+        "provider credential changed; reload it before approving import",
         "conflict",
-        { expected_fingerprint: parsed.data.expected_fingerprint, actual_fingerprint: account.fingerprint },
+      );
+    }
+    if (
+      account.baseUrl !== parsed.data.expected_destination
+      || modelsDevCatalogDigest() !== parsed.data.expected_catalog_digest
+    ) {
+      return sendError(
+        res,
+        409,
+        "PROVIDER_ACCOUNT_CONFLICT",
+        "provider destination metadata changed; reload it before approving import",
+        "conflict",
       );
     }
     if (!account.source.startsWith("opencode:")) {
@@ -8556,11 +8568,19 @@ const routes: Route[] = [
       );
     }
     try {
-      await connectProviderAccountWithConsent(account, parsed.data.expected_revision);
+      await connectProviderAccountWithConsent(
+        account,
+        parsed.data.expected_revision,
+        parsed.data.expected_fingerprint,
+        parsed.data.expected_destination,
+        parsed.data.expected_catalog_digest,
+      );
       sendJson(res, 200, await providerAccountsResponse());
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : "provider account connection failed";
-      const conflict = message.includes("reload it before connecting") || message.includes("no longer available");
+      const conflict = message.includes("changed")
+        || message.includes("reload")
+        || message.includes("no longer available");
       sendError(
         res,
         conflict ? 409 : 502,
@@ -13605,7 +13625,12 @@ let lastProviderAccountDiscovery: {
   readonly codexInstalled: boolean;
   readonly opencodeInstalled: boolean;
   readonly warnings: readonly string[];
+  readonly opencodeStoreStatus: "available" | "missing" | "rejected" | "unavailable";
 } | null = null;
+
+function localStoreStatus(value: string): "available" | "missing" | "rejected" {
+  return value === "available" || value === "rejected" ? value : "missing";
+}
 
 async function listProviderAccountRecords(): Promise<readonly ProviderAccountRecord[]> {
   return db.providerAccount.findMany({ orderBy: [{ displayName: "asc" }, { source: "asc" }] });
@@ -13667,6 +13692,49 @@ async function upsertProviderAccountRecord(input: ProviderAccountUpsert): Promis
 }
 
 /**
+ * Commit an explicit credential import only against the row the user saw.
+ * Discovery may reconcile the same source while the kernel is opening the
+ * keyring; revision plus fingerprint make that race a conflict, never a
+ * silent approval transfer to different bytes.
+ */
+async function commitProviderAccountConnection(
+  input: ProviderAccountUpsert,
+  expectedRevision: number,
+  expectedFingerprint: string,
+): Promise<ProviderAccountRecord | null> {
+  const columns = {
+    displayName: input.displayName,
+    vendorId: input.vendorId,
+    authKind: input.authKind,
+    credentialUri: input.credentialUri,
+    fingerprint: input.fingerprint,
+    baseUrl: input.baseUrl,
+    host: input.host,
+    protocol: input.protocol,
+    connectorId: input.connectorId,
+    renderProfile: input.renderProfile,
+    status: input.status,
+    statusDetail: input.statusDetail,
+    billing: input.billing,
+    metadataJson: input.metadataJson,
+    expiresAt: input.expiresAt,
+  };
+  return writerTransaction(async (tx) => {
+    const updated = await tx.providerAccount.updateMany({
+      where: {
+        id: input.id,
+        source: input.source,
+        revision: expectedRevision,
+        fingerprint: expectedFingerprint,
+      },
+      data: { ...columns, revision: { increment: 1 } },
+    });
+    if (updated.count !== 1) return null;
+    return tx.providerAccount.findUnique({ where: { id: input.id } });
+  });
+}
+
+/**
  * Exactly one default. The partial unique index enforces it, so the previous
  * default is cleared before the new one is set rather than in one statement.
  */
@@ -13718,9 +13786,9 @@ function kernelRefusedSecretLookup(error: unknown): boolean {
 /**
  * Ask the kernel what credentials this machine holds and reconcile the rows.
  *
- * Auto-connect is silent by product decision (2026-08-28): nothing leaves the
- * keyring, nothing is sent anywhere the user's own CLI would not already send
- * it, and Settings offers one-click Disconnect.
+ * Discovery is metadata-only for new credentials. It may revoke a previously
+ * copied key after an authoritative logout or rotation; reconnect requires a
+ * fresh, destination-bound approval in Settings.
  */
 async function runProviderAccountDiscovery(): Promise<{
   readonly accounts: readonly ProviderAccountRecord[];
@@ -13728,6 +13796,7 @@ async function runProviderAccountDiscovery(): Promise<{
   readonly warnings: readonly string[];
   readonly codexInstalled: boolean;
   readonly opencodeInstalled: boolean;
+  readonly opencodeStoreStatus: "available" | "missing" | "rejected" | "unavailable";
   readonly lastRunAt: string;
 }> {
   // Rows from the pre-App-Server implementation may still contain a copied
@@ -13754,6 +13823,7 @@ async function runProviderAccountDiscovery(): Promise<{
         warnings: response.warnings,
         codexInstalled: response.codexInstalled,
         opencodeInstalled: response.opencodeInstalled,
+        opencodeStoreStatus: localStoreStatus(response.opencodeStoreStatus),
       };
     },
     // Metadata-only probe: `SecretService.Mint` resolves the credential in
@@ -13778,10 +13848,20 @@ async function runProviderAccountDiscovery(): Promise<{
         throw error;
       }
     },
+    revokeCredential: async (credentialUri: string): Promise<boolean> => {
+      const deleted = await requireKernelUds().secrets.Delete({
+        context: {
+          ...await kernelMaintenanceContext(),
+          idempotencyKey: `provider-account-discovery-revoke:${credentialUri}`,
+        },
+        capabilityUri: credentialUri,
+      });
+      return !deleted.stored && deleted.capabilityUri === credentialUri;
+    },
     listAccounts: listProviderAccountRecords,
     upsertAccount: upsertProviderAccountRecord,
     readGatewayConfiguration: readGatewayConfigurationSnapshot,
-    fetchCatalog: () => fetchModelsDevRaw(),
+    fetchCatalog: () => fetchModelsDevRaw({ forceOffline: true }),
     newAccountId: () => uuidV7(),
     warn: (message) => console.warn(`[terminus-control] ${message}`),
   });
@@ -13790,6 +13870,7 @@ async function runProviderAccountDiscovery(): Promise<{
     codexInstalled: result.codexInstalled,
     opencodeInstalled: result.opencodeInstalled,
     warnings: result.warnings,
+    opencodeStoreStatus: result.opencodeStoreStatus,
   };
   return result;
 }
@@ -13799,7 +13880,6 @@ async function demoteUnsupportedCodexAccounts(): Promise<void> {
     const stale = await tx.providerAccount.findMany({
       where: {
         OR: [{ source: "codex-chatgpt" }, { renderProfile: "chatgpt_codex" }],
-        status: "connected",
       },
       select: { id: true },
     });
@@ -13825,44 +13905,79 @@ async function demoteUnsupportedCodexAccounts(): Promise<void> {
 async function connectProviderAccountWithConsent(
   account: ProviderAccountRecord,
   expectedRevision: number,
+  expectedFingerprint: string,
+  expectedDestination: string,
+  expectedCatalogDigest: string,
 ): Promise<ProviderAccountRecord> {
-  return connectLocalProviderAccount({
-    account,
-    expectedRevision,
-    userConsent: true,
-    discoverLocal: async (): Promise<LocalCredentialDiscovery> => {
-      const response = await requireKernelUds().providerAccounts.DiscoverLocal({
-        context: await kernelMaintenanceContext(),
-      });
-      return {
-        credentials: response.credentials.map((credential) => ({
-          source: credential.source,
-          authKind: credential.authKind,
-          fingerprint: credential.fingerprint,
-          metadataJson: credential.metadataJson,
-          expiresAtUnix: Number(credential.expiresAtUnix),
-          store: credential.store,
-        })),
-        warnings: response.warnings,
-        codexInstalled: response.codexInstalled,
-        opencodeInstalled: response.opencodeInstalled,
-      };
-    },
-    importLocal: async ({ source, capabilityUri, fingerprint }) => {
-      const response = await requireKernelUds().providerAccounts.ImportLocal({
-        context: {
-          ...await kernelMaintenanceContext(),
-          idempotencyKey: `provider-account-import:${capabilityUri}:${fingerprint}`,
-        },
-        source,
-        capabilityUri,
-      });
-      return { capabilityUri: response.capabilityUri, stored: response.stored };
-    },
-    fetchCatalog: () => fetchModelsDevRaw(),
-    upsertAccount: upsertProviderAccountRecord,
-    now: () => new Date(),
-  });
+  if (modelsDevCatalogDigest() !== expectedCatalogDigest) {
+    throw new Error("provider catalog changed after approval; reload it before connecting");
+  }
+  const capabilityUri = providerAccountSecretUri(uuidV7());
+  let imported = false;
+  try {
+    return await connectLocalProviderAccount({
+      account,
+      expectedRevision,
+      expectedFingerprint,
+      expectedDestination,
+      capabilityUri,
+      userConsent: true,
+      discoverLocal: async (): Promise<LocalCredentialDiscovery> => {
+        const response = await requireKernelUds().providerAccounts.DiscoverLocal({
+          context: await kernelMaintenanceContext(),
+        });
+        return {
+          credentials: response.credentials.map((credential) => ({
+            source: credential.source,
+            authKind: credential.authKind,
+            fingerprint: credential.fingerprint,
+            metadataJson: credential.metadataJson,
+            expiresAtUnix: Number(credential.expiresAtUnix),
+            store: credential.store,
+          })),
+          warnings: response.warnings,
+          codexInstalled: response.codexInstalled,
+          opencodeInstalled: response.opencodeInstalled,
+          opencodeStoreStatus: localStoreStatus(response.opencodeStoreStatus),
+        };
+      },
+      importLocal: async ({ source, capabilityUri: destination, expectedFingerprint: approvedFingerprint }) => {
+        const response = await requireKernelUds().providerAccounts.ImportLocal({
+          context: {
+            ...await kernelMaintenanceContext(),
+            idempotencyKey: `provider-account-import:${destination}:${approvedFingerprint}`,
+          },
+          source,
+          capabilityUri: destination,
+          expectedFingerprint: approvedFingerprint,
+        });
+        imported = response.stored && response.capabilityUri === destination;
+        return {
+          capabilityUri: response.capabilityUri,
+          stored: response.stored,
+          fingerprint: response.credential?.fingerprint ?? "",
+        };
+      },
+      fetchCatalog: () => fetchModelsDevRaw({ forceOffline: true }),
+      commitAccount: commitProviderAccountConnection,
+      now: () => new Date(),
+    });
+  } catch (error: unknown) {
+    if (imported) {
+      try {
+        await requireKernelUds().secrets.Delete({
+          context: {
+            ...await kernelMaintenanceContext(),
+            idempotencyKey: `provider-account-failed-import-delete:${capabilityUri}`,
+          },
+          capabilityUri,
+        });
+      } catch (cleanupError: unknown) {
+        console.warn(`[terminus-control] failed provider credential cleanup failed: ${String(cleanupError)}`);
+      }
+    }
+    throw error;
+  }
 }
 
 /**
@@ -14188,7 +14303,9 @@ const providerAccountRevisionSchema = z.object({
 
 const providerAccountConnectSchema = z.object({
   expected_revision: z.number().int().nonnegative(),
-  expected_fingerprint: z.string().min(1).max(512),
+  expected_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+  expected_destination: z.string().url().max(2_048),
+  expected_catalog_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   consent: z.literal(true),
 }).strict();
 
@@ -14214,13 +14331,11 @@ async function providerAccountsResponse(): Promise<{
   if (lastProviderAccountDiscovery?.codexInstalled === true) installedTools.push("codex");
   if (lastProviderAccountDiscovery?.opencodeInstalled === true) installedTools.push(ZEN_VENDOR_ID);
   return {
-    accounts: accounts.map((account) => ({
-      ...providerAccountWire(account, counts.get(account.id) ?? 0),
-      // A fingerprint is a non-secret identity only. The desktop sends it
-      // back with explicit consent so a rotated OpenCode key cannot be
-      // imported against a stale row.
-      credential_fingerprint: account.fingerprint,
-    })),
+    accounts: accounts.map((account) => providerAccountWire(
+      account,
+      counts.get(account.id) ?? 0,
+      modelsDevCatalogDigest(),
+    )),
     discovery: {
       last_run_at: lastProviderAccountDiscovery?.lastRunAt ?? null,
       installed_tools: installedTools,

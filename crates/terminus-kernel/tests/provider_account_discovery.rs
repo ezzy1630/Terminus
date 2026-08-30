@@ -1,8 +1,8 @@
 //! Local credential discovery and import (design §4, spec "Kernel contract").
 //!
 //! Proven here:
-//! 1. the OpenCode entry union decodes by kind, keeps the store's own
-//!    `metadata` object, and drops entries that do not decode without losing
+//! 1. the OpenCode entry union decodes by kind, admits only bounded account
+//!    identity metadata, and drops entries that do not decode without losing
 //!    the rest of the file;
 //! 2. a store that is group/world readable, oversized, or malformed produces
 //!    a warning and no credentials — the read fails closed;
@@ -130,15 +130,12 @@ fn set_owner_only(path: &Path) {
 
 fn fingerprint_of(secret: &str) -> String {
     hex::encode(sha2::Sha256::digest(secret.as_bytes()))
-        .chars()
-        .take(12)
-        .collect()
 }
 
 // ---------- OpenCode auth store ----------
 
 #[test]
-fn opencode_entries_decode_by_kind_and_keep_provider_metadata() {
+fn opencode_entries_decode_by_kind_and_allowlist_account_metadata() {
     let fixture = fixture();
     write_store(
         &fixture.opencode_store,
@@ -147,7 +144,11 @@ fn opencode_entries_decode_by_kind_and_keep_provider_metadata() {
             "cloudflare-workers-ai": {
                 "type": "api",
                 "key": CLOUDFLARE_FIXTURE_KEY,
-                "metadata": { "accountId": "fixture-cloudflare-account" }
+                "metadata": {
+                    "accountId": "fixture-cloudflare-account",
+                    "accessToken": "must-never-cross-the-kernel-boundary",
+                    "arbitrary": { "nested": true }
+                }
             },
             "fixture-wellknown": {
                 "type": "wellknown",
@@ -196,14 +197,19 @@ fn opencode_entries_decode_by_kind_and_keep_provider_metadata() {
     assert_eq!(cerebras.store, LocalCredentialStore::OpencodeAuthStore);
     assert_eq!(cerebras.expires_at_unix, 0);
     assert_eq!(cerebras.fingerprint, fingerprint_of(CEREBRAS_FIXTURE_KEY));
-    assert_eq!(cerebras.fingerprint.len(), 12);
+    assert_eq!(cerebras.fingerprint.len(), 64);
     assert_eq!(cerebras.metadata.to_json(), "{}");
 
     let cloudflare = &discovery.credentials[1];
     assert_eq!(
-        cloudflare.metadata.provider_metadata,
-        Some(serde_json::json!({ "accountId": "fixture-cloudflare-account" })),
-        "the store's own metadata object is carried through verbatim"
+        cloudflare.metadata.account_id.as_deref(),
+        Some("fixture-cloudflare-account"),
+        "only the named account id is admitted"
+    );
+    assert_eq!(
+        cloudflare.metadata.to_json(),
+        r#"{"account_id":"fixture-cloudflare-account"}"#,
+        "arbitrary and token-shaped plugin metadata is dropped"
     );
     assert_eq!(
         cloudflare.fingerprint,
@@ -385,7 +391,7 @@ fn importing_the_codex_source_is_rejected_before_any_store_read_or_write() {
     let denied = fixture
         .kernel
         .provider_accounts
-        .import_local(&ctx(&token), "codex-chatgpt", ACCOUNT_URI)
+        .import_local(&ctx(&token), "codex-chatgpt", ACCOUNT_URI, &"0".repeat(64))
         .expect_err("Codex subscription credentials are not a Terminus provider source");
     assert_eq!(denied.code_name(), "INVALID_REQUEST");
     assert!(broker.request(ACCOUNT_URI, "codex-import-test").is_err());
@@ -469,7 +475,12 @@ fn import_local_moves_the_credential_into_the_provider_account_namespace() {
     let imported = fixture
         .kernel
         .provider_accounts
-        .import_local(&ctx(&token), "opencode:cerebras", ACCOUNT_URI)
+        .import_local(
+            &ctx(&token),
+            "opencode:cerebras",
+            ACCOUNT_URI,
+            &fingerprint_of(CEREBRAS_FIXTURE_KEY),
+        )
         .expect("import succeeds");
 
     assert!(imported.stored);
@@ -494,6 +505,58 @@ fn import_local_moves_the_credential_into_the_provider_account_namespace() {
 }
 
 #[test]
+fn import_local_refuses_a_credential_rotated_after_approval() {
+    let fixture = fixture();
+    let broker = stub_provider_account_keyring(&fixture.kernel);
+    write_store(
+        &fixture.opencode_store,
+        &serde_json::json!({ "cerebras": { "type": "api", "key": CEREBRAS_FIXTURE_KEY } })
+            .to_string(),
+    );
+
+    let token = token_for(&fixture.kernel, vec![OperationClass::Secret], ACCOUNT_URI);
+    let denied = fixture
+        .kernel
+        .provider_accounts
+        .import_local(
+            &ctx(&token),
+            "opencode:cerebras",
+            ACCOUNT_URI,
+            &fingerprint_of("the-key-the-user-approved-before-rotation"),
+        )
+        .expect_err("rotated bytes must not inherit stale consent");
+
+    assert_eq!(denied.code_name(), "TRANSACTION_CONFLICT");
+    assert!(broker.request(ACCOUNT_URI, "rotated-import-test").is_err());
+}
+
+#[test]
+fn import_local_refuses_an_abbreviated_approval_digest() {
+    let fixture = fixture();
+    let broker = stub_provider_account_keyring(&fixture.kernel);
+    write_store(
+        &fixture.opencode_store,
+        &serde_json::json!({ "cerebras": { "type": "api", "key": CEREBRAS_FIXTURE_KEY } })
+            .to_string(),
+    );
+
+    let token = token_for(&fixture.kernel, vec![OperationClass::Secret], ACCOUNT_URI);
+    let denied = fixture
+        .kernel
+        .provider_accounts
+        .import_local(
+            &ctx(&token),
+            "opencode:cerebras",
+            ACCOUNT_URI,
+            "0123456789ab",
+        )
+        .expect_err("a display-length digest cannot authorize an import");
+
+    assert_eq!(denied.code_name(), "INVALID_REQUEST");
+    assert!(broker.request(ACCOUNT_URI, "short-digest-test").is_err());
+}
+
+#[test]
 fn import_local_reports_an_unknown_source() {
     let fixture = fixture();
     stub_provider_account_keyring(&fixture.kernel);
@@ -501,7 +564,12 @@ fn import_local_reports_an_unknown_source() {
     let denied = fixture
         .kernel
         .provider_accounts
-        .import_local(&ctx(&token), "opencode:absent", ACCOUNT_URI)
+        .import_local(
+            &ctx(&token),
+            "opencode:absent",
+            ACCOUNT_URI,
+            &"0".repeat(64),
+        )
         .expect_err("an unknown source cannot be imported");
     assert_eq!(
         denied.code_name(),
@@ -532,7 +600,12 @@ fn import_local_refuses_a_non_uuid_v7_or_foreign_namespace_uri() {
         let denied = fixture
             .kernel
             .provider_accounts
-            .import_local(&ctx(&token), "opencode:cerebras", uri)
+            .import_local(
+                &ctx(&token),
+                "opencode:cerebras",
+                uri,
+                &fingerprint_of(CEREBRAS_FIXTURE_KEY),
+            )
             .expect_err("only secret://provider-account/<uuid-v7> is admitted");
         assert_eq!(
             denied.code_name(),
@@ -557,7 +630,12 @@ fn import_local_requires_an_idempotency_key() {
     let denied = fixture
         .kernel
         .provider_accounts
-        .import_local(&request, "opencode:cerebras", ACCOUNT_URI)
+        .import_local(
+            &request,
+            "opencode:cerebras",
+            ACCOUNT_URI,
+            &fingerprint_of(CEREBRAS_FIXTURE_KEY),
+        )
         .expect_err("a mutating import requires an idempotency key");
     assert_eq!(denied.code_name(), "INVALID_REQUEST");
 }
@@ -591,7 +669,12 @@ fn discovery_and_import_require_a_secret_class_capability() {
     let denied = fixture
         .kernel
         .provider_accounts
-        .import_local(&ctx(&network_import), "opencode:cerebras", ACCOUNT_URI)
+        .import_local(
+            &ctx(&network_import),
+            "opencode:cerebras",
+            ACCOUNT_URI,
+            &fingerprint_of(CEREBRAS_FIXTURE_KEY),
+        )
         .expect_err("import requires OperationClass::Secret");
     assert_eq!(denied.code_name(), "PERMISSION_DENIED");
 
@@ -604,7 +687,12 @@ fn discovery_and_import_require_a_secret_class_capability() {
     let denied = fixture
         .kernel
         .provider_accounts
-        .import_local(&ctx(&wrong_scope), "opencode:cerebras", ACCOUNT_URI)
+        .import_local(
+            &ctx(&wrong_scope),
+            "opencode:cerebras",
+            ACCOUNT_URI,
+            &fingerprint_of(CEREBRAS_FIXTURE_KEY),
+        )
         .expect_err("the capability must be scoped to exactly the destination URI");
     assert_eq!(denied.code_name(), "PERMISSION_DENIED");
 

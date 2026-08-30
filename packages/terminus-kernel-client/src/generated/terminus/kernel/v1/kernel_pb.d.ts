@@ -2886,17 +2886,17 @@ export declare type LocalProviderCredentialMessage = Message<"terminus.kernel.v1
   authKind: string;
 
   /**
-   * First 12 hex characters of SHA-256 over the secret bytes, so a rotated
-   * key is noticed without the key ever being seen.
+   * Full lowercase SHA-256 digest over the secret bytes, so approval binds to
+   * exact bytes without the key ever being seen.
    *
    * @generated from field: string fingerprint = 3;
    */
   fingerprint: string;
 
   /**
-   * Non-secret metadata as canonical JSON. Keys: "account_id", "plan_type",
-   * "email" (chatgpt), and "provider_metadata" (the store's own metadata
-   * object, e.g. a Cloudflare account id). Absent keys are omitted.
+   * Non-secret metadata as canonical JSON. Only allowlisted identity keys are
+   * carried. Arbitrary provider/plugin metadata never crosses this boundary.
+   * Current key: "account_id". Absent keys are omitted.
    *
    * @generated from field: string metadata_json = 4;
    */
@@ -2968,6 +2968,14 @@ export declare type DiscoverLocalProviderCredentialsResponse = Message<"terminus
    * @generated from field: bool opencode_installed = 4;
    */
   opencodeInstalled: boolean;
+
+  /**
+   * "available" | "missing" | "rejected". Callers must not treat a
+   * rejected store as authoritative absence.
+   *
+   * @generated from field: string opencode_store_status = 5;
+   */
+  opencodeStoreStatus: string;
 };
 
 /**
@@ -3000,6 +3008,15 @@ export declare type ImportLocalProviderCredentialRequest = Message<"terminus.ker
    * @generated from field: string capability_uri = 3;
    */
   capabilityUri: string;
+
+  /**
+   * Full lowercase SHA-256 digest returned by the discovery record the user
+   * approved. Import re-reads the store and refuses a rotated credential
+   * rather than copying different bytes under stale consent.
+   *
+   * @generated from field: string expected_fingerprint = 4;
+   */
+  expectedFingerprint: string;
 };
 
 /**

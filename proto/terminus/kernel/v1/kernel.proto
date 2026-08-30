@@ -802,12 +802,12 @@ message LocalProviderCredentialMessage {
   string source = 1;
   // "api" | "oauth" | "wellknown" | "chatgpt".
   string auth_kind = 2;
-  // First 12 hex characters of SHA-256 over the secret bytes, so a rotated
-  // key is noticed without the key ever being seen.
+  // Full lowercase SHA-256 digest over the secret bytes, so approval binds to
+  // exact bytes without the key ever being seen.
   string fingerprint = 3;
-  // Non-secret metadata as canonical JSON. Keys: "account_id", "plan_type",
-  // "email" (chatgpt), and "provider_metadata" (the store's own metadata
-  // object, e.g. a Cloudflare account id). Absent keys are omitted.
+  // Non-secret metadata as canonical JSON. Only allowlisted identity keys are
+  // carried. Arbitrary provider/plugin metadata never crosses this boundary.
+  // Current key: "account_id". Absent keys are omitted.
   string metadata_json = 4;
   // Unix seconds at which the credential expires; 0 when it does not.
   uint64 expires_at_unix = 5;
@@ -828,6 +828,9 @@ message DiscoverLocalProviderCredentialsResponse {
   // PATH lookups, so the client can say "install/sign in" precisely.
   bool codex_installed = 3;
   bool opencode_installed = 4;
+  // "available" | "missing" | "rejected". Callers must not treat a
+  // rejected store as authoritative absence.
+  string opencode_store_status = 5;
 }
 
 message ImportLocalProviderCredentialRequest {
@@ -838,6 +841,10 @@ message ImportLocalProviderCredentialRequest {
   // secret://provider-account/<uuid-v7>. Requires a Secret-class capability
   // scoped to exactly this URI, as SecretService.Store does.
   string capability_uri = 3;
+  // Full lowercase SHA-256 digest returned by the discovery record the user
+  // approved. Import re-reads the store and refuses a rotated credential
+  // rather than copying different bytes under stale consent.
+  string expected_fingerprint = 4;
 }
 
 message ImportLocalProviderCredentialResponse {

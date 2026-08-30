@@ -49,63 +49,25 @@ describe("provider model discovery", () => {
     expect(seen!.url).toBe("https://opencode.ai/zen/v1/models");
   });
 
-  test("fetches models dev catalog with online fetch implementation", async () => {
+  test("uses only the reviewed catalog snapshot and never ambient TypeScript fetch", async () => {
     resetProviderModelsCache();
-    const mockCatalogPayload = {
-      opencode: {
-        id: "opencode",
-        name: "OpenCode Zen",
-        api: "https://opencode.ai/zen/v1",
-        npm: "@ai-sdk/openai-compatible",
-        models: {
-          "mock-model": {
-            id: "mock-model",
-            name: "Mock Model",
-            tool_call: true,
-            structured_output: true,
-            reasoning: false,
-            limit: { context: 128_000, output: 16_000 },
-            cost: { input: 1.0, output: 2.0, cache_read: 0.5 },
-          },
-        },
-      },
-    };
-
-    const mockFetch = (async () => {
-      return {
-        ok: true,
-        json: async () => mockCatalogPayload,
-      } as unknown as Response;
-    }) as typeof fetch;
-
-    const catalog = await fetchModelsDevCatalog({ fetchFn: mockFetch });
-    const opencode = catalog.providers.get("opencode");
-    expect(opencode).toBeDefined();
-    expect(opencode?.models.has("mock-model")).toBe(true);
-  });
-
-  test("falls back to committed offline catalog snapshot when online fetch fails", async () => {
-    resetProviderModelsCache();
-    const failingFetch = (async () => {
-      throw new Error("Network unreachable");
-    }) as typeof fetch;
-
-    const catalog = await fetchModelsDevCatalog({ fetchFn: failingFetch });
+    let networkCalled = false;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      networkCalled = true;
+      throw new Error("ambient network is forbidden");
+    }) as unknown as typeof fetch;
+    const catalog = await fetchModelsDevCatalog();
+    globalThis.fetch = originalFetch;
     const opencode = catalog.providers.get("opencode");
     expect(opencode).toBeDefined();
     expect(opencode?.models.has("grok-code")).toBe(true);
+    expect(networkCalled).toBe(false);
   });
 
   test("forceOffline bypasses network fetch and returns committed snapshot", async () => {
     resetProviderModelsCache();
-    let networkCalled = false;
-    const mockFetch = (async () => {
-      networkCalled = true;
-      throw new Error("Should not be called");
-    }) as typeof fetch;
-
-    const catalog = await fetchModelsDevCatalog({ forceOffline: true, fetchFn: mockFetch });
-    expect(networkCalled).toBe(false);
+    const catalog = await fetchModelsDevCatalog({ forceOffline: true });
     expect(catalog.providers.get("opencode")?.models.has("grok-code")).toBe(true);
   });
 
