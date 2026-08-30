@@ -186,6 +186,7 @@ impl AppState {
             OperationClass::Extension,
             OperationClass::Git,
             OperationClass::ArtifactIngest,
+            OperationClass::ComputerUse,
             OperationClass::Admin,
         ];
         // The all-operations dev capability token is minted ONLY in dev mode.

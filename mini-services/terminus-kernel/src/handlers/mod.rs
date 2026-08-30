@@ -2,6 +2,7 @@
 
 pub mod artifacts;
 pub mod code_intel;
+pub mod computer;
 pub mod connectors;
 pub mod extensions;
 pub mod files;

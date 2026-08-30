@@ -25,6 +25,16 @@ export enum PatchCommitMode {
   UNRECOGNIZED = -1,
 }
 
+export enum ComputerActionKind {
+  COMPUTER_ACTION_UNSPECIFIED = 0,
+  COMPUTER_ACTION_NAVIGATE = 1,
+  COMPUTER_ACTION_CLICK = 2,
+  COMPUTER_ACTION_TYPE_TEXT = 3,
+  COMPUTER_ACTION_SCROLL = 4,
+  COMPUTER_ACTION_WAIT = 5,
+  UNRECOGNIZED = -1,
+}
+
 export enum EnforcementStatusProto {
   ENFORCEMENT_STATUS_UNSPECIFIED = 0,
   ENFORCED_STATUS = 1,
@@ -55,6 +65,7 @@ export enum CapabilityOperationProto {
   CAPABILITY_OPERATION_EXTENSION = 9,
   CAPABILITY_OPERATION_GIT = 10,
   CAPABILITY_OPERATION_ARTIFACT_INGEST = 11,
+  CAPABILITY_OPERATION_COMPUTER_USE = 12,
   UNRECOGNIZED = -1,
 }
 
@@ -578,6 +589,81 @@ export interface BootstrapControlCapabilities {
   expiresAtUnix: number;
 }
 
+/**
+ * Computer use is deliberately a separate capability from generic process,
+ * network, and artifact access. The kernel must own the browser lease and
+ * reject requests when no authenticated, isolated adapter is configured.
+ */
+export interface ComputerObserveRequest {
+  context: RequestContext | undefined;
+  intent: EffectIntent | undefined;
+  browserSessionId: string;
+  viewportWidth: number;
+  viewportHeight: number;
+  maxScreenshotBytes: number;
+}
+
+export interface SemanticBrowserTarget {
+  targetId: string;
+  role: string;
+  accessibleName: string;
+  selector: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  textSnippet: string;
+  confidence: number;
+  semanticHash: string;
+}
+
+export interface ComputerObservation {
+  observationId: string;
+  observationVersion: number;
+  browserSessionId: string;
+  url: string;
+  title: string;
+  viewportWidth: number;
+  viewportHeight: number;
+  screenshot: ArtifactRef | undefined;
+  semanticTree: ArtifactRef | undefined;
+  targets: SemanticBrowserTarget[];
+  screenshotTruncated: boolean;
+  continuationToken: string;
+  receipt: ArtifactRef | undefined;
+  trustLabel: string;
+}
+
+export interface ComputerObserveResponse {
+  observation: ComputerObservation | undefined;
+}
+
+export interface ComputerActRequest {
+  context: RequestContext | undefined;
+  intent: EffectIntent | undefined;
+  browserSessionId: string;
+  observationId: string;
+  observationVersion: number;
+  action: ComputerActionKind;
+  targetId: string;
+  navigationUrl: string;
+  text: string;
+  scrollX: number;
+  scrollY: number;
+  waitMs: number;
+  origin: string;
+  approvalId: string;
+}
+
+export interface ComputerActResponse {
+  actionId: string;
+  outcome: string;
+  preObservation: ComputerObservation | undefined;
+  postObservation: ComputerObservation | undefined;
+  receipt: ArtifactRef | undefined;
+  failureReason: string;
+}
+
 export interface RegisterWorkspaceRequest {
   context: RequestContext | undefined;
   rootUri: string;
@@ -716,7 +802,8 @@ export interface SecretMutationResponse {
 export interface LocalProviderCredentialMessage {
   /**
    * Stable source id: "opencode:<providerID>" (an OpenCode auth-store entry)
-   * or "codex-chatgpt" (a ChatGPT login held by the Codex CLI).
+   * only OpenCode auth-store entries are returned. Codex CLI credentials are
+   * intentionally never read; a future App Server lane owns that login.
    */
   source: string;
   /** "api" | "oauth" | "wellknown" | "chatgpt". */
@@ -735,7 +822,7 @@ export interface LocalProviderCredentialMessage {
   /** Unix seconds at which the credential expires; 0 when it does not. */
   expiresAtUnix: number;
   /**
-   * Which store it was read from: "opencode-auth-store" | "codex-auth-store".
+   * Which supported store it was read from: "opencode-auth-store".
    * A label, never a filesystem path.
    */
   store: string;
@@ -764,7 +851,7 @@ export interface ImportLocalProviderCredentialRequest {
   /** Source id from discovery. */
   source: string;
   /**
-   * Destination minted by the control plane:
+   * Destination minted by the control plane after explicit user consent:
    * secret://provider-account/<uuid-v7>. Requires a Secret-class capability
    * scoped to exactly this URI, as SecretService.Store does.
    */
@@ -5977,6 +6064,912 @@ export const BootstrapControlCapabilities: MessageFns<BootstrapControlCapabiliti
   },
 };
 
+function createBaseComputerObserveRequest(): ComputerObserveRequest {
+  return {
+    context: undefined,
+    intent: undefined,
+    browserSessionId: "",
+    viewportWidth: 0,
+    viewportHeight: 0,
+    maxScreenshotBytes: 0,
+  };
+}
+
+export const ComputerObserveRequest: MessageFns<ComputerObserveRequest> = {
+  encode(message: ComputerObserveRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.intent !== undefined) {
+      EffectIntent.encode(message.intent, writer.uint32(18).fork()).join();
+    }
+    if (message.browserSessionId !== "") {
+      writer.uint32(26).string(message.browserSessionId);
+    }
+    if (message.viewportWidth !== 0) {
+      writer.uint32(32).uint32(message.viewportWidth);
+    }
+    if (message.viewportHeight !== 0) {
+      writer.uint32(40).uint32(message.viewportHeight);
+    }
+    if (message.maxScreenshotBytes !== 0) {
+      writer.uint32(48).uint64(message.maxScreenshotBytes);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ComputerObserveRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseComputerObserveRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.intent = EffectIntent.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.browserSessionId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.viewportWidth = reader.uint32();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.viewportHeight = reader.uint32();
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.maxScreenshotBytes = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ComputerObserveRequest>, I>>(base?: I): ComputerObserveRequest {
+    return ComputerObserveRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ComputerObserveRequest>, I>>(object: I): ComputerObserveRequest {
+    const message = createBaseComputerObserveRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.intent = (object.intent !== undefined && object.intent !== null)
+      ? EffectIntent.fromPartial(object.intent)
+      : undefined;
+    message.browserSessionId = object.browserSessionId ?? "";
+    message.viewportWidth = object.viewportWidth ?? 0;
+    message.viewportHeight = object.viewportHeight ?? 0;
+    message.maxScreenshotBytes = object.maxScreenshotBytes ?? 0;
+    return message;
+  },
+};
+
+function createBaseSemanticBrowserTarget(): SemanticBrowserTarget {
+  return {
+    targetId: "",
+    role: "",
+    accessibleName: "",
+    selector: "",
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+    textSnippet: "",
+    confidence: 0,
+    semanticHash: "",
+  };
+}
+
+export const SemanticBrowserTarget: MessageFns<SemanticBrowserTarget> = {
+  encode(message: SemanticBrowserTarget, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.targetId !== "") {
+      writer.uint32(10).string(message.targetId);
+    }
+    if (message.role !== "") {
+      writer.uint32(18).string(message.role);
+    }
+    if (message.accessibleName !== "") {
+      writer.uint32(26).string(message.accessibleName);
+    }
+    if (message.selector !== "") {
+      writer.uint32(34).string(message.selector);
+    }
+    if (message.x !== 0) {
+      writer.uint32(41).double(message.x);
+    }
+    if (message.y !== 0) {
+      writer.uint32(49).double(message.y);
+    }
+    if (message.width !== 0) {
+      writer.uint32(57).double(message.width);
+    }
+    if (message.height !== 0) {
+      writer.uint32(65).double(message.height);
+    }
+    if (message.textSnippet !== "") {
+      writer.uint32(74).string(message.textSnippet);
+    }
+    if (message.confidence !== 0) {
+      writer.uint32(81).double(message.confidence);
+    }
+    if (message.semanticHash !== "") {
+      writer.uint32(90).string(message.semanticHash);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SemanticBrowserTarget {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSemanticBrowserTarget();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.targetId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.role = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.accessibleName = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.selector = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 41) {
+            break;
+          }
+
+          message.x = reader.double();
+          continue;
+        }
+        case 6: {
+          if (tag !== 49) {
+            break;
+          }
+
+          message.y = reader.double();
+          continue;
+        }
+        case 7: {
+          if (tag !== 57) {
+            break;
+          }
+
+          message.width = reader.double();
+          continue;
+        }
+        case 8: {
+          if (tag !== 65) {
+            break;
+          }
+
+          message.height = reader.double();
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.textSnippet = reader.string();
+          continue;
+        }
+        case 10: {
+          if (tag !== 81) {
+            break;
+          }
+
+          message.confidence = reader.double();
+          continue;
+        }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.semanticHash = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SemanticBrowserTarget>, I>>(base?: I): SemanticBrowserTarget {
+    return SemanticBrowserTarget.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SemanticBrowserTarget>, I>>(object: I): SemanticBrowserTarget {
+    const message = createBaseSemanticBrowserTarget();
+    message.targetId = object.targetId ?? "";
+    message.role = object.role ?? "";
+    message.accessibleName = object.accessibleName ?? "";
+    message.selector = object.selector ?? "";
+    message.x = object.x ?? 0;
+    message.y = object.y ?? 0;
+    message.width = object.width ?? 0;
+    message.height = object.height ?? 0;
+    message.textSnippet = object.textSnippet ?? "";
+    message.confidence = object.confidence ?? 0;
+    message.semanticHash = object.semanticHash ?? "";
+    return message;
+  },
+};
+
+function createBaseComputerObservation(): ComputerObservation {
+  return {
+    observationId: "",
+    observationVersion: 0,
+    browserSessionId: "",
+    url: "",
+    title: "",
+    viewportWidth: 0,
+    viewportHeight: 0,
+    screenshot: undefined,
+    semanticTree: undefined,
+    targets: [],
+    screenshotTruncated: false,
+    continuationToken: "",
+    receipt: undefined,
+    trustLabel: "",
+  };
+}
+
+export const ComputerObservation: MessageFns<ComputerObservation> = {
+  encode(message: ComputerObservation, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.observationId !== "") {
+      writer.uint32(10).string(message.observationId);
+    }
+    if (message.observationVersion !== 0) {
+      writer.uint32(16).uint64(message.observationVersion);
+    }
+    if (message.browserSessionId !== "") {
+      writer.uint32(26).string(message.browserSessionId);
+    }
+    if (message.url !== "") {
+      writer.uint32(34).string(message.url);
+    }
+    if (message.title !== "") {
+      writer.uint32(42).string(message.title);
+    }
+    if (message.viewportWidth !== 0) {
+      writer.uint32(48).uint32(message.viewportWidth);
+    }
+    if (message.viewportHeight !== 0) {
+      writer.uint32(56).uint32(message.viewportHeight);
+    }
+    if (message.screenshot !== undefined) {
+      ArtifactRef.encode(message.screenshot, writer.uint32(66).fork()).join();
+    }
+    if (message.semanticTree !== undefined) {
+      ArtifactRef.encode(message.semanticTree, writer.uint32(74).fork()).join();
+    }
+    for (const v of message.targets) {
+      SemanticBrowserTarget.encode(v!, writer.uint32(82).fork()).join();
+    }
+    if (message.screenshotTruncated !== false) {
+      writer.uint32(88).bool(message.screenshotTruncated);
+    }
+    if (message.continuationToken !== "") {
+      writer.uint32(98).string(message.continuationToken);
+    }
+    if (message.receipt !== undefined) {
+      ArtifactRef.encode(message.receipt, writer.uint32(106).fork()).join();
+    }
+    if (message.trustLabel !== "") {
+      writer.uint32(114).string(message.trustLabel);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ComputerObservation {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseComputerObservation();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.observationId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.observationVersion = longToNumber(reader.uint64());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.browserSessionId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.url = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.title = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.viewportWidth = reader.uint32();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.viewportHeight = reader.uint32();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.screenshot = ArtifactRef.decode(reader, reader.uint32());
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.semanticTree = ArtifactRef.decode(reader, reader.uint32());
+          continue;
+        }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.targets.push(SemanticBrowserTarget.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 11: {
+          if (tag !== 88) {
+            break;
+          }
+
+          message.screenshotTruncated = reader.bool();
+          continue;
+        }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.continuationToken = reader.string();
+          continue;
+        }
+        case 13: {
+          if (tag !== 106) {
+            break;
+          }
+
+          message.receipt = ArtifactRef.decode(reader, reader.uint32());
+          continue;
+        }
+        case 14: {
+          if (tag !== 114) {
+            break;
+          }
+
+          message.trustLabel = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ComputerObservation>, I>>(base?: I): ComputerObservation {
+    return ComputerObservation.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ComputerObservation>, I>>(object: I): ComputerObservation {
+    const message = createBaseComputerObservation();
+    message.observationId = object.observationId ?? "";
+    message.observationVersion = object.observationVersion ?? 0;
+    message.browserSessionId = object.browserSessionId ?? "";
+    message.url = object.url ?? "";
+    message.title = object.title ?? "";
+    message.viewportWidth = object.viewportWidth ?? 0;
+    message.viewportHeight = object.viewportHeight ?? 0;
+    message.screenshot = (object.screenshot !== undefined && object.screenshot !== null)
+      ? ArtifactRef.fromPartial(object.screenshot)
+      : undefined;
+    message.semanticTree = (object.semanticTree !== undefined && object.semanticTree !== null)
+      ? ArtifactRef.fromPartial(object.semanticTree)
+      : undefined;
+    message.targets = object.targets?.map((e) => SemanticBrowserTarget.fromPartial(e)) || [];
+    message.screenshotTruncated = object.screenshotTruncated ?? false;
+    message.continuationToken = object.continuationToken ?? "";
+    message.receipt = (object.receipt !== undefined && object.receipt !== null)
+      ? ArtifactRef.fromPartial(object.receipt)
+      : undefined;
+    message.trustLabel = object.trustLabel ?? "";
+    return message;
+  },
+};
+
+function createBaseComputerObserveResponse(): ComputerObserveResponse {
+  return { observation: undefined };
+}
+
+export const ComputerObserveResponse: MessageFns<ComputerObserveResponse> = {
+  encode(message: ComputerObserveResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.observation !== undefined) {
+      ComputerObservation.encode(message.observation, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ComputerObserveResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseComputerObserveResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.observation = ComputerObservation.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ComputerObserveResponse>, I>>(base?: I): ComputerObserveResponse {
+    return ComputerObserveResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ComputerObserveResponse>, I>>(object: I): ComputerObserveResponse {
+    const message = createBaseComputerObserveResponse();
+    message.observation = (object.observation !== undefined && object.observation !== null)
+      ? ComputerObservation.fromPartial(object.observation)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseComputerActRequest(): ComputerActRequest {
+  return {
+    context: undefined,
+    intent: undefined,
+    browserSessionId: "",
+    observationId: "",
+    observationVersion: 0,
+    action: 0,
+    targetId: "",
+    navigationUrl: "",
+    text: "",
+    scrollX: 0,
+    scrollY: 0,
+    waitMs: 0,
+    origin: "",
+    approvalId: "",
+  };
+}
+
+export const ComputerActRequest: MessageFns<ComputerActRequest> = {
+  encode(message: ComputerActRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.intent !== undefined) {
+      EffectIntent.encode(message.intent, writer.uint32(18).fork()).join();
+    }
+    if (message.browserSessionId !== "") {
+      writer.uint32(26).string(message.browserSessionId);
+    }
+    if (message.observationId !== "") {
+      writer.uint32(34).string(message.observationId);
+    }
+    if (message.observationVersion !== 0) {
+      writer.uint32(40).uint64(message.observationVersion);
+    }
+    if (message.action !== 0) {
+      writer.uint32(48).int32(message.action);
+    }
+    if (message.targetId !== "") {
+      writer.uint32(58).string(message.targetId);
+    }
+    if (message.navigationUrl !== "") {
+      writer.uint32(66).string(message.navigationUrl);
+    }
+    if (message.text !== "") {
+      writer.uint32(74).string(message.text);
+    }
+    if (message.scrollX !== 0) {
+      writer.uint32(81).double(message.scrollX);
+    }
+    if (message.scrollY !== 0) {
+      writer.uint32(89).double(message.scrollY);
+    }
+    if (message.waitMs !== 0) {
+      writer.uint32(96).uint64(message.waitMs);
+    }
+    if (message.origin !== "") {
+      writer.uint32(106).string(message.origin);
+    }
+    if (message.approvalId !== "") {
+      writer.uint32(114).string(message.approvalId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ComputerActRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseComputerActRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.intent = EffectIntent.decode(reader, reader.uint32());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.browserSessionId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.observationId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.observationVersion = longToNumber(reader.uint64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.action = reader.int32() as any;
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.targetId = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.navigationUrl = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.text = reader.string();
+          continue;
+        }
+        case 10: {
+          if (tag !== 81) {
+            break;
+          }
+
+          message.scrollX = reader.double();
+          continue;
+        }
+        case 11: {
+          if (tag !== 89) {
+            break;
+          }
+
+          message.scrollY = reader.double();
+          continue;
+        }
+        case 12: {
+          if (tag !== 96) {
+            break;
+          }
+
+          message.waitMs = longToNumber(reader.uint64());
+          continue;
+        }
+        case 13: {
+          if (tag !== 106) {
+            break;
+          }
+
+          message.origin = reader.string();
+          continue;
+        }
+        case 14: {
+          if (tag !== 114) {
+            break;
+          }
+
+          message.approvalId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ComputerActRequest>, I>>(base?: I): ComputerActRequest {
+    return ComputerActRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ComputerActRequest>, I>>(object: I): ComputerActRequest {
+    const message = createBaseComputerActRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.intent = (object.intent !== undefined && object.intent !== null)
+      ? EffectIntent.fromPartial(object.intent)
+      : undefined;
+    message.browserSessionId = object.browserSessionId ?? "";
+    message.observationId = object.observationId ?? "";
+    message.observationVersion = object.observationVersion ?? 0;
+    message.action = object.action ?? 0;
+    message.targetId = object.targetId ?? "";
+    message.navigationUrl = object.navigationUrl ?? "";
+    message.text = object.text ?? "";
+    message.scrollX = object.scrollX ?? 0;
+    message.scrollY = object.scrollY ?? 0;
+    message.waitMs = object.waitMs ?? 0;
+    message.origin = object.origin ?? "";
+    message.approvalId = object.approvalId ?? "";
+    return message;
+  },
+};
+
+function createBaseComputerActResponse(): ComputerActResponse {
+  return {
+    actionId: "",
+    outcome: "",
+    preObservation: undefined,
+    postObservation: undefined,
+    receipt: undefined,
+    failureReason: "",
+  };
+}
+
+export const ComputerActResponse: MessageFns<ComputerActResponse> = {
+  encode(message: ComputerActResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.actionId !== "") {
+      writer.uint32(10).string(message.actionId);
+    }
+    if (message.outcome !== "") {
+      writer.uint32(18).string(message.outcome);
+    }
+    if (message.preObservation !== undefined) {
+      ComputerObservation.encode(message.preObservation, writer.uint32(26).fork()).join();
+    }
+    if (message.postObservation !== undefined) {
+      ComputerObservation.encode(message.postObservation, writer.uint32(34).fork()).join();
+    }
+    if (message.receipt !== undefined) {
+      ArtifactRef.encode(message.receipt, writer.uint32(42).fork()).join();
+    }
+    if (message.failureReason !== "") {
+      writer.uint32(50).string(message.failureReason);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ComputerActResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseComputerActResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.actionId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.outcome = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.preObservation = ComputerObservation.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.postObservation = ComputerObservation.decode(reader, reader.uint32());
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.receipt = ArtifactRef.decode(reader, reader.uint32());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.failureReason = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ComputerActResponse>, I>>(base?: I): ComputerActResponse {
+    return ComputerActResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ComputerActResponse>, I>>(object: I): ComputerActResponse {
+    const message = createBaseComputerActResponse();
+    message.actionId = object.actionId ?? "";
+    message.outcome = object.outcome ?? "";
+    message.preObservation = (object.preObservation !== undefined && object.preObservation !== null)
+      ? ComputerObservation.fromPartial(object.preObservation)
+      : undefined;
+    message.postObservation = (object.postObservation !== undefined && object.postObservation !== null)
+      ? ComputerObservation.fromPartial(object.postObservation)
+      : undefined;
+    message.receipt = (object.receipt !== undefined && object.receipt !== null)
+      ? ArtifactRef.fromPartial(object.receipt)
+      : undefined;
+    message.failureReason = object.failureReason ?? "";
+    return message;
+  },
+};
+
 function createBaseRegisterWorkspaceRequest(): RegisterWorkspaceRequest {
   return {
     context: undefined,
@@ -10547,6 +11540,34 @@ export class JobServiceClientImpl implements JobService {
     const data = JobGetRequest.encode(request).finish();
     const promise = this.rpc.request(this.service, "Get", data);
     return promise.then((data) => JobState.decode(new BinaryReader(data)));
+  }
+}
+
+export interface ComputerUseService {
+  Observe(request: ComputerObserveRequest): Promise<ComputerObserveResponse>;
+  Act(request: ComputerActRequest): Promise<ComputerActResponse>;
+}
+
+export const ComputerUseServiceServiceName = "terminus.kernel.v1.ComputerUseService";
+export class ComputerUseServiceClientImpl implements ComputerUseService {
+  private readonly rpc: Rpc;
+  private readonly service: string;
+  constructor(rpc: Rpc, opts?: { service?: string }) {
+    this.service = opts?.service || ComputerUseServiceServiceName;
+    this.rpc = rpc;
+    this.Observe = this.Observe.bind(this);
+    this.Act = this.Act.bind(this);
+  }
+  Observe(request: ComputerObserveRequest): Promise<ComputerObserveResponse> {
+    const data = ComputerObserveRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "Observe", data);
+    return promise.then((data) => ComputerObserveResponse.decode(new BinaryReader(data)));
+  }
+
+  Act(request: ComputerActRequest): Promise<ComputerActResponse> {
+    const data = ComputerActRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "Act", data);
+    return promise.then((data) => ComputerActResponse.decode(new BinaryReader(data)));
   }
 }
 

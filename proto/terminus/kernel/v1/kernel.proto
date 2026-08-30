@@ -500,6 +500,97 @@ service JobService {
 }
 
 // =============================================================================
+// Governed browser computer-use service (ADR-0041, SPEC §25)
+// =============================================================================
+
+// Computer use is deliberately a separate capability from generic process,
+// network, and artifact access. The kernel must own the browser lease and
+// reject requests when no authenticated, isolated adapter is configured.
+message ComputerObserveRequest {
+  RequestContext context = 1;
+  EffectIntent intent = 2;
+  string browser_session_id = 3;
+  uint32 viewport_width = 4;
+  uint32 viewport_height = 5;
+  uint64 max_screenshot_bytes = 6;
+}
+
+message SemanticBrowserTarget {
+  string target_id = 1;
+  string role = 2;
+  string accessible_name = 3;
+  string selector = 4;
+  double x = 5;
+  double y = 6;
+  double width = 7;
+  double height = 8;
+  string text_snippet = 9;
+  double confidence = 10;
+  string semantic_hash = 11;
+}
+
+message ComputerObservation {
+  string observation_id = 1;
+  uint64 observation_version = 2;
+  string browser_session_id = 3;
+  string url = 4;
+  string title = 5;
+  uint32 viewport_width = 6;
+  uint32 viewport_height = 7;
+  ArtifactRef screenshot = 8;
+  ArtifactRef semantic_tree = 9;
+  repeated SemanticBrowserTarget targets = 10;
+  bool screenshot_truncated = 11;
+  string continuation_token = 12;
+  ArtifactRef receipt = 13;
+  string trust_label = 14;
+}
+
+message ComputerObserveResponse {
+  ComputerObservation observation = 1;
+}
+
+enum ComputerActionKind {
+  COMPUTER_ACTION_UNSPECIFIED = 0;
+  COMPUTER_ACTION_NAVIGATE = 1;
+  COMPUTER_ACTION_CLICK = 2;
+  COMPUTER_ACTION_TYPE_TEXT = 3;
+  COMPUTER_ACTION_SCROLL = 4;
+  COMPUTER_ACTION_WAIT = 5;
+}
+
+message ComputerActRequest {
+  RequestContext context = 1;
+  EffectIntent intent = 2;
+  string browser_session_id = 3;
+  string observation_id = 4;
+  uint64 observation_version = 5;
+  ComputerActionKind action = 6;
+  string target_id = 7;
+  string navigation_url = 8;
+  string text = 9;
+  double scroll_x = 10;
+  double scroll_y = 11;
+  uint64 wait_ms = 12;
+  string origin = 13;
+  string approval_id = 14;
+}
+
+message ComputerActResponse {
+  string action_id = 1;
+  string outcome = 2;
+  ComputerObservation pre_observation = 3;
+  ComputerObservation post_observation = 4;
+  ArtifactRef receipt = 5;
+  string failure_reason = 6;
+}
+
+service ComputerUseService {
+  rpc Observe(ComputerObserveRequest) returns (ComputerObserveResponse);
+  rpc Act(ComputerActRequest) returns (ComputerActResponse);
+}
+
+// =============================================================================
 // Workspace service (SPEC §31.1)
 // =============================================================================
 
@@ -628,6 +719,7 @@ enum CapabilityOperationProto {
   CAPABILITY_OPERATION_EXTENSION = 9;
   CAPABILITY_OPERATION_GIT = 10;
   CAPABILITY_OPERATION_ARTIFACT_INGEST = 11;
+  CAPABILITY_OPERATION_COMPUTER_USE = 12;
 }
 
 message MintTaskCapabilityRequest {
