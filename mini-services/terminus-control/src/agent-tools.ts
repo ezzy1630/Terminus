@@ -101,9 +101,41 @@ const pathSchema = z.string().min(1).max(4_096).refine(
 );
 const sha256Schema = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 
-export const standaloneCapabilityInputSchema = z.object({
-  action: z.literal("activate_workspace"),
-}).strict();
+const standaloneCapabilityKindSchema = z.enum([
+  "tool_pack",
+  "skill",
+  "mcp_server",
+  "plugin",
+  "external_harness",
+  "environment",
+]);
+const standaloneCapabilityIdSchema = z.string().min(1).max(255).refine(
+  (capabilityId) => !/[\0\r\n]/.test(capabilityId),
+  "capability_id may not contain control delimiters",
+);
+const standaloneCapabilityPageSchema = {
+  cursor: z.number().int().min(0).max(512).default(0),
+  limit: z.number().int().min(1).max(16).default(8),
+  kind: standaloneCapabilityKindSchema.optional(),
+};
+
+export const standaloneCapabilityInputSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("activate_workspace") }).strict(),
+  z.object({
+    action: z.literal("list"),
+    query: z.string().max(256).optional(),
+    ...standaloneCapabilityPageSchema,
+  }).strict(),
+  z.object({
+    action: z.literal("search"),
+    query: z.string().trim().min(1).max(256),
+    ...standaloneCapabilityPageSchema,
+  }).strict(),
+  z.object({ action: z.literal("describe"), capability_id: standaloneCapabilityIdSchema }).strict(),
+  z.object({ action: z.literal("activate"), capability_id: standaloneCapabilityIdSchema }).strict(),
+  z.object({ action: z.literal("deactivate"), capability_id: standaloneCapabilityIdSchema }).strict(),
+  z.object({ action: z.literal("status") }).strict(),
+]);
 
 /**
  * Accept the spellings every frontier model was trained on.
@@ -615,7 +647,7 @@ export function relativizeStandaloneCallPaths(
 }
 
 export type ParsedStandaloneToolCall =
-  | { readonly providerCallId: string; readonly toolId: "capability"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneCapabilityInput }
+  | { readonly providerCallId: string; readonly toolId: "capability"; readonly toolVersion: "standalone-v2"; readonly arguments: StandaloneCapabilityInput }
   | { readonly providerCallId: string; readonly toolId: "read"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneReadInput }
   | { readonly providerCallId: string; readonly toolId: "patch"; readonly toolVersion: "standalone-v1"; readonly arguments: StandalonePatchInput }
   | { readonly providerCallId: string; readonly toolId: "write"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneWriteInput }
@@ -661,14 +693,19 @@ const resultSchema: Readonly<Record<string, unknown>> = {
 export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
   {
     id: "capability",
-    version: "standalone-v1",
-    summary: "Activate workspace context and coding tools for this turn. Call this only when answering the user's request requires inspecting, changing, or executing within the workspace. Otherwise answer directly without calling it.",
+    version: "standalone-v2",
+    summary: "Activate workspace context, search compact cards for admitted optional capabilities, inspect exact cards, and activate or deactivate their schemas for this turn. Activation changes provider-visible declarations only; it never grants kernel effects.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       required: ["action"],
       properties: {
-        action: { enum: ["activate_workspace"] },
+        action: { enum: ["activate_workspace", "list", "search", "describe", "activate", "deactivate", "status"] },
+        capability_id: { type: "string", minLength: 1, maxLength: 255, description: "Exact admitted id; required for describe, activate, and deactivate." },
+        query: { type: "string", minLength: 1, maxLength: 256, description: "Search text; required for search and optional for list." },
+        kind: { enum: ["tool_pack", "skill", "mcp_server", "plugin", "external_harness", "environment"] },
+        cursor: { type: "integer", minimum: 0, maximum: 512, default: 0 },
+        limit: { type: "integer", minimum: 1, maximum: 16, default: 8 },
       },
     },
     resultSchema,
@@ -1009,9 +1046,20 @@ export const STANDALONE_ADAPTIVE_TOOL_IDS = ["inspect", "recall"] as const;
 export const STANDALONE_INITIAL_TOOL_IDS = ["capability"] as const;
 
 export function selectInitialStandaloneToolSchemas(toolsEnabled: boolean): readonly ProviderToolSchema[] {
-  if (!toolsEnabled) return [];
+  return selectDiscoveredStandaloneToolSchemas({ toolsEnabled });
+}
+
+/** Keep the control surface plus only the optional schemas activated so far. */
+export function selectDiscoveredStandaloneToolSchemas(input: {
+  readonly toolsEnabled: boolean;
+  readonly activatedCapabilities?: readonly string[] | undefined;
+}): readonly ProviderToolSchema[] {
+  if (!input.toolsEnabled) return [];
   const initial = new Set<string>(STANDALONE_INITIAL_TOOL_IDS);
-  return STANDALONE_TOOL_SCHEMAS.filter((schema) => initial.has(schema.id));
+  const activated = new Set(input.activatedCapabilities ?? []);
+  return STANDALONE_TOOL_SCHEMAS.filter((schema) =>
+    initial.has(schema.id) || activated.has(`standalone.${schema.id}`),
+  );
 }
 
 function estimatedSchemaTokens(schema: ProviderToolSchema): number {
@@ -1063,10 +1111,12 @@ export function selectStandaloneToolSchemas(input: {
 }): readonly ProviderToolSchema[] {
   if (!input.toolsEnabled) return [];
   const activated = new Set(input.activatedCapabilities ?? []);
+  const control = new Set<string>(STANDALONE_INITIAL_TOOL_IDS);
   const alwaysOn = new Set<string>(STANDALONE_ALWAYS_ON_TOOL_IDS);
   const adaptive = new Set<string>(STANDALONE_ADAPTIVE_TOOL_IDS);
   return STANDALONE_TOOL_SCHEMAS.filter((schema) =>
-    alwaysOn.has(schema.id)
+    control.has(schema.id)
+      || alwaysOn.has(schema.id)
       || (input.adaptiveToolsEnabled === true && adaptive.has(schema.id))
       || (!adaptive.has(schema.id) && activated.has(`standalone.${schema.id}`)),
   );
@@ -1133,7 +1183,7 @@ export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStan
   }
   switch (call.toolName) {
     case "capability":
-      return { providerCallId: call.toolCallId, toolId: "capability", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneCapabilityInputSchema) };
+      return { providerCallId: call.toolCallId, toolId: "capability", toolVersion: "standalone-v2", arguments: parseArguments(call, standaloneCapabilityInputSchema) };
     case "read":
       return { providerCallId: call.toolCallId, toolId: "read", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneReadInputSchema) };
     case "patch":

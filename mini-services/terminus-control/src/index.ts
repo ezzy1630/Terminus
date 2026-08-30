@@ -159,7 +159,9 @@ import {
 } from "./gateway-kernel-client.js";
 import {
   MAX_TOOL_MODEL_RESULT_BYTES,
+  STANDALONE_TOOL_CAPABILITY_CARDS,
   STANDALONE_TOOL_SCHEMAS,
+  selectDiscoveredStandaloneToolSchemas,
   selectInitialStandaloneToolSchemas,
   selectStandaloneToolSchemas,
   ObservedSourceTracker,
@@ -376,6 +378,7 @@ import {
   type CodexAppServerTurnInput,
 } from "./codex-app-server.js";
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
+import { CapabilityDiscoverySession } from "./agent/capability-discovery.js";
 import {
   buildWorkingMemoryContextSection,
   renderCheckpointSummary,
@@ -14829,6 +14832,7 @@ interface StandaloneToolSettlementInput {
   readonly contractHash: string;
   readonly artifactClient: ArtifactClient;
   readonly observedSources: ObservedSourceTracker;
+  readonly capabilitySession: CapabilityDiscoverySession;
   /** Read the authoritative workspace identity around the kernel effect. */
   readonly workspaceRevision?: (() => Promise<string | null>) | undefined;
   /** Current verifier/repair association, if this turn has one. */
@@ -15403,11 +15407,43 @@ async function settleStandaloneProviderTool(
   // surface. It is persisted like every other provider call, but it is not a
   // kernel effect and therefore needs no scope capability or approval.
   if (call.toolId === "capability") {
-    const result = okResult({ workspace_activated: true }, {
-      toolCallId,
-      traceId: input.turnId,
-      summary: "Workspace context and coding tools activated for this turn",
-    });
+    const outcome = call.arguments.action === "activate_workspace"
+      ? {
+          ok: true as const,
+          data: {
+            action: "activate_workspace" as const,
+            workspace_activated: true,
+            active_capabilities: input.capabilitySession.activeCapabilityIds(),
+          },
+          summary: "Workspace context and coding tools activated for this turn",
+        }
+      : input.capabilitySession.execute(call.arguments);
+    const result = outcome.ok
+      ? (() => {
+          const base = okResult(outcome.data, {
+            toolCallId,
+            traceId: input.turnId,
+            summary: outcome.summary,
+          });
+          const nextCursor = "next_cursor" in outcome.data ? outcome.data.next_cursor : null;
+          return nextCursor === null || nextCursor === undefined
+            ? base
+            : {
+                ...base,
+                status: "partial" as const,
+                truncation: {
+                  occurred: true,
+                  reason: "more admitted capability cards match this bounded page",
+                  continuation: `call capability.${outcome.data.action} again with cursor ${nextCursor}`,
+                },
+              };
+        })()
+      : errorResult(outcome.message, {
+          toolCallId,
+          traceId: input.turnId,
+          status: "error",
+          summary: outcome.message,
+        });
     return persistSettledToolResult({
       input,
       call,
@@ -15837,7 +15873,11 @@ function toolArgumentsExcerpt(call: ParsedStandaloneToolCall): string {
   const excerpt = ((): string => {
     switch (call.toolId) {
       case "capability":
-        return call.arguments.action;
+        return "capability_id" in call.arguments
+          ? `${call.arguments.action}: ${call.arguments.capability_id}`
+          : "query" in call.arguments && call.arguments.query !== undefined
+            ? `${call.arguments.action}: ${call.arguments.query}`
+            : call.arguments.action;
       case "read":
       case "patch":
       case "write":
@@ -16995,27 +17035,36 @@ async function agentLoop(turnId: string): Promise<void> {
         .map((value) => value.trim())
         .filter((value) => value.length > 0),
     )];
+    const capabilitySession = new CapabilityDiscoverySession(
+      STANDALONE_TOOL_CAPABILITY_CARDS,
+      requestedToolCapabilities,
+    );
     const harnessProfileMode = resolveTerminusProfileMode(process.env.TERMINUS_HARNESS_PROFILE);
     const activationMode = workspaceActivationMode(harnessProfileMode);
-    const workspaceToolSchemas = selectStandaloneToolSchemas({
+    const selectWorkspaceToolSchemas = () => selectStandaloneToolSchemas({
       toolsEnabled: toolsEnabledForTurn,
-      activatedCapabilities: requestedToolCapabilities,
+      activatedCapabilities: capabilitySession.activeCapabilityIds(),
       adaptiveToolsEnabled: harnessProfileMode === "adaptive",
     });
-    const capabilityToolSchemas = selectInitialStandaloneToolSchemas(toolsEnabledForTurn);
+    const selectActiveToolSchemas = () => workspaceActivated
+      ? selectWorkspaceToolSchemas()
+      : selectDiscoveredStandaloneToolSchemas({
+          toolsEnabled: toolsEnabledForTurn,
+          activatedCapabilities: capabilitySession.activeCapabilityIds(),
+        });
+    const profileToolSchemas = selectStandaloneToolSchemas({
+      toolsEnabled: toolsEnabledForTurn,
+      activatedCapabilities: STANDALONE_TOOL_CAPABILITY_CARDS.map((card) => card.id),
+      adaptiveToolsEnabled: harnessProfileMode === "adaptive",
+    });
+    const workspaceToolSchemas = selectWorkspaceToolSchemas();
     const initialToolSchemas = activationMode === "eager"
       ? workspaceToolSchemas
-      : capabilityToolSchemas;
-    const profileToolSchemas = [...capabilityToolSchemas, ...workspaceToolSchemas];
+      : selectInitialStandaloneToolSchemas(toolsEnabledForTurn);
     let workspaceActivated = activationMode === "eager" && toolsEnabledForTurn;
     let activeToolSchemas = initialToolSchemas;
     let declaredToolIds = new Set<string>(activeToolSchemas.map((schema) => schema.id));
-    const activatedToolCapabilities = requestedToolCapabilities.filter((capability) => {
-      const toolId = capability.startsWith("standalone.")
-        ? capability.slice("standalone.".length)
-        : capability;
-      return workspaceToolSchemas.some((schema) => schema.id === toolId);
-    });
+    const activatedToolCapabilities = capabilitySession.activeCapabilityIds();
     const selectedProfile = createTerminusExecutionProfile({
       mode: harnessProfileMode,
       providerId: selectedProvider.providerId,
@@ -17040,16 +17089,16 @@ async function agentLoop(turnId: string): Promise<void> {
       },
     });
     turnProfile = selectedProfile;
-    const contextBudgetSelection = makeContextBudget(
+    let contextBudgetSelection = makeContextBudget(
       selectedProvider,
       selectedModel,
       taskSnapshot.contract.budget,
-      profileToolSchemas,
+      activeToolSchemas,
       // The depth the user chose sizes the reasoning reserve; it is the same
       // value the renderer puts on the wire.
       turnReasoningEffort,
     );
-    const contextBudget = contextBudgetSelection.budget;
+    let contextBudget = contextBudgetSelection.budget;
     turnContextBudgetJson = canonicalJson(jsonSafe(contextBudgetSelection.breakdown));
     await mutateAgentState(() => emit({
       eventType: "turn.profile_selected",
@@ -17072,8 +17121,7 @@ async function agentLoop(turnId: string): Promise<void> {
         },
         context_budget_policy: contextBudgetSelection.breakdown.policyVersion,
         active_tool_capabilities: activatedToolCapabilities,
-        // No optional capability cards are discoverable in the minimal arm.
-        discoverable_tool_cards: [],
+        discoverable_tool_cards: STANDALONE_TOOL_CAPABILITY_CARDS,
       },
     }));
     const threadSnapshot: ThreadSnapshot = {
@@ -17124,6 +17172,7 @@ async function agentLoop(turnId: string): Promise<void> {
         contractVersion: toolInput.contractVersion,
         contractHash: toolInput.contractHash,
         artifactClient: toolInput.artifactClient,
+        capabilitySession,
         rejection: toolInput.rejection,
         observedSources,
         workspaceRevision: operationWorkspaceRevision,
@@ -17272,8 +17321,20 @@ async function agentLoop(turnId: string): Promise<void> {
     // full recompile; without this the cache diagnostics are blind.
     let previousCacheEpoch: CacheEpochDebugSnapshot | null = null;
     const compileProviderContext = async () => {
-      activeToolSchemas = workspaceActivated ? workspaceToolSchemas : initialToolSchemas;
+      activeToolSchemas = selectActiveToolSchemas();
       declaredToolIds = new Set(activeToolSchemas.map((schema) => schema.id));
+      // Optional schemas consume context only after activation. The profile
+      // records the bounded union, while each attempt budgets the exact wire
+      // declaration. This is the token-saving point of progressive disclosure.
+      contextBudgetSelection = makeContextBudget(
+        selectedProvider,
+        selectedModel,
+        taskSnapshot.contract.budget,
+        activeToolSchemas,
+        turnReasoningEffort,
+      );
+      contextBudget = contextBudgetSelection.budget;
+      turnContextBudgetJson = canonicalJson(jsonSafe(contextBudgetSelection.breakdown));
       let recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId);
       // Verification recovery must not make any provider call while it
       // rebuilds the durable response/plan boundary. A compaction summary is
@@ -19147,18 +19208,39 @@ async function agentLoop(turnId: string): Promise<void> {
           parsedCall?.toolId === "capability"
           && (settlement?.status === "success" || settlement?.status === "partial")
         ) {
-          workspaceActivated = true;
-          await mutateAgentState(() => emit({
-            eventType: "capability.activated",
-            aggregateType: "turn",
-            aggregateId: turnId,
-            correlationId: task.id,
-            payload: {
-              capability_id: "workspace",
-              provider_call_id: parsedCall.providerCallId,
-              next_tool_ids: workspaceToolSchemas.map((schema) => schema.id),
-            },
-          }));
+          const action = parsedCall.arguments.action;
+          if (action === "activate_workspace") {
+            workspaceActivated = true;
+            await mutateAgentState(() => emit({
+              eventType: "capability.activated",
+              aggregateType: "turn",
+              aggregateId: turnId,
+              correlationId: task.id,
+              payload: {
+                capability_id: "workspace",
+                provider_call_id: parsedCall.providerCallId,
+                next_tool_ids: selectWorkspaceToolSchemas().map((schema) => schema.id),
+              },
+            }));
+          } else if (action === "activate" || action === "deactivate") {
+            const capabilityId = "capability_id" in parsedCall.arguments
+              ? parsedCall.arguments.capability_id
+              : null;
+            if (capabilityId === null) throw new Error(`${action} capability call lost its capability_id`);
+            await mutateAgentState(() => emit({
+              eventType: action === "activate" ? "capability.activated" : "capability.deactivated",
+              aggregateType: "turn",
+              aggregateId: turnId,
+              correlationId: task.id,
+              payload: {
+                capability_id: capabilityId,
+                provider_call_id: parsedCall.providerCallId,
+                active_capabilities: capabilitySession.activeCapabilityIds(),
+                active_tool_set_hash: capabilitySession.activeToolSetHash(),
+                next_tool_ids: selectActiveToolSchemas().map((schema) => schema.id),
+              },
+            }));
+          }
         }
         if (
           parsedCall !== null
