@@ -1,6 +1,6 @@
 # Terminus overhaul master plan
 
-Source: `user-supplied overhaul brief`.
+Source: user-supplied overhaul brief.
 
 Baseline: `5f68925062cc3579e94c8e5f9a56b8b5ec46bfb9`, branch `main`, checkout `/Volumes/Workspace/Terminus`.
 

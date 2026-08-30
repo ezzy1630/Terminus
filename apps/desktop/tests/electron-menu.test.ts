@@ -108,7 +108,7 @@ describe("application menu", () => {
       .find((entry) => entry.label === "Open Recent");
     const entries = Array.isArray(item?.submenu) ? item.submenu : [];
     expect(item?.enabled).toBeUndefined();
-    expect(entries.map((entry) => entry.label)).toEqual(["Neural/Terminus", "tmp/scratch", undefined, "Clear Menu"]);
+    expect(entries.map((entry) => entry.label)).toEqual(["Workspace/Terminus", "tmp/scratch", undefined, "Clear Menu"]);
     entries[0]?.click?.(undefined as never, undefined as never, undefined as never);
     expect(actions.calls.openRecentProject).toEqual(["/Volumes/Workspace/Terminus"]);
   });
@@ -175,7 +175,7 @@ describe("application menu", () => {
 
 describe("recent project labels", () => {
   test.each([
-    ["/Volumes/Workspace/Terminus", "Neural/Terminus"],
+    ["/Volumes/Workspace/Terminus", "Workspace/Terminus"],
     ["/Terminus", "Terminus"],
     ["/a/b/c/d", "c/d"],
   ])("%s renders as %s", (path, expected) => {
