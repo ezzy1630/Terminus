@@ -175,7 +175,7 @@ describe("initial-response prompt", () => {
     const documents = initialResponseAuthorityDocuments();
     expect(documents).toHaveLength(1);
     expect(documents[0]?.text).toContain("Answer directly");
-    expect(documents[0]?.text).toContain("call the capability tool once");
+    expect(documents[0]?.text).toContain('call the capability tool once with {"action":"activate_workspace"}');
     expect(documents[0]?.text).not.toMatch(/test|ping|greeting/i);
   });
 });

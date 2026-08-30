@@ -6,6 +6,8 @@ import {
   STANDALONE_TOOL_SCHEMAS,
   STANDALONE_ALWAYS_ON_TOOL_IDS,
   STANDALONE_ADAPTIVE_TOOL_IDS,
+  STANDALONE_WORKSPACE_ACTIVATION_TOOL_SCHEMA,
+  capabilityActionRequiresActivatedWorkspace,
   selectInitialStandaloneToolSchemas,
   selectStandaloneToolSchemas,
   EXEC_OUTPUT_MAX_BYTES,
@@ -58,6 +60,15 @@ describe("standalone provider tools", () => {
   test("exposes the bounded kernel tool surface", () => {
     expect(STANDALONE_TOOL_SCHEMAS.map((tool) => tool.id)).toEqual(["capability", "read", "patch", "write", "exec", "exec_poll", "web_fetch", "grep", "glob", "inspect", "recall"]);
     expect(selectInitialStandaloneToolSchemas(true).map((tool) => tool.id)).toEqual(["capability"]);
+    expect(selectInitialStandaloneToolSchemas(true)).toEqual([STANDALONE_WORKSPACE_ACTIVATION_TOOL_SCHEMA]);
+    expect(STANDALONE_WORKSPACE_ACTIVATION_TOOL_SCHEMA.inputSchema).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["action"],
+      properties: {
+        action: { enum: ["activate_workspace"] },
+      },
+    });
     expect(selectInitialStandaloneToolSchemas(false)).toEqual([]);
     // Every always-on tool has a schema, and every schema id is dispatchable.
     for (const toolId of STANDALONE_ALWAYS_ON_TOOL_IDS) {
@@ -174,6 +185,22 @@ describe("standalone provider tools", () => {
       arguments: { action: "compaction_read", summary_hash: "sha256:nope", episode_id: "episode-1" },
     })).toThrow(/invalid/);
     expect(() => parseStandaloneToolCall({ toolCallId: "x", toolName: "exec", arguments: { program: "sh; exit" } })).toThrow(/invalid/);
+  });
+
+  test("allows only workspace activation during the initial response phase", () => {
+    const activateWorkspace = parseStandaloneToolCall({
+      toolCallId: "activate-workspace",
+      toolName: "capability",
+      arguments: { action: "activate_workspace" },
+    });
+    const searchCapabilities = parseStandaloneToolCall({
+      toolCallId: "search-capabilities",
+      toolName: "capability",
+      arguments: { action: "search", query: "file write command" },
+    });
+
+    expect(capabilityActionRequiresActivatedWorkspace(activateWorkspace)).toBe(false);
+    expect(capabilityActionRequiresActivatedWorkspace(searchCapabilities)).toBe(true);
   });
 
   // Observed from big-pickle: every exec call arrived as a bare argv array,

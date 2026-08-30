@@ -171,7 +171,6 @@ import {
   MAX_TOOL_MODEL_RESULT_BYTES,
   STANDALONE_TOOL_CAPABILITY_CARDS,
   STANDALONE_TOOL_SCHEMAS,
-  selectDiscoveredStandaloneToolSchemas,
   selectInitialStandaloneToolSchemas,
   selectStandaloneToolSchemas,
   ObservedSourceTracker,
@@ -187,6 +186,7 @@ import {
   providerToolCallTranscript,
   providerToolResultTranscript,
   resolveMaxToolCycles,
+  capabilityActionRequiresActivatedWorkspace,
   mayChangeWorkspace,
   resolveShellModeEnabled,
   replayIsBlockedBy,
@@ -17555,10 +17555,7 @@ async function agentLoop(turnId: string): Promise<void> {
     });
     const selectActiveToolSchemas = () => workspaceActivated
       ? selectWorkspaceToolSchemas()
-      : selectDiscoveredStandaloneToolSchemas({
-          toolsEnabled: toolsEnabledForTurn,
-          activatedCapabilities: capabilitySession.activeCapabilityIds(),
-        });
+      : selectInitialStandaloneToolSchemas(toolsEnabledForTurn);
     const profileToolSchemas = selectStandaloneToolSchemas({
       toolsEnabled: toolsEnabledForTurn,
       activatedCapabilities: STANDALONE_TOOL_CAPABILITY_CARDS.map((card) => card.id),
@@ -19751,6 +19748,18 @@ async function agentLoop(turnId: string): Promise<void> {
         } catch (error: unknown) {
           if (!(error instanceof InvalidToolCallError)) throw error;
           rejection = error;
+        }
+        if (
+          parsedCall !== null
+          && !workspaceActivated
+          && capabilityActionRequiresActivatedWorkspace(parsedCall)
+        ) {
+          rejection = new InvalidToolCallError({
+            toolName: call.toolName,
+            providerCallId: call.toolCallId,
+            modelMessage: "Workspace capability discovery is unavailable before activation. Call capability with {\"action\":\"activate_workspace\"}.",
+          });
+          parsedCall = null;
         }
         if (parsedCall !== null && mayChangeWorkspace(parsedCall)) {
           // This is intentionally recorded before settlement. A denied call

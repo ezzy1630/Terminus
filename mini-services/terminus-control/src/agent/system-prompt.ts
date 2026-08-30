@@ -202,7 +202,7 @@ export function initialResponseAuthorityDocuments(): AuthorityDocument[] {
     sourceUri: "terminus://authority/initial-response",
     text: `# Respond or activate
 
-Answer directly when the request does not depend on workspace facts or effects. If it requires inspecting, changing, or executing within the workspace, call the capability tool once. Never guess workspace state.`,
+Answer directly when the request does not depend on workspace facts or effects. If it requires inspecting, changing, or executing within the workspace, call the capability tool once with {"action":"activate_workspace"}. Never guess workspace state.`,
   }];
 }
 

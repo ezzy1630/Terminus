@@ -1150,8 +1150,31 @@ export const STANDALONE_ADAPTIVE_TOOL_IDS = ["inspect", "recall"] as const;
 /** The only tool exposed before the model decides workspace access is needed. */
 export const STANDALONE_INITIAL_TOOL_IDS = ["capability"] as const;
 
+/**
+ * The initial response has one effectful decision: activate the workspace or
+ * answer directly. Hiding discovery actions here makes that phase impossible
+ * to confuse with the post-activation capability catalog.
+ */
+export const STANDALONE_WORKSPACE_ACTIVATION_TOOL_SCHEMA: ProviderToolSchema = {
+  ...STANDALONE_TOOL_SCHEMAS[0],
+  summary: "Activate the task-scoped workspace context and built-in coding tools when the request depends on workspace facts, changes, or command execution.",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["action"],
+    properties: {
+      action: { enum: ["activate_workspace"] },
+    },
+  },
+};
+
 export function selectInitialStandaloneToolSchemas(toolsEnabled: boolean): readonly ProviderToolSchema[] {
-  return selectDiscoveredStandaloneToolSchemas({ toolsEnabled });
+  return toolsEnabled ? [STANDALONE_WORKSPACE_ACTIVATION_TOOL_SCHEMA] : [];
+}
+
+/** Full discovery commands are valid only after the workspace phase begins. */
+export function capabilityActionRequiresActivatedWorkspace(call: ParsedStandaloneToolCall): boolean {
+  return call.toolId === "capability" && call.arguments.action !== "activate_workspace";
 }
 
 /** Keep the control surface plus only the optional schemas activated so far. */
