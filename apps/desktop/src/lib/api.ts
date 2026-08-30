@@ -61,6 +61,11 @@ import type {
   ProviderAccountDiscoveryResponse,
   ProviderAccountMetadata,
   ProviderAccountsResponse,
+  CodexLaneAccountResponse,
+  CodexLaneIdentity,
+  CodexLaneModel,
+  CodexLaneModelsResponse,
+  CodexLaneStatus,
   ProviderConfiguration,
   ProviderConfigurationResponse,
   ProviderConfigurationUpdate,
@@ -533,6 +538,9 @@ function decodeProviderAccount(value: unknown): ProviderAccount {
     last_verified_at: responseNullableTimestamp(account.last_verified_at ?? null, "provider account.last_verified_at"),
     expires_at: responseNullableTimestamp(account.expires_at ?? null, "provider account.expires_at"),
     revision: responseNonNegativeInteger(account.revision, "provider account.revision"),
+    ...(account.credential_fingerprint === undefined || account.credential_fingerprint === null
+      ? {}
+      : { credential_fingerprint: responseString(account.credential_fingerprint, "provider account.credential_fingerprint", true) }),
   };
 }
 
@@ -1116,6 +1124,127 @@ export class TerminusApiClient {
       body: { expected_revision: expectedRevision },
       ...options,
     });
+  }
+
+  /** Explicitly copy a discovered OpenCode API key into the kernel keyring. */
+  async connectProviderAccount(
+    accountId: string,
+    expectedRevision: number,
+    expectedFingerprint: string,
+    options: MutationRequestOptions,
+  ): Promise<ProviderAccountsResponse> {
+    return decodeProviderAccountsResponse(await this.request<unknown>("POST", `/v1/provider-accounts/${encodeURIComponent(accountId)}/connect`, {
+      body: { expected_revision: expectedRevision, expected_fingerprint: expectedFingerprint, consent: true },
+      ...options,
+    }), "provider account connection");
+  }
+
+  // ───────────────────── External Codex subscription lane ────────────────
+
+  /** Codex owns this loop; its status is never folded into native providers. */
+  async getCodexLaneStatus(identity: CodexLaneIdentity, signal?: AbortSignal | null): Promise<CodexLaneStatus> {
+    const raw = responseObject(await this.request<unknown>("GET", "/v1/external/codex/status", {
+      query: { session_id: identity.session_id, workspace_id: identity.workspace_id },
+      signal,
+    }), "Codex lane status");
+    return {
+      available: responseBoolean(raw.available, "Codex lane status.available"),
+      state: responseString(raw.state, "Codex lane status.state") as CodexLaneStatus["state"],
+      external_harness: responseString(raw.external_harness, "Codex lane status.external_harness") as "codex",
+      protocol: responseString(raw.protocol, "Codex lane status.protocol"),
+      executable: responseString(raw.executable, "Codex lane status.executable") as "codex",
+      job_id: responseNullableString(raw.job_id, "Codex lane status.job_id"),
+      reason: responseNullableString(raw.reason, "Codex lane status.reason"),
+      persisted_thread_id: responseNullableString(raw.persisted_thread_id, "Codex lane status.persisted_thread_id"),
+      persisted_state: responseNullableString(raw.persisted_state, "Codex lane status.persisted_state"),
+      persisted_updated_at: responseNullableString(raw.persisted_updated_at, "Codex lane status.persisted_updated_at"),
+    };
+  }
+
+  async getCodexLaneAccount(identity: CodexLaneIdentity, signal?: AbortSignal | null): Promise<CodexLaneAccountResponse> {
+    const raw = responseObject(await this.request<unknown>("GET", "/v1/external/codex/account", { query: { session_id: identity.session_id, workspace_id: identity.workspace_id }, signal }), "Codex lane account");
+    const account = responseObject(raw.account, "Codex lane account.account");
+    return {
+      external_harness: responseString(raw.external_harness, "Codex lane account.external_harness") as "codex",
+      account: {
+        type: responseNullableString(account.type, "Codex lane account.type"),
+        email: responseNullableString(account.email, "Codex lane account.email"),
+        plan_type: responseNullableString(account.plan_type, "Codex lane account.plan_type"),
+        requires_openai_auth: responseBoolean(account.requires_openai_auth, "Codex lane account.requires_openai_auth"),
+      },
+    };
+  }
+
+  async getCodexLaneModels(identity: CodexLaneIdentity, signal?: AbortSignal | null): Promise<CodexLaneModelsResponse> {
+    const raw = responseObject(await this.request<unknown>("GET", "/v1/external/codex/models", { query: { session_id: identity.session_id, workspace_id: identity.workspace_id }, signal }), "Codex lane models");
+    const models = raw.models;
+    if (!Array.isArray(models)) throw new TerminusApiError(502, "Codex lane models.models was not an array", null);
+    return {
+      external_harness: responseString(raw.external_harness, "Codex lane models.external_harness") as "codex",
+      models: models.map((entry, index): CodexLaneModel => {
+        const model = responseObject(entry, `Codex lane models.models[${index}]`);
+        return {
+          id: responseString(model.id, `Codex lane models.models[${index}].id`),
+          model: responseNullableString(model.model, `Codex lane models.models[${index}].model`),
+          display_name: responseNullableString(model.display_name, `Codex lane models.models[${index}].display_name`),
+          reasoning_efforts: responseStringArray(model.reasoning_efforts, `Codex lane models.models[${index}].reasoning_efforts`),
+          default_reasoning_effort: responseNullableString(model.default_reasoning_effort, `Codex lane models.models[${index}].default_reasoning_effort`),
+          hidden: responseBoolean(model.hidden, `Codex lane models.models[${index}].hidden`),
+        };
+      }),
+    };
+  }
+
+  async startCodexLaneThread(
+    input: CodexLaneIdentity & { model?: string; cwd?: string },
+    options: MutationRequestOptions,
+  ): Promise<{ thread_id: string; external_harness: "codex" }> {
+    const raw = responseObject(await this.request<unknown>("POST", "/v1/external/codex/thread/start", { body: input, ...options }), "Codex lane thread start");
+    return {
+      thread_id: responseString(raw.thread_id, "Codex lane thread start.thread_id"),
+      external_harness: responseString(raw.external_harness, "Codex lane thread start.external_harness") as "codex",
+    };
+  }
+
+  async resumeCodexLaneThread(
+    input: CodexLaneIdentity & { thread_id: string },
+    options: MutationRequestOptions,
+  ): Promise<{ thread_id: string; external_harness: "codex" }> {
+    const raw = responseObject(await this.request<unknown>("POST", "/v1/external/codex/thread/resume", { body: input, ...options }), "Codex lane thread resume");
+    return {
+      thread_id: responseString(raw.thread_id, "Codex lane thread resume.thread_id"),
+      external_harness: responseString(raw.external_harness, "Codex lane thread resume.external_harness") as "codex",
+    };
+  }
+
+  async startCodexLaneTurn(
+    input: CodexLaneIdentity & { thread_id: string; text: string; model?: string; effort?: string },
+    options: MutationRequestOptions,
+  ): Promise<{ thread_id: string; turn_id: string; external_harness: "codex" }> {
+    const raw = responseObject(await this.request<unknown>("POST", "/v1/external/codex/turn/start", { body: input, ...options }), "Codex lane turn start");
+    return {
+      thread_id: responseString(raw.thread_id, "Codex lane turn start.thread_id"),
+      turn_id: responseString(raw.turn_id, "Codex lane turn start.turn_id"),
+      external_harness: responseString(raw.external_harness, "Codex lane turn start.external_harness") as "codex",
+    };
+  }
+
+  async interruptCodexLaneTurn(
+    input: CodexLaneIdentity & { thread_id: string; turn_id: string },
+    options: MutationRequestOptions,
+  ): Promise<{ interrupted: true; external_harness: "codex" }> {
+    const raw = responseObject(await this.request<unknown>("POST", "/v1/external/codex/turn/interrupt", { body: input, ...options }), "Codex lane turn interrupt");
+    if (raw.interrupted !== true) throw new TerminusApiError(502, "Codex lane turn interrupt did not confirm interruption", null);
+    return { interrupted: true, external_harness: responseString(raw.external_harness, "Codex lane turn interrupt.external_harness") as "codex" };
+  }
+
+  async stopCodexLane(
+    input: CodexLaneIdentity & { reason?: string },
+    options: MutationRequestOptions,
+  ): Promise<{ stopped: true; external_harness: "codex" }> {
+    const raw = responseObject(await this.request<unknown>("POST", "/v1/external/codex/stop", { body: input, ...options }), "Codex lane stop");
+    if (raw.stopped !== true) throw new TerminusApiError(502, "Codex lane stop did not confirm stopping", null);
+    return { stopped: true, external_harness: responseString(raw.external_harness, "Codex lane stop.external_harness") as "codex" };
   }
 
   async getProviderConfiguration(signal?: AbortSignal | null): Promise<ProviderConfigurationResponse> {

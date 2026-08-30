@@ -2,11 +2,11 @@
  * Terminus Desktop — Connected provider accounts.
  *
  * Terminus does not ask an operator to paste a key. The credentials it can use
- * are the ones their own tools already hold — the OpenCode auth store, the
- * Codex/ChatGPT login — and the control plane imports each usable one into the
- * OS keyring at startup. This hook reads the resulting list and offers the two
- * actions that exist for a discovered credential: make it the default, or
- * disconnect it.
+ * are the ones their own tools already hold — the OpenCode auth store. The
+ * separate Codex subscription lane is shown below this account list and is
+ * never imported into native routing. This hook reads the resulting list and
+ * offers explicit Connect for a disconnected OpenCode API account, plus make
+ * default and disconnect for an already connected credential.
  *
  * Three properties this file exists to hold:
  *
@@ -23,6 +23,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, createIdempotencyKey } from "../lib/api";
 import type {
+  CodexLaneAccountResponse,
+  CodexLaneIdentity,
+  CodexLaneModelsResponse,
+  CodexLaneStatus,
   ProviderAccount,
   ProviderAccountDiscovery,
   ProviderAccountsResponse,
@@ -35,7 +39,7 @@ const EMPTY_DISCOVERY: ProviderAccountDiscovery = {
 };
 
 const CODEX_SUBSCRIPTION_UNAVAILABLE =
-  "A ChatGPT/Codex subscription login was detected, but Terminus-native routing is unavailable. Use an API provider or a future official Codex adapter.";
+  "A ChatGPT/Codex subscription login was detected. Use the separate external Codex lane; it is not Terminus-native routing.";
 
 /** Set by the dev mock so design review has rows to look at. */
 declare global {
@@ -63,8 +67,20 @@ export interface ProviderAccountsState {
    */
   lastSweep: { imported: readonly string[] } | null;
   detect: () => Promise<void>;
+  connect: (account: ProviderAccount) => Promise<void>;
   setDefault: (account: ProviderAccount) => Promise<void>;
   disconnect: (account: ProviderAccount) => Promise<void>;
+}
+
+export interface CodexLaneState {
+  status: "loading" | "ready" | "unavailable" | "unconfigured";
+  detail: string | null;
+  lane: CodexLaneStatus | null;
+  account: CodexLaneAccountResponse["account"] | null;
+  models: CodexLaneModelsResponse["models"];
+  refreshing: boolean;
+  refresh: () => Promise<void>;
+  stop: () => Promise<void>;
 }
 
 function messageFor(error: unknown, fallback: string): string {
@@ -72,9 +88,9 @@ function messageFor(error: unknown, fallback: string): string {
 }
 
 /**
- * A Codex CLI login is an observed local credential, not a supported
- * Terminus-native model route. Keep it visible so the operator understands
- * what was found, but do not present the current raw-token bridge as usable.
+ * A Codex CLI login is an observed local credential, not a native Terminus
+ * model route. Keep it visible so the operator understands what was found;
+ * subscription use is handled by the separate external lane.
  */
 function normalizeAccounts(accounts: readonly ProviderAccount[]): readonly ProviderAccount[] {
   return accounts.map((account) => {
@@ -203,6 +219,39 @@ export function useProviderAccounts(): ProviderAccountsState {
     }
   }, [reload, state.accounts]);
 
+  const connect = useCallback(async (account: ProviderAccount): Promise<void> => {
+    if (!account.source.startsWith("opencode:") || account.status !== "disconnected") {
+      setState((current) => ({ ...current, error: "Only disconnected OpenCode API accounts can be connected here." }));
+      return;
+    }
+    if (!account.credential_fingerprint) {
+      setState((current) => ({ ...current, error: "This account has no credential fingerprint; run discovery again before connecting." }));
+      return;
+    }
+    setBusyId(account.id);
+    setState((current) => ({ ...current, error: null }));
+    try {
+      const response = await api.connectProviderAccount(
+        account.id,
+        account.revision,
+        account.credential_fingerprint,
+        { idempotencyKey: createIdempotencyKey(`provider-account-connect:${account.id}`) },
+      );
+      if (!mounted.current) return;
+      setState({
+        accounts: normalizeAccounts(response.accounts),
+        discovery: response.discovery,
+        status: response.supported ? "ready" : "unavailable",
+        error: null,
+        supported: response.supported,
+      });
+    } catch (error) {
+      if (mounted.current) setState((current) => ({ ...current, error: messageFor(error, "That OpenCode account could not be connected.") }));
+    } finally {
+      if (mounted.current) setBusyId(null);
+    }
+  }, []);
+
   const disconnect = useCallback(async (account: ProviderAccount): Promise<void> => {
     setBusyId(account.id);
     const previous = state.accounts;
@@ -234,9 +283,86 @@ export function useProviderAccounts(): ProviderAccountsState {
     detecting,
     lastSweep,
     detect,
+    connect,
     setDefault,
     disconnect,
-  }), [busyId, detect, detecting, disconnect, lastSweep, setDefault, state]);
+  }), [busyId, connect, detect, detecting, disconnect, lastSweep, setDefault, state]);
+}
+
+/**
+ * Read-only UI state for the separate subscription lane. It takes a concrete
+ * session identity because the control plane keys external jobs by both
+ * workspace and session; there is no process-wide Codex singleton to guess at.
+ */
+export function useCodexLane(identity: CodexLaneIdentity | null): CodexLaneState {
+  const [state, setState] = useState<Omit<CodexLaneState, "refresh" | "stop">>({
+    status: identity === null ? "unconfigured" : "loading",
+    detail: identity === null ? "Open a project to connect a Codex subscription." : null,
+    lane: null,
+    account: null,
+    models: [],
+    refreshing: false,
+  });
+  const mounted = useRef(true);
+
+  useEffect(() => () => { mounted.current = false; }, []);
+
+  const refresh = useCallback(async (): Promise<void> => {
+    if (identity === null) {
+      setState((current) => ({ ...current, status: "unconfigured", detail: "Open a project to connect a Codex subscription." }));
+      return;
+    }
+    setState((current) => ({ ...current, refreshing: true, detail: null }));
+    try {
+      const lane = await api.getCodexLaneStatus(identity);
+      if (!lane.available) {
+        if (mounted.current) setState((current) => ({ ...current, status: "unavailable", lane, detail: lane.reason ?? "Codex CLI is unavailable." }));
+        return;
+      }
+      // A fresh control-plane process can report a ready App Server while the
+      // durable Codex thread still lives in session metadata. Reattach it
+      // before presenting the lane as connected; otherwise "connected" would
+      // mean only that a new empty process started.
+      if (lane.state === "ready" && lane.persisted_thread_id !== null) {
+        await api.resumeCodexLaneThread({
+          ...identity,
+          thread_id: lane.persisted_thread_id,
+        }, { idempotencyKey: createIdempotencyKey("codex-lane-resume") });
+      }
+      const [account, models] = await Promise.all([
+        api.getCodexLaneAccount(identity),
+        api.getCodexLaneModels(identity),
+      ]);
+      if (!mounted.current) return;
+      setState({ status: "ready", detail: null, lane, account: account.account, models: models.models, refreshing: false });
+    } catch (error) {
+      if (!mounted.current) return;
+      setState((current) => ({
+        ...current,
+        status: "unavailable",
+        detail: messageFor(error, "Codex subscription status could not be read."),
+        refreshing: false,
+      }));
+    }
+  }, [identity]);
+
+  useEffect(() => {
+    if (identity === null) return;
+    void refresh();
+  }, [identity, refresh]);
+
+  const stop = useCallback(async (): Promise<void> => {
+    if (identity === null) return;
+    setState((current) => ({ ...current, refreshing: true, detail: null }));
+    try {
+      await api.stopCodexLane(identity, { idempotencyKey: createIdempotencyKey("codex-lane-stop") });
+      if (mounted.current) setState((current) => ({ ...current, status: "unavailable", detail: "Codex lane stopped.", refreshing: false, lane: current.lane ? { ...current.lane, available: false, state: "stopped", job_id: null } : null }));
+    } catch (error) {
+      if (mounted.current) setState((current) => ({ ...current, detail: messageFor(error, "Codex lane could not be stopped."), refreshing: false }));
+    }
+  }, [identity]);
+
+  return useMemo(() => ({ ...state, refresh, stop }), [refresh, state, stop]);
 }
 
 // ────────────────────────── Presentation helpers ────────────────────────────
@@ -248,7 +374,7 @@ export function useProviderAccounts(): ProviderAccountsState {
  * showed it raw would be asking the reader to know the naming scheme.
  */
 export function accountSourceLabel(source: string): string {
-  if (source === "codex-chatgpt") return "Codex CLI login (subscription routing unavailable)";
+  if (source === "codex-chatgpt") return "Codex CLI login (external lane)";
   if (source === "zen") return "OpenCode Zen";
   if (source.startsWith("opencode:")) return "OpenCode auth store";
   return source;

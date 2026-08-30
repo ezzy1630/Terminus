@@ -27,8 +27,10 @@ function fakeKernel() {
   let subscriber: Subscriber<JobEvent> | null = null;
   let sequence = 0;
   const methods: string[] = [];
+  let startInput: { command?: { program?: string; args?: readonly string[]; timeout?: { seconds?: number }; allowUnboundedTimeout?: boolean } } | null = null;
   const jobs = {
-    Start: async (input: { command?: { program?: string; args?: readonly string[] } }) => {
+    Start: async (input: { command?: { program?: string; args?: readonly string[]; timeout?: { seconds?: number }; allowUnboundedTimeout?: boolean } }) => {
+      startInput = input;
       expect(input.command?.program).toBe("codex");
       expect(input.command?.args).toEqual(["app-server", "--stdio"]);
       return { jobId: "job-1", processId: "process-1", startedAt: undefined };
@@ -61,6 +63,7 @@ function fakeKernel() {
   return {
     clients: { jobs },
     methods,
+    startInput: () => startInput,
     emit: (message: unknown) => subscriber?.next({ sequence: ++sequence, stdout: { cursor: sequence, bytes: new TextEncoder().encode(JSON.stringify(message) + "\n"), redacted: false }, occurredAt: undefined }),
     reconcile: () => subscriber?.next({ sequence: ++sequence, reconciled: { state: "unknown-settlement", explanation: "kernel restart" }, occurredAt: undefined }),
   };
@@ -85,6 +88,8 @@ describe("Codex App Server external lane", () => {
     await expect(session.startTurn({ thread_id: "thread-1", text: "inspect the repository" })).resolves.toEqual({ thread_id: "thread-1", turn_id: "turn-1", external_harness: CODEX_EXTERNAL_HARNESS });
     await expect(session.interrupt("thread-1", "turn-1")).resolves.toEqual({ interrupted: true, external_harness: CODEX_EXTERNAL_HARNESS });
     expect(fake.methods).toEqual(["initialize", "initialized", "account/read", "model/list", "thread/start", "thread/resume", "turn/start", "turn/interrupt"]);
+    expect(fake.startInput()?.command?.allowUnboundedTimeout).toBe(false);
+    expect(fake.startInput()?.command?.timeout?.seconds).toBe(30 * 60);
     expect(session.status().external_harness).toBe("codex");
     expect(events).toEqual([]);
     await session.stop();

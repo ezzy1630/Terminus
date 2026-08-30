@@ -177,6 +177,56 @@ const live = await probeLive();
 
 const describeLive = live ? describe : describe.skip;
 
+describe("TerminusApiClient — external Codex subscription lane", () => {
+  test("keeps Codex routes and models outside native provider APIs", async () => {
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const body = init?.body === undefined ? null : JSON.parse(String(init.body)) as unknown;
+      calls.push({ method: init?.method ?? "GET", path: url.pathname, body });
+      const response = url.pathname.endsWith("/status")
+        ? {
+            available: true, state: "ready", external_harness: "codex", protocol: "codex-app-server.v2",
+            executable: "codex", job_id: "job-1", reason: null, persisted_thread_id: null,
+            persisted_state: null, persisted_updated_at: null,
+          }
+        : url.pathname.endsWith("/account")
+          ? { external_harness: "codex", account: { type: "chatgpt", email: "user@example.com", plan_type: "plus", requires_openai_auth: false } }
+          : url.pathname.endsWith("/models")
+            ? { external_harness: "codex", models: [{ id: "gpt-5.6-luna", model: "gpt-5.6-luna", display_name: "GPT-5.6 Luna", reasoning_efforts: ["medium"], default_reasoning_effort: "medium", hidden: false }] }
+            : url.pathname.endsWith("/thread/start")
+              ? { external_harness: "codex", thread_id: "thread-external" }
+              : url.pathname.endsWith("/thread/resume")
+                ? { external_harness: "codex", thread_id: "thread-external" }
+                : url.pathname.endsWith("/turn/start")
+                  ? { external_harness: "codex", thread_id: "thread-external", turn_id: "turn-external" }
+                  : url.pathname.endsWith("/turn/interrupt")
+                    ? { external_harness: "codex", interrupted: true }
+                    : { external_harness: "codex", stopped: true };
+      return new Response(JSON.stringify(response), { status: url.pathname.endsWith("/status") || url.pathname.endsWith("/account") || url.pathname.endsWith("/models") ? 200 : 201 });
+    }) as unknown as typeof fetch;
+
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const identity = { session_id: "00000000-0000-4000-8000-000000000001", workspace_id: "00000000-0000-4000-8000-000000000002" };
+    await expect(client.getCodexLaneStatus(identity)).resolves.toMatchObject({ external_harness: "codex", executable: "codex" });
+    await expect(client.getCodexLaneAccount(identity)).resolves.toMatchObject({ account: { plan_type: "plus" } });
+    await expect(client.getCodexLaneModels(identity)).resolves.toMatchObject({ models: [{ id: "gpt-5.6-luna" }] });
+    await expect(client.startCodexLaneThread(identity, mutationOptions("codex-thread"))).resolves.toMatchObject({ thread_id: "thread-external", external_harness: "codex" });
+    await expect(client.resumeCodexLaneThread({ ...identity, thread_id: "thread-external" }, mutationOptions("codex-resume"))).resolves.toMatchObject({ thread_id: "thread-external" });
+    await expect(client.startCodexLaneTurn({ ...identity, thread_id: "thread-external", text: "inspect" }, mutationOptions("codex-turn"))).resolves.toMatchObject({ turn_id: "turn-external" });
+    await expect(client.interruptCodexLaneTurn({ ...identity, thread_id: "thread-external", turn_id: "turn-external" }, mutationOptions("codex-interrupt"))).resolves.toMatchObject({ interrupted: true });
+    await expect(client.stopCodexLane(identity, mutationOptions("codex-stop"))).resolves.toMatchObject({ stopped: true, external_harness: "codex" });
+
+    expect(calls.map((call) => call.path)).toEqual([
+      "/v1/external/codex/status", "/v1/external/codex/account", "/v1/external/codex/models",
+      "/v1/external/codex/thread/start", "/v1/external/codex/thread/resume",
+      "/v1/external/codex/turn/start", "/v1/external/codex/turn/interrupt", "/v1/external/codex/stop",
+    ]);
+    expect(calls.slice(3).every((call) => call.method === "POST")).toBe(true);
+    expect(calls[5]?.body).toMatchObject({ session_id: identity.session_id, workspace_id: identity.workspace_id, thread_id: "thread-external" });
+  });
+});
+
 // ────────────────────────── 1. Unit tests (offline) ─────────────────────────
 
 describe("TerminusApiClient — URL + headers (offline)", () => {

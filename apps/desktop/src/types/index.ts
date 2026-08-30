@@ -172,6 +172,8 @@ export interface ProviderAccount {
   expires_at: string | null;
   /** Guards Set default and Disconnect against a concurrent change. */
   revision: number;
+  /** Non-secret credential identity used for explicit reconnect confirmation. */
+  credential_fingerprint?: string;
 }
 
 /** What the last credential-store sweep found, and what is installed to sweep. */
@@ -205,6 +207,67 @@ export interface ProviderAccountsResponse {
 export interface ProviderAccountDiscoveryResponse extends ProviderAccountsResponse {
   /** Account ids created or re-imported by this sweep. */
   imported: string[];
+}
+
+// ───────────────────── External Codex subscription lane ────────────────────
+
+/**
+ * Codex subscription state is intentionally separate from native providers.
+ * `external_harness` is a wire-level honesty marker: Codex owns this loop,
+ * and these models must never be offered by Terminus' native picker.
+ */
+export type CodexLaneState =
+  | "not_started"
+  | "starting"
+  | "ready"
+  | "running"
+  | "exited"
+  | "expired"
+  | "unknown_settlement"
+  | "stopped";
+
+export interface CodexLaneStatus {
+  available: boolean;
+  state: CodexLaneState;
+  external_harness: "codex";
+  protocol: string;
+  executable: "codex";
+  job_id: string | null;
+  reason: string | null;
+  persisted_thread_id: string | null;
+  persisted_state: string | null;
+  persisted_updated_at: string | null;
+}
+
+export interface CodexLaneAccount {
+  type: string | null;
+  email: string | null;
+  plan_type: string | null;
+  requires_openai_auth: boolean;
+}
+
+export interface CodexLaneModel {
+  id: string;
+  model: string | null;
+  display_name: string | null;
+  reasoning_efforts: string[];
+  default_reasoning_effort: string | null;
+  hidden: boolean;
+}
+
+export interface CodexLaneAccountResponse {
+  external_harness: "codex";
+  account: CodexLaneAccount;
+}
+
+export interface CodexLaneModelsResponse {
+  external_harness: "codex";
+  models: CodexLaneModel[];
+}
+
+export interface CodexLaneIdentity {
+  session_id: string;
+  workspace_id: string;
 }
 
 // ────────────────────────── /workspaces ────────────────────────────────────
