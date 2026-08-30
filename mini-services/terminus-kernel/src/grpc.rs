@@ -859,6 +859,205 @@ impl WorkspaceServiceRpc for GrpcKernel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NormalizedReadRange {
+    start_line: u32,
+    end_line: u32,
+}
+
+struct RangeProjection {
+    bytes: Vec<u8>,
+    elisions: Vec<protocol::Elision>,
+    truncated: bool,
+}
+
+fn validate_read_mode(mode: &str, ranges: &[protocol::LineRange]) -> Result<(), Status> {
+    match mode {
+        "" | "full" | "outline" | "symbols" => Ok(()),
+        "ranges" => {
+            if ranges.is_empty() {
+                return Err(Status::invalid_argument(
+                    "ranges mode requires at least one line range",
+                ));
+            }
+            for range in ranges {
+                if range.start_line == 0 {
+                    return Err(Status::invalid_argument(
+                        "line range start_line must be at least 1",
+                    ));
+                }
+                if range.end_line < range.start_line {
+                    return Err(Status::invalid_argument(
+                        "line range end_line must be at least start_line",
+                    ));
+                }
+            }
+            Ok(())
+        }
+        _ => Err(Status::invalid_argument("unsupported file read mode")),
+    }
+}
+
+fn rendered_read_mode(requested_mode: &str) -> &'static str {
+    if requested_mode == "ranges" {
+        "ranges"
+    } else {
+        // Structural renderers are not implemented in the mini-kernel yet.
+        // Preserve the accepted request surface, but report the byte-prefix
+        // fallback honestly as the actual mode used.
+        "full"
+    }
+}
+
+fn normalize_read_ranges(ranges: &[protocol::LineRange]) -> Vec<NormalizedReadRange> {
+    let mut normalized = ranges
+        .iter()
+        .map(|range| NormalizedReadRange {
+            start_line: range.start_line,
+            end_line: range.end_line,
+        })
+        .collect::<Vec<_>>();
+    normalized.sort_by_key(|range| (range.start_line, range.end_line));
+
+    let mut merged: Vec<NormalizedReadRange> = Vec::with_capacity(normalized.len());
+    for range in normalized {
+        if let Some(previous) = merged.last_mut() {
+            if range.start_line <= previous.end_line {
+                previous.end_line = previous.end_line.max(range.end_line);
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
+}
+
+fn push_elision(
+    elisions: &mut Vec<(u32, u32, &'static str)>,
+    start_line: u32,
+    end_line: u32,
+    reason: &'static str,
+) {
+    if start_line <= end_line {
+        elisions.push((start_line, end_line, reason));
+    }
+}
+
+fn source_line_count(source: &[u8]) -> u32 {
+    if source.is_empty() {
+        return 0;
+    }
+    let newline_count = source.iter().filter(|byte| **byte == b'\n').count();
+    let unterminated_line = usize::from(source.last().copied() != Some(b'\n'));
+    u32::try_from(newline_count.saturating_add(unterminated_line)).unwrap_or(u32::MAX)
+}
+
+/// Project complete source lines for a ranges read. The source bytes remain
+/// untouched in the artifact; only the model projection is line-bounded.
+fn project_read_ranges(
+    source: &[u8],
+    requested: &[protocol::LineRange],
+    max_bytes: u64,
+) -> Result<RangeProjection, Status> {
+    validate_read_mode("ranges", requested)?;
+    let ranges = normalize_read_ranges(requested);
+    let line_count = source_line_count(source);
+    let bounded_max = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+    let bounded = max_bytes != 0;
+    let mut projection = Vec::new();
+    let mut omitted_by_budget = Vec::new();
+    let mut truncated = false;
+
+    let mut range_index = 0;
+    let mut line_number = 1_u64;
+    for line in source.split_inclusive(|byte| *byte == b'\n') {
+        while range_index < ranges.len() && u64::from(ranges[range_index].end_line) < line_number {
+            range_index += 1;
+        }
+        if range_index == ranges.len() {
+            break;
+        }
+        let range = ranges[range_index];
+        if line_number < u64::from(range.start_line) {
+            line_number = line_number.saturating_add(1);
+            continue;
+        }
+        if bounded && projection.len().saturating_add(line.len()) > bounded_max {
+            truncated = true;
+            let omitted_start = u32::try_from(line_number).unwrap_or(u32::MAX);
+            push_elision(
+                &mut omitted_by_budget,
+                omitted_start,
+                range.end_line.min(line_count),
+                "max_bytes",
+            );
+            // All later requested lines are omitted by the same hard
+            // budget; gather their intervals for explicit accounting.
+            for later in ranges.iter().skip(range_index + 1) {
+                if later.start_line > line_count {
+                    continue;
+                }
+                push_elision(
+                    &mut omitted_by_budget,
+                    later.start_line,
+                    later.end_line.min(line_count),
+                    "max_bytes",
+                );
+            }
+            break;
+        }
+        projection.extend_from_slice(line);
+        line_number = line_number.saturating_add(1);
+    }
+
+    // Build the complement of all requested ranges first. These are the
+    // leading, intermediate, and trailing source gaps not selected by the
+    // caller, independent of whether the selected content fit the budget.
+    let mut not_requested = Vec::new();
+    let mut cursor = 1_u32;
+    for range in &ranges {
+        if cursor > line_count {
+            break;
+        }
+        if range.start_line > cursor {
+            push_elision(
+                &mut not_requested,
+                cursor,
+                range.start_line.saturating_sub(1).min(line_count),
+                "not requested",
+            );
+        }
+        if range.end_line >= line_count {
+            cursor = line_count.saturating_add(1);
+            break;
+        }
+        cursor = cursor.max(range.end_line.saturating_add(1));
+    }
+    if cursor <= line_count {
+        push_elision(&mut not_requested, cursor, line_count, "not requested");
+    }
+
+    let mut all_elisions = not_requested;
+    all_elisions.extend(omitted_by_budget);
+    all_elisions.sort_by_key(|(start_line, end_line, reason)| (*start_line, *end_line, *reason));
+    let elisions = all_elisions
+        .into_iter()
+        .map(|(start_line, end_line, reason)| protocol::Elision {
+            range: Some(protocol::LineRange {
+                start_line,
+                end_line,
+            }),
+            reason: reason.to_string(),
+        })
+        .collect();
+
+    Ok(RangeProjection {
+        bytes: projection,
+        elisions,
+        truncated,
+    })
+}
+
 #[tonic::async_trait]
 impl FileServiceRpc for GrpcKernel {
     async fn read(
@@ -866,6 +1065,7 @@ impl FileServiceRpc for GrpcKernel {
         request: Request<protocol::ReadFileRequest>,
     ) -> Result<Response<ReadFileResponse>, Status> {
         let request = request.into_inner();
+        validate_read_mode(&request.mode, &request.ranges)?;
         let ctx = request
             .context
             .map(context)
@@ -880,16 +1080,26 @@ impl FileServiceRpc for GrpcKernel {
             .files
             .read(&ctx, &intent, &path)
             .map_err(status)?;
-        let projection = if request.max_bytes == 0 {
-            bytes.clone()
+        let (projection, elisions, truncated) = if request.mode == "ranges" {
+            let range_projection = project_read_ranges(&bytes, &request.ranges, request.max_bytes)?;
+            (
+                range_projection.bytes,
+                range_projection.elisions,
+                range_projection.truncated,
+            )
         } else {
-            bytes
-                .iter()
-                .copied()
-                .take(request.max_bytes as usize)
-                .collect()
+            let projection = if request.max_bytes == 0 {
+                bytes.clone()
+            } else {
+                bytes
+                    .iter()
+                    .copied()
+                    .take(request.max_bytes as usize)
+                    .collect()
+            };
+            let truncated = projection.len() < bytes.len();
+            (projection, Vec::new(), truncated)
         };
-        let truncated = projection.len() < bytes.len();
         if !request.expected_sha256.is_empty() && request.expected_sha256 != artifact.sha256 {
             return Err(Status::failed_precondition(
                 "expected_sha256 does not match source",
@@ -904,14 +1114,10 @@ impl FileServiceRpc for GrpcKernel {
                 sha256: artifact.sha256.clone(),
                 repository_revision: "no-vcs".to_string(),
             }),
-            rendered_mode: if request.mode.is_empty() {
-                "full".to_string()
-            } else {
-                request.mode
-            },
+            rendered_mode: rendered_read_mode(&request.mode).to_string(),
             full_content: Some(artifact_ref(artifact)),
             model_projection_utf8: projection,
-            elisions: Vec::new(),
+            elisions,
             diagnostics: Vec::new(),
             truncated,
             continuation_token: if truncated {
@@ -3910,6 +4116,162 @@ mod tests {
         let kernel =
             terminus_kernel::KernelHandle::new(data_dir.path().to_path_buf()).expect("test kernel");
         (data_dir, kernel)
+    }
+
+    #[test]
+    fn ranges_projection_reads_requested_lines_beyond_the_byte_prefix() {
+        let source = (1..=12)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>();
+        let requested = vec![protocol::LineRange {
+            start_line: 10,
+            end_line: 11,
+        }];
+        let max_bytes = u64::try_from("line 10\nline 11\n".len()).unwrap_or(0);
+
+        let result = project_read_ranges(source.as_bytes(), &requested, max_bytes)
+            .expect("valid ranges projection");
+
+        assert_eq!(result.bytes, b"line 10\nline 11\n");
+        assert!(!result.truncated);
+        assert!(result.elisions.iter().any(|elision| {
+            elision.range
+                == Some(protocol::LineRange {
+                    start_line: 1,
+                    end_line: 9,
+                })
+                && elision.reason == "not requested"
+        }));
+        assert!(result.elisions.iter().any(|elision| {
+            elision.range
+                == Some(protocol::LineRange {
+                    start_line: 12,
+                    end_line: 12,
+                })
+                && elision.reason == "not requested"
+        }));
+    }
+
+    #[test]
+    fn ranges_projection_normalizes_and_reports_all_unrequested_gaps() {
+        let source = (1..=10).map(|line| format!("{line}\n")).collect::<String>();
+        let requested = vec![
+            protocol::LineRange {
+                start_line: 7,
+                end_line: 8,
+            },
+            protocol::LineRange {
+                start_line: 3,
+                end_line: 4,
+            },
+        ];
+        let result =
+            project_read_ranges(source.as_bytes(), &requested, 0).expect("valid ranges projection");
+
+        assert_eq!(result.bytes, b"3\n4\n7\n8\n");
+        assert_eq!(
+            result
+                .elisions
+                .iter()
+                .map(|elision| {
+                    (
+                        elision
+                            .range
+                            .as_ref()
+                            .map(|range| (range.start_line, range.end_line)),
+                        elision.reason.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (Some((1, 2)), "not requested"),
+                (Some((5, 6)), "not requested"),
+                (Some((9, 10)), "not requested"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ranges_projection_rejects_empty_and_invalid_ranges() {
+        let empty = validate_read_mode("ranges", &[]).expect_err("ranges require a range");
+        assert_eq!(empty.code(), tonic::Code::InvalidArgument);
+
+        let zero_start = vec![protocol::LineRange {
+            start_line: 0,
+            end_line: 1,
+        }];
+        let zero_start_error =
+            validate_read_mode("ranges", &zero_start).expect_err("line zero is invalid");
+        assert_eq!(zero_start_error.code(), tonic::Code::InvalidArgument);
+
+        let reversed = vec![protocol::LineRange {
+            start_line: 4,
+            end_line: 3,
+        }];
+        let reversed_error =
+            validate_read_mode("ranges", &reversed).expect_err("reversed range is invalid");
+        assert_eq!(reversed_error.code(), tonic::Code::InvalidArgument);
+
+        for mode in ["full", "outline", "symbols"] {
+            validate_read_mode(mode, &[]).expect("known file read mode remains supported");
+            validate_read_mode(mode, &zero_start)
+                .expect("non-range modes do not interpret range fields");
+        }
+        assert_eq!(rendered_read_mode(""), "full");
+        assert_eq!(rendered_read_mode("full"), "full");
+        assert_eq!(rendered_read_mode("outline"), "full");
+        assert_eq!(rendered_read_mode("symbols"), "full");
+        assert_eq!(rendered_read_mode("ranges"), "ranges");
+
+        let unsupported =
+            validate_read_mode("future-mode", &[]).expect_err("unsupported mode must fail closed");
+        assert_eq!(unsupported.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn ranges_projection_truncates_only_at_complete_line_boundaries() {
+        let source = b"alpha\nbeta\ngamma\n";
+        let requested = vec![protocol::LineRange {
+            start_line: 1,
+            end_line: 3,
+        }];
+
+        let result = project_read_ranges(source, &requested, 11).expect("valid ranges projection");
+
+        assert_eq!(result.bytes, b"alpha\nbeta\n");
+        assert!(result.truncated);
+        assert!(result.elisions.iter().any(|elision| {
+            elision.range
+                == Some(protocol::LineRange {
+                    start_line: 3,
+                    end_line: 3,
+                })
+                && elision.reason == "max_bytes"
+        }));
+    }
+
+    #[test]
+    fn ranges_projection_streams_newline_heavy_sources_without_a_line_table() {
+        let source = "x\n".repeat(1_000_000);
+        let requested = vec![protocol::LineRange {
+            start_line: 1_000_000,
+            end_line: 1_000_000,
+        }];
+
+        let result =
+            project_read_ranges(source.as_bytes(), &requested, 0).expect("valid ranges projection");
+
+        assert_eq!(result.bytes, b"x\n");
+        assert!(!result.truncated);
+        assert_eq!(result.elisions.len(), 1);
+        assert_eq!(result.elisions[0].reason, "not requested");
+        assert_eq!(
+            result.elisions[0].range,
+            Some(protocol::LineRange {
+                start_line: 1,
+                end_line: 999_999,
+            })
+        );
     }
 
     fn register_test_workspace(

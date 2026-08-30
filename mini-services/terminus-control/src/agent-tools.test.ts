@@ -368,6 +368,7 @@ describe("standalone provider tools", () => {
 describe("R1 numbered rendering and gutter-safe patching", () => {
   test("renderNumbered emits stable <line>→ gutters", () => {
     expect(renderNumbered("alpha\nbeta\n", 7)).toBe("7→ alpha\n8→ beta\n");
+    expect(renderNumbered("\n", 9)).toBe("9→ \n");
     expect(renderNumbered("", 1)).toBe("");
   });
 
@@ -403,11 +404,12 @@ describe("R1 numbered rendering and gutter-safe patching", () => {
         Read: (_request: unknown) => ({
           modelProjectionUtf8: new TextEncoder().encode("alpha\nbeta\n"),
           sourceVersion: { sha256: sha, repositoryRevision: "no-vcs" },
-          renderedMode: "full",
+          renderedMode: "ranges",
           continuationToken: "",
           truncated: false,
           fullContent: undefined,
           diagnostics: [],
+          elisions: [],
         }),
       },
       patch: {
@@ -1270,11 +1272,12 @@ describe("kernel tool capability renewal", () => {
           return {
             modelProjectionUtf8: new TextEncoder().encode("content\n"),
             sourceVersion: { sha256: `sha256:${"a".repeat(64)}`, repositoryRevision: "no-vcs" },
-            renderedMode: "full",
+            renderedMode: "ranges",
             continuationToken: "",
             truncated: false,
             fullContent: undefined,
             diagnostics: [],
+            elisions: [],
           };
         },
       },
@@ -1478,14 +1481,32 @@ describe("C5 read paging is real", () => {
       files: {
         Read: (request: Record<string, unknown>) => {
           requests.push(request);
+          const ranges = request.ranges as readonly { startLine: number; endLine: number }[];
+          const range = ranges[0];
+          if (request.mode !== "ranges" || range === undefined) {
+            throw new Error("read tool did not request a kernel line range");
+          }
+          const lines = body.slice(0, -1).split("\n");
+          const endLine = Math.min(range.endLine, lines.length);
+          const projection = range.startLine > lines.length
+            ? ""
+            : `${lines.slice(range.startLine - 1, endLine).join("\n")}\n`;
           return {
-            modelProjectionUtf8: new TextEncoder().encode(body),
+            modelProjectionUtf8: new TextEncoder().encode(projection),
             sourceVersion: { sha256: `sha256:${"a".repeat(64)}`, repositoryRevision: "no-vcs" },
-            renderedMode: "full",
+            renderedMode: "ranges",
             continuationToken: "",
             truncated: false,
             fullContent: undefined,
             diagnostics: [],
+            elisions: [
+              ...(range.startLine > 1
+                ? [{ range: { startLine: 1, endLine: Math.min(range.startLine - 1, lines.length) }, reason: "not requested" }]
+                : []),
+              ...(endLine < lines.length
+                ? [{ range: { startLine: endLine + 1, endLine: lines.length }, reason: "not requested" }]
+                : []),
+            ],
           };
         },
       },
@@ -1505,9 +1526,8 @@ describe("C5 read paging is real", () => {
       }) as Extract<ParsedStandaloneToolCall, { toolId: "read" }>,
     });
     const data = result.data as Record<string, unknown>;
-    // The kernel has no ranges, so the control plane slices — and the slice
-    // is the requested range, not the head of the file relabelled.
-    expect(requests[0]?.mode).toBe("full");
+    expect(requests[0]?.mode).toBe("ranges");
+    expect(requests[0]?.ranges).toEqual([{ startLine: 401, endLine: 450 }]);
     expect(data.offset_line).toBe(401);
     expect(data.end_line).toBe(450);
     expect(data.total_lines).toBe(500);
@@ -1552,6 +1572,156 @@ describe("C5 read paging is real", () => {
     expect(data.lines_remaining).toBe(0);
     expect(data.next_offset_line).toBeNull();
     expect(result.truncation.occurred).toBe(false);
+  });
+
+  test("blank lines remain countable pages", async () => {
+    const clients = {
+      files: {
+        Read: () => ({
+          modelProjectionUtf8: new TextEncoder().encode("\n\n"),
+          sourceVersion: { sha256: `sha256:${"a".repeat(64)}`, repositoryRevision: "no-vcs" },
+          renderedMode: "ranges",
+          continuationToken: "",
+          truncated: false,
+          fullContent: undefined,
+          diagnostics: [],
+          elisions: [],
+        }),
+      },
+    } as unknown as Clients;
+    const result = await executeStandaloneTool({
+      ...PHASE0_BASE,
+      clients,
+      call: parseStandaloneToolCall({
+        toolCallId: "r-blank",
+        toolName: "read",
+        arguments: { path: "blank.txt", offset_line: 1, max_lines: 2, render: "raw" },
+      }) as Extract<ParsedStandaloneToolCall, { toolId: "read" }>,
+    });
+    expect(result.data).toMatchObject({ total_lines: 2, offset_line: 1, end_line: 2 });
+    expect(result.truncation.occurred).toBe(false);
+  });
+
+  test("a line larger than the byte budget falls back to the full artifact without looping", async () => {
+    const sha = `sha256:${"b".repeat(64)}`;
+    const clients = {
+      files: {
+        Read: () => ({
+          modelProjectionUtf8: new Uint8Array(),
+          sourceVersion: { sha256: sha, repositoryRevision: "no-vcs" },
+          renderedMode: "ranges",
+          continuationToken: "artifact:full",
+          truncated: true,
+          fullContent: { sha256: sha, sizeBytes: 100_000, mediaType: "text/plain" },
+          diagnostics: [],
+          elisions: [{ range: { startLine: 1, endLine: 1 }, reason: "max_bytes" }],
+        }),
+      },
+    } as unknown as Clients;
+    const result = await executeStandaloneTool({
+      ...PHASE0_BASE,
+      clients,
+      call: parseStandaloneToolCall({
+        toolCallId: "r-large-line",
+        toolName: "read",
+        arguments: { path: "one-long-line.txt", offset_line: 1, max_lines: 1, render: "raw" },
+      }) as Extract<ParsedStandaloneToolCall, { toolId: "read" }>,
+    });
+    expect(result.data).toMatchObject({ end_line: null, next_offset_line: null });
+    expect(result.summary).toContain("returned no complete lines");
+    expect(result.truncation).toMatchObject({
+      occurred: true,
+      continuation: `artifact://sha256/${"b".repeat(64)}`,
+    });
+  });
+
+  test("numbered gutters trim in one pass and advance to the next unread line", async () => {
+    const clients = {
+      files: {
+        Read: () => ({
+          modelProjectionUtf8: new TextEncoder().encode("a\nb\nc\n"),
+          sourceVersion: { sha256: `sha256:${"a".repeat(64)}`, repositoryRevision: "no-vcs" },
+          renderedMode: "ranges",
+          continuationToken: "",
+          truncated: false,
+          fullContent: undefined,
+          diagnostics: [],
+          elisions: [],
+        }),
+      },
+    } as unknown as Clients;
+    const result = await executeStandaloneTool({
+      ...PHASE0_BASE,
+      clients,
+      call: parseStandaloneToolCall({
+        toolCallId: "r-numbered-budget",
+        toolName: "read",
+        arguments: { path: "tiny-lines.txt", max_lines: 3, max_bytes: 12 },
+      }) as Extract<ParsedStandaloneToolCall, { toolId: "read" }>,
+    });
+    const data = result.data as Record<string, unknown>;
+    expect(new TextEncoder().encode(String(data.content_utf8)).byteLength).toBeLessThanOrEqual(12);
+    expect(data).toMatchObject({ content_utf8: "1→ a\n", end_line: 1, next_offset_line: 2 });
+  });
+
+  test("invalid UTF-8 is explicit and points to the immutable full artifact", async () => {
+    const sha = `sha256:${"c".repeat(64)}`;
+    const clients = {
+      files: {
+        Read: () => ({
+          modelProjectionUtf8: Uint8Array.from([0xff]),
+          sourceVersion: { sha256: sha, repositoryRevision: "no-vcs" },
+          renderedMode: "ranges",
+          continuationToken: "",
+          truncated: false,
+          fullContent: { sha256: sha, sizeBytes: 1, mediaType: "application/octet-stream" },
+          diagnostics: [],
+          elisions: [],
+        }),
+      },
+    } as unknown as Clients;
+    const result = await executeStandaloneTool({
+      ...PHASE0_BASE,
+      clients,
+      call: parseStandaloneToolCall({
+        toolCallId: "r-binary",
+        toolName: "read",
+        arguments: { path: "binary.dat", max_lines: 1 },
+      }) as Extract<ParsedStandaloneToolCall, { toolId: "read" }>,
+    });
+    expect(result.status).toBe("partial");
+    expect(result.diagnostics[0]?.code).toBe("READ_NOT_UTF8");
+    expect(result.data).toMatchObject({
+      content_utf8: null,
+      artifact_uri: `artifact://sha256/${"c".repeat(64)}`,
+    });
+    expect(result.truncation.continuation).toBe(`artifact://sha256/${"c".repeat(64)}`);
+  });
+
+  test("fails closed when the kernel ignores the requested range", async () => {
+    const clients = {
+      files: {
+        Read: () => ({
+          modelProjectionUtf8: new TextEncoder().encode("line 1\n"),
+          sourceVersion: { sha256: `sha256:${"a".repeat(64)}`, repositoryRevision: "no-vcs" },
+          renderedMode: "full",
+          continuationToken: "artifact:full",
+          truncated: true,
+          fullContent: undefined,
+          diagnostics: [],
+          elisions: [],
+        }),
+      },
+    } as unknown as Clients;
+    await expect(executeStandaloneTool({
+      ...PHASE0_BASE,
+      clients,
+      call: parseStandaloneToolCall({
+        toolCallId: "r4",
+        toolName: "read",
+        arguments: { path: "big.ts", offset_line: 40_001, max_lines: 10 },
+      }) as Extract<ParsedStandaloneToolCall, { toolId: "read" }>,
+    })).rejects.toThrow(/kernel returned full for a ranged read/);
   });
 });
 
@@ -1628,11 +1798,12 @@ describe("C4 every declared tool dispatches", () => {
           return {
             modelProjectionUtf8: new TextEncoder().encode("x\n"),
             sourceVersion: { sha256: `sha256:${"c".repeat(64)}`, repositoryRevision: "no-vcs" },
-            renderedMode: "full",
+            renderedMode: "ranges",
             continuationToken: "",
             truncated: false,
             fullContent: undefined,
             diagnostics: [],
+            elisions: [],
           };
         },
       },

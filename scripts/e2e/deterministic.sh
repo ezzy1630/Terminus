@@ -79,6 +79,23 @@ cp "$ROOT/scripts/e2e/fixtures/read.txt" "$TERMINUS_E2E_WORKSPACE_ROOT/e2e-fixtu
 cp "$ROOT/scripts/e2e/fixtures/read.txt" "$TERMINUS_E2E_WORKSPACE_ROOT/scope-denied.txt"
 cp "$ROOT/scripts/e2e/provider-stdio-fixture.ts" "$TERMINUS_E2E_WORKSPACE_ROOT/terminus-provider-fixture.ts"
 chmod 700 "$TERMINUS_E2E_WORKSPACE_ROOT/terminus-provider-fixture.ts"
+terminus_large_fixture="$TERMINUS_E2E_WORKSPACE_ROOT/e2e-large-fixture.txt"
+TERMINUS_TEST_LARGE_FIXTURE="$terminus_large_fixture" \
+  bun -e '
+    const path = process.env.TERMINUS_TEST_LARGE_FIXTURE;
+    if (!path) throw new Error("large read fixture path is missing");
+    const lines = Array.from({ length: 50_000 }, (_, offset) => {
+      const line = offset + 1;
+      const marker = line === 40_001 ? " TERMINUS_DEEP_RANGE_SENTINEL" : "";
+      return `${String(line).padStart(5, "0")} ${"x".repeat(88)}${marker}\n`;
+    });
+    await Bun.write(path, lines.join(""));
+  '
+terminus_large_fixture_bytes="$(wc -c < "$terminus_large_fixture" | tr -d ' ')"
+if (( terminus_large_fixture_bytes <= 3 * 1024 * 1024 )); then
+  echo "[e2e] large read fixture did not exceed the retired kernel prefix window" >&2
+  exit 1
+fi
 export TERMINUS_E2E_PROVIDER_RESPONSE_TEXT="Terminus provider fixture received local/e2e-model through kernel job input."
 provider_runtime="$(command -v bun)"
 export TERMINUS_LOCAL_PROVIDER_COMMAND_JSON="$(
@@ -99,7 +116,7 @@ print(json.dumps({
 git -C "$TERMINUS_E2E_WORKSPACE_ROOT" init -q
 git -C "$TERMINUS_E2E_WORKSPACE_ROOT" config user.email "terminus-e2e@example.invalid"
 git -C "$TERMINUS_E2E_WORKSPACE_ROOT" config user.name "Terminus E2E"
-git -C "$TERMINUS_E2E_WORKSPACE_ROOT" add e2e-fixture.txt scope-denied.txt terminus-provider-fixture.ts
+git -C "$TERMINUS_E2E_WORKSPACE_ROOT" add e2e-fixture.txt e2e-large-fixture.txt scope-denied.txt terminus-provider-fixture.ts
 git -C "$TERMINUS_E2E_WORKSPACE_ROOT" commit -q -m "e2e baseline"
 
 echo "[e2e] preparing isolated SQLite database"

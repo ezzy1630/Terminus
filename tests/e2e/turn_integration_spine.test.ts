@@ -139,7 +139,7 @@ describeSpine("PR 7: Complete End-to-End Turn Integration Spine", () => {
         },
       ],
       allowed_scope: {
-        read_paths: [".", "e2e-fixture.txt"],
+        read_paths: [".", "e2e-fixture.txt", "e2e-large-fixture.txt"],
         write_paths: [".", "e2e-fixture.txt"],
         external_systems: [],
       },
@@ -196,6 +196,32 @@ describeSpine("PR 7: Complete End-to-End Turn Integration Spine", () => {
 
     // Verify context manifest evidence was persisted
     const systemExport = await api("POST", "/v1/system/export", {});
+    const events = objectArrayField(systemExport, "events", "system export");
+    const deepReadProposed = events.find((event) => {
+      if (event.event_type !== "tool.proposed") return false;
+      const payload = event.payload;
+      return typeof payload === "object"
+        && payload !== null
+        && !Array.isArray(payload)
+        && (payload as JsonObject).provider_call_id === "fixture-deep-read";
+    });
+    expect(deepReadProposed).toBeDefined();
+    const deepReadId = stringField(deepReadProposed!, "aggregate_id", "deep read proposal");
+    const proposedPayload = objectField(deepReadProposed!, "payload", "deep read proposal");
+    expect(proposedPayload).toMatchObject({
+      tool_id: "read",
+      arguments_excerpt: "e2e-large-fixture.txt",
+    });
+    for (const eventType of ["tool.authorized", "tool.started", "tool.settled"]) {
+      expect(events.some((event) => event.event_type === eventType && event.aggregate_id === deepReadId)).toBe(true);
+    }
+    const deepReadSettled = events.find(
+      (event) => event.event_type === "tool.settled" && event.aggregate_id === deepReadId,
+    );
+    const settledPayload = objectField(deepReadSettled!, "payload", "deep read settlement");
+    expect(settledPayload.status).toBe("success");
+    expect(settledPayload.summary).toContain("lines 40001-40002");
+
     const manifests = objectArrayField(systemExport, "context_manifests", "system export");
     expect(manifests.length).toBeGreaterThan(0);
 

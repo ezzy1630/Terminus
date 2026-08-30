@@ -10,6 +10,7 @@ import type {
   ProviderToolSchema,
 } from "@terminus/provider-core";
 import {
+  errorResult,
   okResult,
   type ArtifactDescriptor,
   type CapabilityCard,
@@ -49,12 +50,6 @@ export const MAX_TOOL_CYCLES_CEILING = 1_000;
 export const MAX_TOOL_MODEL_RESULT_BYTES = 128 * 1_024;
 /** Inline byte budget for one `read` page (the model-visible slice). */
 export const READ_PAGE_MAX_BYTES = 64 * 1_024;
-/**
- * Bytes fetched from the kernel per read. The kernel has no line ranges yet
- * (Phase 2), so deep pages are sliced control-side out of this window; it is
- * sized to stay well under the gRPC 4 MiB receive limit.
- */
-export const KERNEL_READ_FETCH_MAX_BYTES = 3 * 1_024 * 1_024;
 /** Combined stdout+stderr projection budget for one exec/grep/glob result. */
 export const EXEC_OUTPUT_MAX_BYTES = 30 * 1_024;
 /**
@@ -67,6 +62,8 @@ export const EXEC_OUTPUT_STREAM_FLOOR_BYTES = 4 * 1_024;
 export const EXEC_FOREGROUND_MAX_TIMEOUT_MS = 600_000;
 /** Background job ceiling; awaited through exec_poll. */
 export const EXEC_BACKGROUND_MAX_TIMEOUT_MS = 1_800_000;
+/** Protobuf `LineRange` uses unsigned 32-bit line numbers. */
+const MAX_KERNEL_LINE_NUMBER = 0xffff_ffff;
 
 /**
  * Resolve the per-turn tool-call budget (ADR-0039 §10). Operators tune it
@@ -134,7 +131,7 @@ export const standaloneReadInputSchema = z.preprocess(aliasReadArguments, z.obje
   path: pathSchema,
   /** Inline page budget; pages larger than this are trimmed line-wise. */
   max_bytes: z.number().int().min(1).max(READ_PAGE_MAX_BYTES).default(READ_PAGE_MAX_BYTES),
-  offset_line: z.number().int().min(1).default(1),
+  offset_line: z.number().int().min(1).max(MAX_KERNEL_LINE_NUMBER).default(1),
   max_lines: z.number().int().min(1).max(50_000).default(2_000),
   /**
    * "numbered" renders each line as `<line>→ <content>` so the model can
@@ -509,7 +506,7 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
       properties: {
         path: { type: "string", description: "Workspace-relative path to read." },
         max_bytes: { type: "integer", minimum: 1, maximum: READ_PAGE_MAX_BYTES, default: READ_PAGE_MAX_BYTES, description: "Inline byte budget for this page." },
-        offset_line: { type: "integer", minimum: 1, default: 1, description: "1-based first line of the page." },
+        offset_line: { type: "integer", minimum: 1, maximum: MAX_KERNEL_LINE_NUMBER, default: 1, description: "1-based first line of the page." },
         max_lines: { type: "integer", minimum: 1, maximum: 50_000, default: 2_000, description: "Lines to return from offset_line." },
         render: { enum: ["numbered", "raw"], default: "numbered" },
         expected_sha256: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
@@ -1305,10 +1302,35 @@ export class ToolAbortedError extends Error {
 const NUMBERED_GUTTER_PATTERN = /^\s*(\d+)→ /;
 
 export function renderNumbered(text: string, startLine: number): string {
+  if (text.length === 0) return "";
   const normalized = text.endsWith("\n") ? text.slice(0, -1) : text;
-  if (normalized.length === 0) return text;
   const lines = normalized.split("\n");
   return lines.map((line, index) => `${startLine + index}→ ${line}`).join("\n") + "\n";
+}
+
+function renderNumberedWithinBudget(
+  text: string,
+  startLine: number,
+  maxBytes: number,
+): { readonly text: string; readonly lineCount: number; readonly truncated: boolean } {
+  if (text.length === 0) return { text: "", lineCount: 0, truncated: false };
+  const normalized = text.endsWith("\n") ? text.slice(0, -1) : text;
+  const lines = normalized.split("\n");
+  const encoder = new TextEncoder();
+  const rendered: string[] = [];
+  let renderedBytes = 0;
+  for (const [index, line] of lines.entries()) {
+    const numbered = `${startLine + index}→ ${line}\n`;
+    const numberedBytes = encoder.encode(numbered).byteLength;
+    if (renderedBytes + numberedBytes > maxBytes) break;
+    rendered.push(numbered);
+    renderedBytes += numberedBytes;
+  }
+  return {
+    text: rendered.join(""),
+    lineCount: rendered.length,
+    truncated: rendered.length < lines.length,
+  };
 }
 
 function isFullyNumbered(block: string): boolean {
@@ -1404,6 +1426,15 @@ export function pageLines(text: string, offsetLine: number, maxLines: number): {
   };
 }
 
+function projectedLineCount(text: string): number {
+  if (text.length === 0) return 0;
+  let lines = 0;
+  for (const character of text) {
+    if (character === "\n") lines += 1;
+  }
+  return text.endsWith("\n") ? lines : lines + 1;
+}
+
 export async function executeStandaloneTool(
   input: ExecuteStandaloneToolInput,
 ): Promise<ToolResult<unknown>> {
@@ -1417,52 +1448,92 @@ export async function executeStandaloneTool(
     case "capability":
       throw new Error("capability activation must settle in the control plane");
     case "read": {
-      // The kernel has no line ranges (it returns a byte prefix and discards
-      // `ranges`), so paging is done here: fetch a large byte window once and
-      // slice the requested lines out of it. A range request would have
-      // returned the head of the file labelled with the requested offset —
-      // silently wrong content, which is worse than no paging at all.
+      const requestedStartLine = input.call.arguments.offset_line;
+      const requestedEndLine = Math.min(
+        MAX_KERNEL_LINE_NUMBER,
+        requestedStartLine + input.call.arguments.max_lines - 1,
+      );
+      const inlineBudget = Math.min(input.call.arguments.max_bytes, READ_PAGE_MAX_BYTES);
       const response = await withAbortSignal(input.clients.files.Read({
         context: nextRequestContext(context, "read"),
         intent: toolIntent(input.contractHash, "read_local"),
         path: { workspaceId: input.workspaceId, relativePath: input.call.arguments.path },
-        mode: "full",
-        ranges: [],
+        mode: "ranges",
+        ranges: [{ startLine: requestedStartLine, endLine: requestedEndLine }],
         symbols: [],
-        maxBytes: KERNEL_READ_FETCH_MAX_BYTES,
+        maxBytes: inlineBudget,
         expectedSha256: input.call.arguments.expected_sha256 ?? "",
       }), input.signal);
-      const fullProjection = new TextDecoder("utf-8", { fatal: false }).decode(response.modelProjectionUtf8);
-      const fetchTruncated = response.truncated;
-      const fetchedLines = fullProjection.length === 0
-        ? 0
-        : (fullProjection.endsWith("\n") ? fullProjection.slice(0, -1) : fullProjection).split("\n").length;
-      // A byte-truncated fetch cannot know the file's real line count.
-      const totalLines = fetchTruncated ? null : fetchedLines;
-      const page = pageLines(fullProjection, input.call.arguments.offset_line, input.call.arguments.max_lines);
+      if (response.renderedMode !== "ranges") {
+        throw new Error(`kernel returned ${response.renderedMode || "an unspecified mode"} for a ranged read`);
+      }
       const sourceHash = response.sourceVersion?.sha256 ?? "";
       if (sourceHash.length > 0 && input.observedSources !== undefined) {
         input.observedSources.record(input.workspaceId, input.call.arguments.path, sourceHash);
       }
-      let contentUtf8 = input.call.arguments.render === "numbered"
-        ? renderNumbered(page.text, page.startLine)
-        : page.text;
-      // Numbered rendering adds gutter bytes; trim whole lines until the
-      // inline payload provably fits the page budget instead of letting
-      // settlement strip it to an artifact ref.
-      const inlineBudget = Math.min(input.call.arguments.max_bytes, READ_PAGE_MAX_BYTES);
-      let byteTrimmed = false;
-      while (new TextEncoder().encode(contentUtf8).byteLength > inlineBudget && contentUtf8.includes("\n")) {
-        contentUtf8 = contentUtf8.slice(0, contentUtf8.lastIndexOf("\n")) + "\n";
-        byteTrimmed = true;
-      }
-      const deliveredLines = contentUtf8.length === 0
-        ? 0
-        : (contentUtf8.endsWith("\n") ? contentUtf8.slice(0, -1) : contentUtf8).split("\n").length;
-      const endLine = page.startLine + deliveredLines - 1;
-      const hasMore = byteTrimmed || page.hasMore || fetchTruncated;
-      const linesRemaining = totalLines === null ? null : Math.max(0, totalLines - endLine);
       const artifact = kernelArtifactDescriptor(response.fullContent);
+      let rangeProjection: string;
+      try {
+        rangeProjection = new TextDecoder("utf-8", { fatal: true }).decode(response.modelProjectionUtf8);
+      } catch {
+        const elapsed = performance.now() - startedAt;
+        const continuation = artifact?.uri ?? (response.continuationToken || null);
+        const message = `${input.call.arguments.path} is not valid UTF-8; inline read content was omitted`;
+        const result = errorResult(message, {
+          toolCallId: input.internalToolCallId,
+          traceId: input.traceId,
+          status: "partial",
+          summary: `${message}${continuation === null ? "" : `; inspect ${continuation}`}`,
+          diagnostics: [{
+            severity: "warning",
+            code: "READ_NOT_UTF8",
+            message,
+            path: input.call.arguments.path,
+            range: null,
+          }],
+        });
+        return {
+          ...result,
+          data: {
+            path: input.call.arguments.path,
+            content_utf8: null,
+            file_sha256: sourceHash.length === 0 ? null : sourceHash,
+            rendered_mode: response.renderedMode,
+            artifact_uri: artifact?.uri ?? null,
+          },
+          policyDecisionId: input.policyDecisionId,
+          sourceVersions: sourceHash.length === 0 ? {} : { [input.call.arguments.path]: sourceHash },
+          artifacts: artifact === null ? [] : [artifact],
+          truncation: {
+            occurred: true,
+            reason: "file content is not valid UTF-8",
+            continuation,
+          },
+          sideEffects: [sideEffect(input.sideEffectId, "read", `Read ${input.call.arguments.path}`, true)],
+          timing: { executionMs: elapsed, totalMs: elapsed, queuedMs: 0 },
+          resourceUsage: { ...result.resourceUsage, bytesRead: response.modelProjectionUtf8.byteLength },
+        };
+      }
+      const fetchedLines = projectedLineCount(rangeProjection);
+      const totalLines = response.elisions.reduce(
+        (maximum, elision) => Math.max(maximum, elision.range?.endLine ?? 0),
+        fetchedLines === 0 ? 0 : requestedStartLine + fetchedLines - 1,
+      );
+      const rendered = input.call.arguments.render === "numbered"
+        ? renderNumberedWithinBudget(rangeProjection, requestedStartLine, inlineBudget)
+        : { text: rangeProjection, lineCount: fetchedLines, truncated: false };
+      const contentUtf8 = rendered.text;
+      const deliveredLines = rendered.lineCount;
+      const byteTrimmed = rendered.truncated;
+      const endLine = deliveredLines === 0 ? null : requestedStartLine + deliveredLines - 1;
+      const lineProgress = endLine ?? requestedStartLine - 1;
+      const hasMore = byteTrimmed || response.truncated || lineProgress < totalLines;
+      const linesRemaining = Math.max(0, totalLines - lineProgress);
+      const continuation = !hasMore
+        ? null
+        : endLine === null
+          ? artifact?.uri ?? (response.continuationToken || null)
+          : `read ${input.call.arguments.path} at offset_line ${endLine + 1}`;
       const elapsed = performance.now() - startedAt;
       const result = okResult({
         path: input.call.arguments.path,
@@ -1470,18 +1541,18 @@ export async function executeStandaloneTool(
         file_sha256: sourceHash.length === 0 ? null : sourceHash,
         total_lines: totalLines,
         render: input.call.arguments.render,
-        offset_line: page.startLine,
+        offset_line: requestedStartLine,
         end_line: endLine,
-        // How much of the file this page did not show. `null` means the file
-        // is larger than the kernel fetch window and the count is unknown.
         lines_remaining: linesRemaining,
         rendered_mode: response.renderedMode,
         continuation_token: response.continuationToken || null,
-        next_offset_line: hasMore ? endLine + 1 : null,
+        next_offset_line: hasMore && endLine !== null ? endLine + 1 : null,
       }, {
         toolCallId: input.internalToolCallId,
         traceId: input.traceId,
-        summary: `Read ${input.call.arguments.path} lines ${page.startLine}-${endLine}${totalLines === null ? "" : ` of ${totalLines}`}${hasMore ? ` (${linesRemaining === null ? "more" : `${linesRemaining} more`} lines; continue at offset_line ${endLine + 1})` : ""}`,
+        summary: endLine === null
+          ? `Read ${input.call.arguments.path} returned no complete lines at offset_line ${requestedStartLine} of ${totalLines}${continuation === null ? "" : `; continue with ${continuation}`}`
+          : `Read ${input.call.arguments.path} lines ${requestedStartLine}-${endLine} of ${totalLines}${hasMore ? ` (${linesRemaining} more lines; continue at offset_line ${endLine + 1})` : ""}`,
         sourceVersions: sourceHash.length === 0 ? {} : { [input.call.arguments.path]: sourceHash },
         artifacts: artifact === null ? [] : [artifact],
         sideEffects: [sideEffect(input.sideEffectId, "read", `Read ${input.call.arguments.path}`, true)],
@@ -1493,10 +1564,12 @@ export async function executeStandaloneTool(
         truncation: hasMore
           ? {
               occurred: true,
-              reason: fetchTruncated && !page.hasMore && !byteTrimmed
-                ? `file exceeds the ${KERNEL_READ_FETCH_MAX_BYTES}-byte kernel read window`
-                : "line page continues beyond this read",
-              continuation: `read ${input.call.arguments.path} at offset_line ${endLine + 1}`,
+              reason: endLine === null
+                ? `no complete line fits within the ${inlineBudget}-byte page budget`
+                : response.truncated && !byteTrimmed
+                  ? `requested line range exceeds the ${inlineBudget}-byte page budget`
+                  : "line page continues beyond this read",
+              continuation,
             }
           : result.truncation,
         diagnostics: response.diagnostics.map((diagnostic) => ({

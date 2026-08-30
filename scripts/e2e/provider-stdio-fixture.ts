@@ -52,6 +52,24 @@ const isIntegrationSpineTask = renderedBody.includes("PR 7 Turn Integration Spin
 const isPackagedDesktopTask = renderedBody.includes(
   "exercise packaged desktop deterministic task",
 );
+// Keep the contiguous marker out of this provider source. The model request
+// can contain repository metadata for this file; only the deep read result
+// may satisfy this check.
+const deepReadMarker = ["TERMINUS", "DEEP", "RANGE", "SENTINEL"].join("_");
+function hasDeepReadToolResult(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasDeepReadToolResult);
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (record.role === "tool") {
+    const serialized = JSON.stringify(record);
+    return serialized.includes(deepReadMarker)
+      && serialized.includes("e2e-large-fixture.txt")
+      && serialized.includes("40001")
+      && serialized.includes("40002");
+  }
+  return Object.values(record).some(hasDeepReadToolResult);
+}
+const deepReadSettled = hasDeepReadToolResult(request.body);
 const emitDone = (): void => {
   console.log(JSON.stringify({
     kind: "done",
@@ -112,6 +130,24 @@ if (isRestartRecoveryTask) {
   console.log(JSON.stringify({
     kind: "text",
     text: "Terminus resumed the interrupted provider turn and re-read the scoped workspace fixture.",
+  }));
+  emitDone();
+  process.exit(0);
+}
+
+if (isIntegrationSpineTask && !deepReadSettled) {
+  console.log(JSON.stringify({
+    kind: "tool_call",
+    tool_call: {
+      tool_call_id: "fixture-deep-read",
+      tool_name: "read",
+      arguments: {
+        path: "e2e-large-fixture.txt",
+        offset_line: 40_001,
+        max_lines: 2,
+        render: "raw",
+      },
+    },
   }));
   emitDone();
   process.exit(0);
