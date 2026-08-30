@@ -1,4 +1,4 @@
-# ADR-0054: Provider-budgeted, obligation-anchored compaction
+# ADR-0055: Provider-budgeted, obligation-anchored compaction
 
 - **Status:** PROPOSED
 - **Date:** 2026-08-30

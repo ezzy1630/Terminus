@@ -73,7 +73,7 @@ ADR-0023 remains correct: durable semantic memory stays off until paired held-ou
 - Source episodes remain visible unless an atomic source-backed summary commit succeeds.
 - A conformance test crosses a serialization boundary, restores the persisted obligation anchor, and expands pruned source from the restart-bound recall store. It is not a full Prisma/process-restart/next-manifest test.
 
-The governing decision is [ADR-0054](../decisions/ADR-0054-budgeted-obligation-anchored-compaction.md). The implementation is a candidate on an isolated branch. Because it changes context policy, it still requires the paired evaluation record and two approvals before merge.
+The governing decision is [ADR-0055](../decisions/ADR-0055-budgeted-obligation-anchored-compaction.md). The implementation is a candidate on an isolated branch. Because it changes context policy, it still requires the paired evaluation record and two approvals before merge.
 
 ## Evaluation and promotion gate
 
