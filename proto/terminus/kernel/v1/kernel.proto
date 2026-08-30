@@ -777,10 +777,31 @@ message SecretMutationResponse {
   bool stored = 2;
 }
 
+// Metadata-only result of checking a secret capability. UNSPECIFIED is the
+// protobuf default and is never authoritative; callers must treat it as an
+// indeterminate result rather than as absence.
+enum SecretPresenceProto {
+  SECRET_PRESENCE_UNSPECIFIED = 0;
+  SECRET_PRESENCE_PRESENT = 1;
+  SECRET_PRESENCE_MISSING = 2;
+  SECRET_PRESENCE_UNAVAILABLE = 3;
+}
+
+message InspectSecretRequest {
+  RequestContext context = 1;
+  string capability_uri = 2;
+}
+
+message InspectSecretResponse {
+  string capability_uri = 1;
+  SecretPresenceProto presence = 2;
+}
+
 service SecretService {
   rpc Mint(MintSecretRequest) returns (SecretCapabilityMessage);
   rpc Store(StoreSecretRequest) returns (SecretMutationResponse);
   rpc Delete(DeleteSecretRequest) returns (SecretMutationResponse);
+  rpc Inspect(InspectSecretRequest) returns (InspectSecretResponse);
 }
 
 // =============================================================================
@@ -828,9 +849,17 @@ message DiscoverLocalProviderCredentialsResponse {
   // PATH lookups, so the client can say "install/sign in" precisely.
   bool codex_installed = 3;
   bool opencode_installed = 4;
-  // "available" | "missing" | "rejected". Callers must not treat a
-  // rejected store as authoritative absence.
-  string opencode_store_status = 5;
+  // The protobuf default is non-authoritative. Callers must not treat
+  // REJECTED or UNAVAILABLE as authoritative absence.
+  OpencodeStoreStatusProto opencode_store_status = 5;
+}
+
+enum OpencodeStoreStatusProto {
+  OPENCODE_STORE_STATUS_UNSPECIFIED = 0;
+  OPENCODE_STORE_STATUS_AVAILABLE = 1;
+  OPENCODE_STORE_STATUS_MISSING = 2;
+  OPENCODE_STORE_STATUS_REJECTED = 3;
+  OPENCODE_STORE_STATUS_UNAVAILABLE = 4;
 }
 
 message ImportLocalProviderCredentialRequest {

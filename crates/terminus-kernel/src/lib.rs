@@ -32,8 +32,8 @@ pub use ledger::{
 };
 pub use provider_accounts::{
     ImportedLocalCredential, LocalAuthKind, LocalCredentialDiscovery, LocalCredentialMetadata,
-    LocalCredentialRoots, LocalCredentialStore, LocalProviderCredential, ProviderAccountService,
-    DISCOVER_LOCAL_SCOPE,
+    LocalCredentialRoots, LocalCredentialStore, LocalCredentialStoreStatus,
+    LocalProviderCredential, ProviderAccountService, DISCOVER_LOCAL_SCOPE,
 };
 pub use services::{
     apply_default_deadline, remaining_budget, resolve_deadline_unix_ms, validate_capability_for_op,
@@ -43,3 +43,4 @@ pub use services::{
     SecretService, WorkspaceEntry, WorkspaceService, DEFAULT_UNARY_DEADLINE_MS,
     MAX_LONG_RUNNING_DEADLINE_MS,
 };
+pub use terminus_secrets::SecretPresence;

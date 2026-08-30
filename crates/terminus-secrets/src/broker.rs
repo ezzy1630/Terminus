@@ -33,6 +33,16 @@ pub struct SecretMetadata {
     pub allowed_destinations: Vec<String>,
 }
 
+/// Metadata-only result of probing a credential store. This deliberately
+/// distinguishes an absent entry from an unavailable provider so callers do
+/// not turn keychain, backend, or policy failures into false absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretPresence {
+    Present,
+    Missing,
+    Unavailable,
+}
+
 /// A short-lived handle to a secret value. The value is held in memory and
 /// wiped (zeroed) on drop.
 ///
@@ -294,6 +304,49 @@ impl SecretBroker {
         result
     }
 
+    /// Probe a secret capability without returning or caching its bytes.
+    ///
+    /// The provider resolves into a kernel-owned [`SecretHandle`] which is
+    /// immediately dropped. Only an explicit unknown entry is `Missing`;
+    /// provider, policy, keychain, and backend failures are `Unavailable`.
+    pub fn inspect(&self, uri: &str) -> Result<SecretPresence, SecretError> {
+        if self.is_revoked(uri) {
+            return Ok(SecretPresence::Unavailable);
+        }
+        let (provider_name, _scope) = parse_uri(uri)?;
+        let provider = {
+            let providers = self
+                .providers
+                .lock()
+                .map_err(|error| SecretError::ProviderUnavailable(format!("mutex: {error}")))?;
+            providers.get(&provider_name).cloned()
+        };
+        let Some(provider) = provider else {
+            return Ok(SecretPresence::Unavailable);
+        };
+        match provider.resolve(uri) {
+            Ok(_handle) => Ok(SecretPresence::Present),
+            Err(SecretError::UnknownCapability(_)) => Ok(SecretPresence::Missing),
+            Err(_error) => Ok(SecretPresence::Unavailable),
+        }
+    }
+
+    /// Bounded metadata-only probe for async transports. Keychain providers
+    /// may block behind an OS prompt, so never run this resolve on a tokio
+    /// worker thread.
+    pub async fn inspect_async(&self, uri: &str) -> Result<SecretPresence, SecretError> {
+        let broker = self.clone();
+        let owned_uri = uri.to_string();
+        let resolve = tokio::task::spawn_blocking(move || broker.inspect(&owned_uri));
+        match tokio::time::timeout(SECRET_RESOLVE_TIMEOUT, resolve).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(join_error)) => Err(SecretError::ProviderUnavailable(format!(
+                "secret inspect task failed: {join_error}"
+            ))),
+            Err(_elapsed) => Ok(SecretPresence::Unavailable),
+        }
+    }
+
     pub fn revoke(&self, uri: &str) {
         if let Ok(mut g) = self.revocations.lock() {
             g.insert(uri.to_string());
@@ -518,6 +571,50 @@ mod tests {
             .request("secret://github/missing", "task-1")
             .unwrap_err();
         assert!(matches!(err, SecretError::UnknownCapability(_)));
+    }
+
+    #[test]
+    fn inspect_distinguishes_present_missing_and_unavailable() {
+        let broker = SecretBroker::new();
+        let provider = std::sync::Arc::new(InMemoryProvider::new());
+        provider.register("secret://fixture/present", b"fixture-value".to_vec());
+        broker.register_provider("fixture", provider);
+
+        assert_eq!(
+            broker.inspect("secret://fixture/present").unwrap(),
+            SecretPresence::Present
+        );
+        assert_eq!(
+            broker.inspect("secret://fixture/missing").unwrap(),
+            SecretPresence::Missing
+        );
+        assert_eq!(
+            broker.inspect("secret://unregistered/value").unwrap(),
+            SecretPresence::Unavailable,
+            "an absent backend is not authoritative absence"
+        );
+    }
+
+    #[derive(Debug)]
+    struct UnavailableProvider;
+
+    impl SecretProvider for UnavailableProvider {
+        fn resolve(&self, _uri: &str) -> Result<SecretHandle, SecretError> {
+            Err(SecretError::ProviderUnavailable(
+                "fixture backend unavailable".to_string(),
+            ))
+        }
+    }
+
+    #[test]
+    fn inspect_maps_backend_failure_to_unavailable_without_exposing_bytes() {
+        let broker = SecretBroker::new();
+        broker.register_provider("fixture", std::sync::Arc::new(UnavailableProvider));
+
+        assert_eq!(
+            broker.inspect("secret://fixture/value").unwrap(),
+            SecretPresence::Unavailable
+        );
     }
 
     #[test]
