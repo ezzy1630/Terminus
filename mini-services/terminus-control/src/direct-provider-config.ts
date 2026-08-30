@@ -12,6 +12,7 @@ import { z } from "zod";
 import type { Micros, ModelKey, Rfc3339Timestamp } from "@terminus/domain";
 import {
   loadOfflineCatalogSnapshot,
+  resolveModelFamily,
   resolveMaxOutputTokens,
   resolveTestedSafeContextTokens,
   type ProviderCapabilitySnapshot,
@@ -141,9 +142,14 @@ export function configuredDirectProviderSnapshot(
   const digest = createHash("sha256")
     .update(JSON.stringify({ vendor: model.vendor, protocol: model.protocol, model: model.id }), "utf8")
     .digest("hex");
+  const explicitOpenAiCaching = model.vendor === "openai"
+    && model.protocol === "responses"
+    && resolveModelFamily(model.id) === "gpt-5.6";
   const caching = model.vendor === "anthropic"
     ? { mode: "explicit_breakpoints" as const, exactPrefixRequired: true, minimumTokens: 2_048, ttlOptions: [], toolOrderSensitive: true, usageReporting: true }
-    : { mode: "automatic_prefix" as const, exactPrefixRequired: false, minimumTokens: 0, ttlOptions: [], toolOrderSensitive: false, usageReporting: true };
+    : explicitOpenAiCaching
+      ? { mode: "explicit_breakpoints" as const, exactPrefixRequired: true, minimumTokens: 1_024, ttlOptions: ["30m"], toolOrderSensitive: true, usageReporting: true }
+      : { mode: "automatic_prefix" as const, exactPrefixRequired: false, minimumTokens: 0, ttlOptions: [], toolOrderSensitive: false, usageReporting: true };
   return {
     providerId: directProviderId(model.vendor),
     observedAt,

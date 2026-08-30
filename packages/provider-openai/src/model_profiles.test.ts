@@ -38,6 +38,11 @@ describe("OpenAI provider-owned profiles", () => {
       expect("continuationStrategy" in model).toBe(false);
       expect(rendering.continuationStrategy).toBe("server_history");
       expect(rendering.toolDialect).toBe("responses_function_tools");
+      expect(rendering.caching).toEqual({
+        mode: "explicit_breakpoints",
+        minimumTokens: 1_024,
+        exactPrefixRequired: true,
+      });
     }
   });
 });

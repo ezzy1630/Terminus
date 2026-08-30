@@ -14,7 +14,7 @@ export interface OpenAiRenderingProfile extends ProviderRenderingProfile {
   readonly toolDialect: "responses_function_tools";
   readonly continuationStrategy: "server_history";
   readonly caching: {
-    readonly mode: "automatic_prefix";
+    readonly mode: "explicit_breakpoints";
     readonly minimumTokens: number;
     readonly exactPrefixRequired: true;
   };
@@ -63,7 +63,7 @@ function openAiProfile(
     continuationStrategy: "server_history",
     compactionStrategy: "structured_claims_with_evidence",
     caching: {
-      mode: "automatic_prefix",
+      mode: "explicit_breakpoints",
       minimumTokens: 1_024,
       exactPrefixRequired: true,
     },

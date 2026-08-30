@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { dispatchNativeRequest, type NativeTransportDeps } from "./native-provider-runtime.js";
+import { dispatchOpenAI } from "./openai-runtime.js";
 import type {
   ProviderEconomics,
   ProviderResponseChunk,
@@ -167,6 +168,32 @@ describe("dispatchNativeRequest", () => {
     expect(result.costReconciliationMicros).toBeNull();
     expect(result.budgetStateAfter).not.toBeNull();
     expect(result.budgetStateAfter?.requestSpent).toBe(0n);
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  test("OpenAI dispatch bounds an executor-supplied prompt cache key", async () => {
+    process.env.OPENAI_API_KEY = "k";
+    let sentBody: Readonly<Record<string, unknown>> | null = null;
+    const key = `workspace:customer-visible-name:${"x".repeat(80)}`;
+    await dispatchOpenAI({
+      ...baseInput,
+      rendered: renderedRequest(),
+      protocol: "responses",
+      promptCacheKey: key,
+      postSse: async (input) => {
+        sentBody = input.body;
+        async function* stream(): AsyncIterable<Uint8Array> {
+          yield new TextEncoder().encode(
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1"}}\n\n',
+          );
+        }
+        return stream();
+      },
+    });
+    const cacheKey = sentBody?.prompt_cache_key;
+    expect(typeof cacheKey).toBe("string");
+    expect((cacheKey as string).length).toBeLessThanOrEqual(64);
+    expect(cacheKey).not.toContain("customer-visible-name");
     delete process.env.OPENAI_API_KEY;
   });
 

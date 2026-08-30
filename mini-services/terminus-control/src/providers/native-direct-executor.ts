@@ -93,6 +93,7 @@ export function createNativeDirectExecutor(options: NativeDirectExecutorOptions)
       protocol: options.configuration.protocol === "chat_completions" ? "chat_completions" : "responses",
       signal: execInput.signal ?? execInput.rendered.request.signal,
       postSse,
+      ...(options.promptCacheKey === undefined ? {} : { promptCacheKey: options.promptCacheKey }),
       ...(options.onChunk === undefined ? {} : { onChunk: options.onChunk }),
     });
   };
