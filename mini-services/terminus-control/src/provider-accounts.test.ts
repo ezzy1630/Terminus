@@ -4,6 +4,7 @@ import { describe, expect, test } from "bun:test";
 import {
   ZEN_SOURCE,
   chooseDefaultAccount,
+  connectLocalProviderAccount,
   discoverAndConnectLocalAccounts,
   mapGatewayConfiguration,
   mapLocalCredential,
@@ -221,7 +222,7 @@ describe("mapLocalCredential", () => {
     expect(online.statusDetail).toContain("models.dev has no provider");
   });
 
-  test("the Codex login maps to the ChatGPT endpoint and subscription billing", () => {
+  test("the Codex login is visible but unsupported by the Terminus-owned transport", () => {
     const mapping = mapLocalCredential({
       credential: credential({
         source: "codex-chatgpt",
@@ -234,14 +235,11 @@ describe("mapLocalCredential", () => {
     });
     expect(mapping).toMatchObject({
       vendorId: "openai",
-      host: "chatgpt.com",
-      baseUrl: "https://chatgpt.com/backend-api/codex",
-      protocol: "responses",
-      connectorId: "chatgpt-codex",
-      renderProfile: "chatgpt_codex",
       billing: "subscription",
-      status: "connected",
+      status: "unsupported",
     });
+    expect(mapping.baseUrl).toBe("");
+    expect(mapping.host).toBe("");
     expect(JSON.parse(mapping.metadataJson)).toEqual({
       account_id: "acct-1",
       email: "user@example.test",
@@ -249,7 +247,7 @@ describe("mapLocalCredential", () => {
     });
   });
 
-  test("an expired ChatGPT token is expired, with the sign-in instruction", () => {
+  test("an expired ChatGPT token remains unsupported, not routable", () => {
     const mapping = mapLocalCredential({
       credential: credential({
         source: "codex-chatgpt",
@@ -259,8 +257,8 @@ describe("mapLocalCredential", () => {
       catalog: CATALOG,
       nowMs: NOW_MS,
     });
-    expect(mapping.status).toBe("expired");
-    expect(mapping.statusDetail).toContain("codex");
+    expect(mapping.status).toBe("unsupported");
+    expect(mapping.statusDetail).toContain("App Server");
     expect(mapping.expiresAt?.getTime()).toBe((Math.floor(NOW_MS / 1_000) - 60) * 1_000);
   });
 });
@@ -355,11 +353,6 @@ function fakeDependencies(input: {
         store.rows.set(upsert.source, row);
         return row;
       },
-      setDefaultAccount: async (id: string) => {
-        for (const [source, row] of store.rows) {
-          store.rows.set(source, { ...row, isDefault: row.id === id });
-        }
-      },
       readGatewayConfiguration: async () => input.gateway ?? null,
       fetchCatalog: async () => ({ catalog: CATALOG, offline: false }),
       newAccountId: () => `account-${(counter += 1)}`,
@@ -386,14 +379,14 @@ describe("discoverAndConnectLocalAccounts", () => {
       status: "connected",
       billing: "free",
       credentialUri: "",
-      isDefault: true,
+      isDefault: false,
     });
     expect(store.rows.get(ZEN_SOURCE)?.metadataJson).toBe(
       JSON.stringify({ connection_origin: "installed_opencode" }),
     );
   });
 
-  test("imports every routable credential into its own provider-account URI", async () => {
+  test("discovery never imports local credentials or chooses an API account", async () => {
     const { dependencies, store } = fakeDependencies({
       credentials: [
         credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" }),
@@ -410,16 +403,10 @@ describe("discoverAndConnectLocalAccounts", () => {
 
     expect(result.accounts).toHaveLength(3);
     expect(result.warnings).toEqual(["local-auth-store: one entry did not decode"]);
-    expect(result.imported).toHaveLength(2);
-    // The unsupported entry is visible but its secret is never copied: nothing
-    // would ever read it.
-    expect(store.imports.map((entry) => entry.source).sort()).toEqual([
-      "codex-chatgpt",
-      "opencode:cerebras",
-    ]);
-    for (const entry of store.imports) {
-      expect(entry.capabilityUri).toMatch(/^secret:\/\/provider-account\/account-\d+$/);
-    }
+    expect(result.imported).toHaveLength(0);
+    expect(store.imports).toHaveLength(0);
+    expect(result.accounts.find((row) => row.source === "opencode:cerebras")?.status).toBe("disconnected");
+    expect(result.accounts.find((row) => row.source === "codex-chatgpt")?.status).toBe("unsupported");
     expect(store.rows.get("opencode:amazon-bedrock")?.credentialUri).toBe("");
     expect(store.rows.get("opencode:amazon-bedrock")?.status).toBe("unsupported");
   });
@@ -437,7 +424,7 @@ describe("discoverAndConnectLocalAccounts", () => {
     expect(store.rows.get("opencode:cerebras")?.id).toBe(before.id);
   });
 
-  test("a rotated key is re-imported under the same account and reported", async () => {
+  test("a rotated key stays disconnected until an explicit connect", async () => {
     const store: FakeStore = { rows: new Map(), imports: [] };
     await discoverAndConnectLocalAccounts(fakeDependencies({
       credentials: [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })],
@@ -451,19 +438,15 @@ describe("discoverAndConnectLocalAccounts", () => {
       store,
     }).dependencies);
 
-    expect(store.imports).toHaveLength(1);
-    expect(store.imports[0]).toMatchObject({
-      capabilityUri: before.credentialUri,
-      fingerprint: "dddddddddddd",
-    });
-    expect(rotated.imported).toEqual([before.id]);
+    expect(store.imports).toHaveLength(0);
+    expect(rotated.imported).toEqual([]);
     const after = store.rows.get("opencode:cerebras")!;
     expect(after.id).toBe(before.id);
     expect(after.fingerprint).toBe("dddddddddddd");
     expect(after.revision).toBeGreaterThan(before.revision);
   });
 
-  test("the singleton gateway row becomes one zen account and never the first default", async () => {
+  test("the singleton gateway row is the default until an API account is connected", async () => {
     const { dependencies, store } = fakeDependencies({
       credentials: [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })],
       gateway: {
@@ -481,8 +464,7 @@ describe("discoverAndConnectLocalAccounts", () => {
     expect(zen?.renderProfile).toBe("zen_gateway");
     expect(zen?.credentialUri).toBe("");
     const defaults = result.accounts.filter((row) => row.isDefault);
-    expect(defaults).toHaveLength(1);
-    expect(defaults[0]?.source).toBe("opencode:cerebras");
+    expect(defaults).toHaveLength(0);
   });
 
   test("the shared gateway is the default only when it is the only usable account", async () => {
@@ -497,7 +479,7 @@ describe("discoverAndConnectLocalAccounts", () => {
       },
     });
     await discoverAndConnectLocalAccounts(dependencies);
-    expect(store.rows.get(ZEN_SOURCE)?.isDefault).toBe(true);
+    expect(store.rows.get(ZEN_SOURCE)?.isDefault).toBe(false);
   });
 
   test("a kernel that cannot answer leaves existing accounts alone", async () => {
@@ -512,14 +494,14 @@ describe("discoverAndConnectLocalAccounts", () => {
     expect(result.warnings[0]).toContain("kernel unavailable");
   });
 
-  test("a credential the kernel can no longer resolve is re-imported", async () => {
+  test("a credential the kernel can no longer resolve becomes disconnected", async () => {
     const store: FakeStore = { rows: new Map(), imports: [] };
     const credentials = [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })];
     await discoverAndConnectLocalAccounts(
       fakeDependencies({ credentials, store, credentialResolves: async () => true }).dependencies,
     );
     const before = store.rows.get("opencode:cerebras")!;
-    expect(before.credentialUri).not.toBe("");
+    expect(before.credentialUri).toBe("");
     store.imports.length = 0;
 
     // The kernel's secret backend changed under us: the row still names a URI
@@ -536,18 +518,14 @@ describe("discoverAndConnectLocalAccounts", () => {
       }).dependencies,
     );
 
-    expect(probed).toEqual([before.credentialUri]);
-    expect(store.imports).toHaveLength(1);
-    expect(store.imports[0]).toMatchObject({
-      capabilityUri: before.credentialUri,
-      fingerprint: "aaaaaaaaaaaa",
-    });
-    expect(recovered.imported).toEqual([before.id]);
-    expect(store.rows.get("opencode:cerebras")?.credentialUri).toBe(before.credentialUri);
-    expect(store.rows.get("opencode:cerebras")?.status).toBe("connected");
+    expect(probed).toEqual([]);
+    expect(store.imports).toHaveLength(0);
+    expect(recovered.imported).toEqual([]);
+    expect(store.rows.get("opencode:cerebras")?.credentialUri).toBe("");
+    expect(store.rows.get("opencode:cerebras")?.status).toBe("disconnected");
   });
 
-  test("a resolvable credential is not re-imported", async () => {
+  test("a disconnected credential remains disconnected during discovery", async () => {
     const store: FakeStore = { rows: new Map(), imports: [] };
     const credentials = [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })];
     await discoverAndConnectLocalAccounts(
@@ -562,7 +540,7 @@ describe("discoverAndConnectLocalAccounts", () => {
     expect(second.imported).toHaveLength(0);
   });
 
-  test("a failing resolution probe fails open rather than re-importing", async () => {
+  test("a failing resolution probe does not import during discovery", async () => {
     const store: FakeStore = { rows: new Map(), imports: [] };
     const credentials = [credential({ source: "opencode:cerebras", fingerprint: "aaaaaaaaaaaa" })];
     await discoverAndConnectLocalAccounts(
@@ -583,7 +561,58 @@ describe("discoverAndConnectLocalAccounts", () => {
 
     expect(store.imports).toHaveLength(0);
     expect(result.imported).toHaveLength(0);
-    expect(warnings.join("\n")).toContain("kernel restarting");
+    expect(warnings.join("\n")).not.toContain("kernel restarting");
+  });
+
+  test("explicit consent is required before an OpenCode API key import", async () => {
+    const store: FakeStore = { rows: new Map(), imports: [] };
+    const { dependencies } = fakeDependencies({
+      credentials: [credential({ fingerprint: "aaaaaaaaaaaa" })],
+      store,
+    });
+    const detected = await discoverAndConnectLocalAccounts(dependencies);
+    const detectedAccount = detected.accounts.find((row) => row.source === "opencode:cerebras");
+    expect(detectedAccount?.status).toBe("disconnected");
+    expect(detectedAccount).toBeDefined();
+    await expect(connectLocalProviderAccount({
+      ...dependencies,
+      importLocal: dependencies.importLocal!,
+      account: detectedAccount!,
+      expectedRevision: detectedAccount!.revision,
+      userConsent: false,
+    })).rejects.toThrow("explicit user consent");
+    expect(store.imports).toHaveLength(0);
+
+    const connected = await connectLocalProviderAccount({
+      ...dependencies,
+      importLocal: dependencies.importLocal!,
+      account: detectedAccount!,
+      expectedRevision: detectedAccount!.revision,
+      userConsent: true,
+    });
+    expect(store.imports).toHaveLength(1);
+    expect(store.imports[0]?.source).toBe("opencode:cerebras");
+    expect(connected.credentialUri).toMatch(/^secret:\/\/provider-account\//);
+    expect(connected.status).toBe("connected");
+  });
+
+  test("Codex credentials cannot be imported even with consent", async () => {
+    const store: FakeStore = { rows: new Map(), imports: [] };
+    const { dependencies } = fakeDependencies({
+      credentials: [credential({ source: "codex-chatgpt", authKind: "chatgpt" })],
+      store,
+    });
+    const detected = await discoverAndConnectLocalAccounts(dependencies);
+    const codex = detected.accounts.find((row) => row.source === "codex-chatgpt");
+    expect(codex?.status).toBe("unsupported");
+    await expect(connectLocalProviderAccount({
+      ...dependencies,
+      importLocal: dependencies.importLocal!,
+      account: codex!,
+      expectedRevision: codex!.revision,
+      userConsent: true,
+    })).rejects.toThrow("Codex");
+    expect(store.imports).toHaveLength(0);
   });
 });
 

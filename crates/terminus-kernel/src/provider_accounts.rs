@@ -1,10 +1,11 @@
 //! Connected provider accounts — credentials that already live on this
 //! machine (design `Provider_Accounts_Design_2026-08-28.md` Part 2/4).
 //!
-//! Terminus's own loop drives every model. Other local tools are only a
-//! place where credentials already exist, so the kernel reads their stores
-//! directly and moves a credential straight into the OS keyring under
-//! `secret://provider-account/<uuid-v7>`.
+//! Terminus's own loop drives every model. OpenCode's local API-key store is
+//! an explicit-consent source for supported transports. The Codex CLI login
+//! is intentionally not read because its ChatGPT subscription token has no
+//! supported Terminus-owned inference boundary; Codex is surfaced only as an
+//! installed tool for a separate App Server lane.
 //!
 //! Two guarantees hold at this boundary:
 //!
@@ -43,9 +44,6 @@ const OPENCODE_DATA_DIR: &str = "opencode";
 /// Relative fallback for the OpenCode data directory when `XDG_DATA_HOME` is
 /// unset: `$HOME/.local/share/<OPENCODE_DATA_DIR>`.
 const XDG_DATA_FALLBACK: [&str; 2] = [".local", "share"];
-/// Directory under `$HOME` that holds the Codex auth store when `CODEX_HOME`
-/// is unset.
-const CODEX_HOME_DIR: &str = ".codex";
 /// Executable names probed on `PATH` (never executed).
 const OPENCODE_BINARY: &str = "opencode";
 const CODEX_BINARY: &str = "codex";
@@ -53,8 +51,6 @@ const CODEX_BINARY: &str = "codex";
 /// Hard ceiling on a local credential store. Both stores are a few KiB in
 /// practice; anything larger is refused rather than read.
 const MAX_STORE_BYTES: u64 = 64 * 1_024;
-/// Ceiling on one base64url JWT segment before decoding it.
-const MAX_JWT_SEGMENT_BYTES: usize = 16 * 1_024;
 /// Ceiling on an OpenCode provider id accepted as a `source` suffix.
 const MAX_PROVIDER_ID_BYTES: usize = 128;
 /// Ceiling on `PATH` entries scanned by the install probe.
@@ -77,8 +73,6 @@ pub const DISCOVER_LOCAL_SCOPE: &str = "secret://provider-account/discover";
 pub enum LocalCredentialStore {
     /// The OpenCode CLI auth store.
     OpencodeAuthStore,
-    /// The Codex CLI auth store.
-    CodexAuthStore,
 }
 
 impl LocalCredentialStore {
@@ -86,7 +80,6 @@ impl LocalCredentialStore {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OpencodeAuthStore => "opencode-auth-store",
-            Self::CodexAuthStore => "codex-auth-store",
         }
     }
 }
@@ -207,8 +200,6 @@ pub struct ImportedLocalCredential {
 pub struct LocalCredentialRoots {
     /// Directory holding the OpenCode auth store (`<dir>/auth.json`).
     pub opencode_dir: Option<PathBuf>,
-    /// Directory holding the Codex auth store (`<dir>/auth.json`).
-    pub codex_dir: Option<PathBuf>,
     /// `PATH` used for the install probe. `None` reads the process `PATH`.
     pub path_override: Option<std::ffi::OsString>,
     /// User home used for standard per-user CLI install locations.
@@ -216,10 +207,10 @@ pub struct LocalCredentialRoots {
 }
 
 impl LocalCredentialRoots {
-    /// Resolve both store roots from the environment:
-    /// `$XDG_DATA_HOME/opencode` else `$HOME/.local/share/opencode`, and
-    /// `$CODEX_HOME` else `$HOME/.codex`. A root that cannot be resolved is
-    /// `None` and is treated as "store absent" — not an error.
+    /// Resolve the supported store root from the environment:
+    /// `$XDG_DATA_HOME/opencode` else `$HOME/.local/share/opencode`. A root
+    /// that cannot be resolved is `None` and is treated as "store absent".
+    /// The Codex auth store is deliberately never read.
     #[must_use]
     pub fn from_environment() -> Self {
         // Packaged desktop runtimes isolate their writable state by setting
@@ -241,12 +232,8 @@ impl LocalCredentialRoots {
                     path
                 })
             });
-        let codex_dir = non_empty_env("CODEX_HOME")
-            .map(PathBuf::from)
-            .or_else(|| home.as_ref().map(|home| home.join(CODEX_HOME_DIR)));
         Self {
             opencode_dir,
-            codex_dir,
             path_override: None,
             home_dir: home,
         }
@@ -266,12 +253,6 @@ impl LocalCredentialRoots {
     }
 
     #[must_use]
-    pub fn with_codex_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.codex_dir = Some(dir.into());
-        self
-    }
-
-    #[must_use]
     pub fn with_path_override(mut self, path: impl Into<std::ffi::OsString>) -> Self {
         self.path_override = Some(path.into());
         self
@@ -285,12 +266,6 @@ impl LocalCredentialRoots {
 
     fn opencode_store(&self) -> Option<PathBuf> {
         self.opencode_dir
-            .as_ref()
-            .map(|dir| dir.join(AUTH_STORE_FILE_NAME))
-    }
-
-    fn codex_store(&self) -> Option<PathBuf> {
-        self.codex_dir
             .as_ref()
             .map(|dir| dir.join(AUTH_STORE_FILE_NAME))
     }
@@ -431,6 +406,11 @@ impl ProviderAccountService {
         if source.is_empty() || source.len() > MAX_PROVIDER_ID_BYTES + "opencode:".len() {
             return Err(invalid("source must be a discovered source id"));
         }
+        if source == "codex-chatgpt" {
+            return Err(invalid(
+                "Codex subscription credentials are not importable; use the separate Codex App Server lane",
+            ));
+        }
         tracing::info!(
             target: "terminus_kernel_audit",
             event = "authorized",
@@ -487,9 +467,8 @@ impl ProviderAccountService {
         })
     }
 
-    /// Read both stores. Returns entries in a deterministic order
-    /// (OpenCode entries sorted by provider id, then the Codex login) and the
-    /// warnings for stores that exist but could not be used.
+    /// Read the supported local store. Codex installation status is still
+    /// reported by `binary_on_path`, but its auth store is never opened.
     fn collect(&self) -> (Vec<DiscoveredEntry>, Vec<String>) {
         let mut entries = Vec::new();
         let mut warnings = Vec::new();
@@ -502,16 +481,6 @@ impl ProviderAccountService {
             StoreRead::Rejected(warning) => warnings.push(warning),
             StoreRead::Loaded(document) => {
                 decode_opencode_store(&document, &mut entries, &mut warnings);
-            }
-        }
-        match load_store(
-            self.roots.codex_store().as_deref(),
-            LocalCredentialStore::CodexAuthStore,
-        ) {
-            StoreRead::Missing => {}
-            StoreRead::Rejected(warning) => warnings.push(warning),
-            StoreRead::Loaded(document) => {
-                decode_codex_store(&document, &mut entries, &mut warnings);
             }
         }
         (entries, warnings)
@@ -735,90 +704,6 @@ fn is_admissible_provider_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
-// ---------- Codex auth store ----------
-
-/// Decode the Codex CLI auth store. Only a ChatGPT login is imported in v1;
-/// an API-key login is surfaced as a warning rather than silently ignored.
-fn decode_codex_store(
-    document: &serde_json::Value,
-    entries: &mut Vec<DiscoveredEntry>,
-    warnings: &mut Vec<String>,
-) {
-    let store = LocalCredentialStore::CodexAuthStore;
-    let Some(object) = document.as_object() else {
-        warnings.push(format!("{store}: is not a JSON object"));
-        return;
-    };
-    let auth_mode = object
-        .get("auth_mode")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    if auth_mode != "chatgpt" {
-        warnings.push(format!(
-            "{store}: sign-in mode is not a ChatGPT login; only ChatGPT logins are connected in v1"
-        ));
-        return;
-    }
-    let tokens = object.get("tokens").and_then(serde_json::Value::as_object);
-    let Some(access_token) = tokens
-        .and_then(|tokens| tokens.get("access_token"))
-        .and_then(json_string)
-    else {
-        warnings.push(format!(
-            "{store}: the ChatGPT login has no access token; run the Codex CLI and sign in again"
-        ));
-        return;
-    };
-
-    let mut metadata = LocalCredentialMetadata {
-        account_id: tokens
-            .and_then(|tokens| tokens.get("account_id"))
-            .and_then(json_string),
-        ..LocalCredentialMetadata::default()
-    };
-    let mut expires_at_unix = 0;
-    match jwt_payload(&access_token) {
-        Some(payload) => {
-            expires_at_unix = payload.get("exp").and_then(json_u64).unwrap_or(0);
-            if let Some(auth) = payload
-                .get("https://api.openai.com/auth")
-                .and_then(serde_json::Value::as_object)
-            {
-                if metadata.account_id.is_none() {
-                    metadata.account_id = auth.get("chatgpt_account_id").and_then(json_string);
-                }
-                metadata.plan_type = auth.get("chatgpt_plan_type").and_then(json_string);
-            }
-        }
-        None => warnings.push(format!(
-            "{store}: the ChatGPT access token could not be decoded; its expiry is unknown"
-        )),
-    }
-    if let Some(email) = tokens
-        .and_then(|tokens| tokens.get("id_token"))
-        .and_then(json_string)
-        .and_then(|id_token| jwt_payload(&id_token))
-        .as_ref()
-        .and_then(|payload| payload.get("email"))
-        .and_then(json_string)
-    {
-        metadata.email = Some(email);
-    }
-    entries.push(DiscoveredEntry {
-        credential: LocalProviderCredential {
-            source: "codex-chatgpt".to_string(),
-            auth_kind: LocalAuthKind::Chatgpt,
-            fingerprint: fingerprint(access_token.as_bytes()),
-            metadata,
-            expires_at_unix,
-            store,
-        },
-        // The `chatgpt-codex` connector injects these bytes verbatim as the
-        // bearer token, so they are stored exactly as read.
-        secret: access_token.into_bytes(),
-    });
-}
-
 // ---------- helpers ----------
 
 /// First 12 hex characters of SHA-256 over the secret bytes: enough to notice
@@ -849,46 +734,6 @@ fn json_u64(value: &serde_json::Value) -> Option<u64> {
         return None;
     }
     Some(number.trunc() as u64)
-}
-
-/// Decode the payload of a JWT without verifying its signature. The kernel
-/// only reads non-secret claims (`exp`, account id, plan type, email) out of
-/// a token it already holds; nothing is authorized on the strength of them.
-fn jwt_payload(token: &str) -> Option<serde_json::Value> {
-    let mut parts = token.split('.');
-    let _header = parts.next()?;
-    let payload = parts.next()?;
-    parts.next()?;
-    if parts.next().is_some() || payload.is_empty() || payload.len() > MAX_JWT_SEGMENT_BYTES {
-        return None;
-    }
-    let decoded = decode_base64url(payload)?;
-    serde_json::from_slice(&decoded).ok()
-}
-
-/// Minimal base64url decoder (RFC 4648 §5, padding optional).
-fn decode_base64url(input: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(input.len() / 4 * 3 + 3);
-    let mut accumulator: u32 = 0;
-    let mut bits: u32 = 0;
-    for byte in input.bytes() {
-        let value: u8 = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'-' => 62,
-            b'_' => 63,
-            b'=' => break,
-            _ => return None,
-        };
-        accumulator = (accumulator << 6) | u32::from(value);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(u8::try_from((accumulator >> bits) & 0xFF).ok()?);
-        }
-    }
-    Some(out)
 }
 
 /// The import destination must be inside the connected-provider-account
@@ -953,14 +798,6 @@ mod tests {
         assert_eq!(value.len(), 12);
         assert!(value.bytes().all(|b| b.is_ascii_hexdigit()));
         assert_ne!(value, fingerprint(b"fixture-not-a-real-key-2"));
-    }
-
-    #[test]
-    fn base64url_round_trips_a_json_payload() {
-        // "{"a":1}" encoded without padding.
-        let decoded = decode_base64url("eyJhIjoxfQ").expect("decodes");
-        assert_eq!(decoded, br#"{"a":1}"#);
-        assert!(decode_base64url("not base64!").is_none());
     }
 
     #[test]

@@ -36,15 +36,6 @@ export interface ProviderGatewayConfig {
    * account id, originator, session id). The bearer is injected in the kernel.
    */
   readonly extraHeaders?: Readonly<Record<string, string>> | undefined;
-  /**
-   * Turn-scoped Codex continuity. The endpoint returns `x-codex-turn-state`
-   * on one response and expects it echoed on the next request of the same
-   * turn, so the token cannot live in the per-attempt header record built at
-   * turn start — it is read and refreshed on every dispatch.
-   */
-  readonly codexTurnState?: import("@terminus/provider-openai").CodexTurnState | undefined;
-  /** The connected account, so its rate-limit receipt can be recorded. */
-  readonly accountId?: string | undefined;
 }
 
 /** Vendor-direct dispatch target resolved by the caller (ADR-0039 §10). */

@@ -51,6 +51,14 @@ capability. Models.dev provides provider-owned protocol and capability metadata.
    binding. That mode is paired with the registered anonymous connector and
    is rejected for paid or undiscovered models; it is not a claim about
    retention, training, or privacy beyond the separately admitted terms.
+   Local OpenCode auth-store discovery is metadata-only. An API-key or
+   well-known entry is copied into a `provider-account` capability only after
+   an explicit user consent request with an expected account revision. OAuth
+   and custom configurations that Terminus cannot preserve fail closed and
+   remain visible as unavailable.
+   ChatGPT/Codex subscription credentials are never read from the Codex CLI
+   auth store and are not sent to the undocumented ChatGPT backend. A future
+   Codex App Server adapter, if admitted, is a separate external-harness lane.
 8. Gateway profiles allow public context by default. Sending repository content
    requires both `workspace_access: true` and a persisted admission record for
    the current provider terms. The record contains the deployment-specific
@@ -69,9 +77,12 @@ capability. Models.dev provides provider-owned protocol and capability metadata.
 
 - Users may use Zen free models or a Go subscription with the Terminus agent
   loop.
-- OpenCode installation is unnecessary. An installed OpenCode credential may
-  be imported only through an explicit secret-store operation, never read
-  ambiently by the provider.
+- OpenCode installation is unnecessary. An installed OpenCode credential is
+  discovered without importing it and may be copied only through an explicit,
+  revision-checked consent operation; OAuth and unsupported custom entries are
+  never routable.
+- A Codex CLI installation is reported as an available external integration,
+  but its subscription credential is not imported or dispatched by Terminus.
 - Catalog drift becomes visible. A newly listed model is unavailable until its
   protocol metadata decodes and its capability profile passes conformance.
 - Provider responses cross the kernel RPC as one bounded, scrubbed body. The
