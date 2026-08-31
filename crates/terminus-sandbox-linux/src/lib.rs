@@ -221,8 +221,8 @@ impl LinuxSandboxBackend {
     /// - `--unshare-all` — user, pid, mount, ipc, uts namespaces.
     /// - `--unshare-net` (only when `profile.network == Deny|ProxyRequired`).
     /// - A MINIMAL ROOT built from an empty directory plus explicit runtime
-    ///   tree binds (`/usr`, `/sys`, merged-/usr symlinks) — the host root
-    ///   itself is never exposed.
+    ///   tree binds (`/usr`, `/sys`, merged-/usr symlinks), remounted
+    ///   read-only before the payload — the host root is never exposed.
     /// - Exact workspace binds from materialized filesystem rules, with
     ///   Deny-rule tmpfs overlays emitted after parent binds.
     /// - `--clearenv` plus synthetic `HOME`/`TMPDIR`/`PATH` and the caller's
@@ -283,6 +283,15 @@ impl LinuxSandboxBackend {
         argv.push("/proc".to_string());
         argv.push("--dev".to_string());
         argv.push("/dev".to_string());
+
+        // Mount targets may be arbitrary absolute workspace paths. Keep the
+        // empty root writable only while Bubblewrap constructs those mounts,
+        // then freeze the root before it starts the trusted payload launcher.
+        // Child bind/tmpfs mounts retain their own explicit access modes.
+        if plan.minimal_root {
+            argv.push("--remount-ro".to_string());
+            argv.push("/".to_string());
+        }
 
         // Lifecycle isolation.
         argv.push("--die-with-parent".to_string());
@@ -974,7 +983,7 @@ mod tests {
         let cmd = simple_command("ls");
         let argv = LinuxSandboxBackend::build_bwrap_argv(&cmd, &restrictive_profile());
         // Empty root bind present.
-        let has_root_bind = argv.windows(3).any(|w| w[0] == "--ro-bind" && w[2] == "/");
+        let has_root_bind = argv.windows(3).any(|w| w[0] == "--bind" && w[2] == "/");
         assert!(has_root_bind, "minimal empty root missing: {argv:?}");
         // /usr read-only.
         assert!(argv
@@ -986,6 +995,34 @@ mod tests {
         assert!(argv.contains(&"--dev".to_string()));
         assert!(argv.contains(&"/dev".to_string()));
         assert!(argv.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == "/tmp"));
+        let root_bind = argv
+            .windows(3)
+            .position(|w| w[0] == "--bind" && w[2] == "/")
+            .expect("minimal root bind");
+        let usr_bind = argv
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind" && w[1] == "/usr" && w[2] == "/usr")
+            .expect("runtime bind");
+        let root_remount = argv
+            .windows(2)
+            .position(|w| w[0] == "--remount-ro" && w[1] == "/")
+            .expect("read-only root remount");
+        let command = argv
+            .iter()
+            .position(|value| value == "--")
+            .expect("command separator");
+        assert!(
+            root_bind < usr_bind,
+            "root must exist before mount targets: {argv:?}"
+        );
+        assert!(
+            usr_bind < root_remount,
+            "mount targets must precede root freeze: {argv:?}"
+        );
+        assert!(
+            root_remount < command,
+            "root must be read-only before payload: {argv:?}"
+        );
     }
 
     #[test]

@@ -37,7 +37,8 @@ pub enum MountOp {
     Tmpfs(String),
     /// Guest symlink (used for merged-/usr layouts).
     Symlink(String, String),
-    /// Empty host directory bound read-only at `/` — the minimal root.
+    /// Empty host directory bound at `/` while Bubblewrap constructs mount
+    /// points. The argv builder remounts it read-only before the payload.
     EmptyRoot(String),
 }
 
@@ -65,7 +66,7 @@ impl MountOp {
                 argv.push(link.clone());
             }
             MountOp::EmptyRoot(dir) => {
-                argv.push("--ro-bind".into());
+                argv.push("--bind".into());
                 argv.push(dir.clone());
                 argv.push("/".to_string());
             }
@@ -214,9 +215,12 @@ pub(crate) fn plan_mounts_with_source_check(
         ..Default::default()
     };
 
-    // Minimal root: an empty read-only directory at `/`. When unavailable
-    // the caller must fail closed (the backend refuses to claim
-    // FilesystemIsolation without it).
+    // Minimal root: an empty directory at `/`. Bubblewrap needs it writable
+    // during setup so it can create targets such as `/usr`, `/proc`, and an
+    // arbitrary absolute workspace path. The argv builder remounts `/`
+    // read-only after every mount is in place and before starting the payload.
+    // When unavailable the caller must fail closed (the backend refuses to
+    // claim FilesystemIsolation without it).
     if let Some(root) = empty_root {
         plan.mounts
             .push(MountOp::EmptyRoot(root.display().to_string()));
