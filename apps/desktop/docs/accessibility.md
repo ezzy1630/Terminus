@@ -45,8 +45,8 @@ depend on a row already being visible.
 - `:focus-visible` provides the keyboard focus ring.
 - Light and dark token sets are explicit; the theme store supports system,
   light, and dark modes plus spacious and compact density.
-- Progress marks and loading skeletons are static. Bounded state transitions
-  honor `prefers-reduced-motion`, which also disables smooth scroll.
+- Active progress rings and mounted loading skeletons animate only transform.
+  They stop under `prefers-reduced-motion`, which also disables smooth scroll.
 - The Electron shell and renderer use solid surfaces. Reduce Transparency does
   not reveal a hidden vibrancy dependency.
 - Unit checks hold normal tertiary and placeholder text at WCAG AA contrast on

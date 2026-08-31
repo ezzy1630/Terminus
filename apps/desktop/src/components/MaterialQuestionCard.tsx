@@ -34,6 +34,18 @@ import type { MaterialQuestionSnapshot } from "../types/v2";
 /** Number keys reach the first nine options; past that the mouse is the route. */
 const MAX_KEYED_OPTIONS = 9;
 
+const TRIGGER_LABELS: Readonly<Record<string, string>> = {
+  interpretation_divergence: "Decision needed",
+  irreversible_effect: "Approval needed",
+  ambiguous_scope: "Scope decision",
+  conflicting_constraints: "Constraint conflict",
+};
+
+function triggerLabel(trigger: string): string {
+  return TRIGGER_LABELS[trigger]
+    ?? trigger.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase());
+}
+
 export function MaterialQuestionCard({ taskId }: { taskId: string }): JSX.Element | null {
   const [resolvingOption, setResolvingOption] = useState<string | null>(null);
   const [resolvedIds, setResolvedIds] = useState<Set<string>>(() => new Set());
@@ -103,7 +115,7 @@ export function MaterialQuestionCard({ taskId }: { taskId: string }): JSX.Elemen
 
       <div className="flex items-center gap-1.5">
         <CircleDot size={12} className="shrink-0 text-warning" aria-hidden />
-        <h3 className="ui-meta font-medium text-warning">{question.trigger}</h3>
+        <h3 className="ui-meta font-medium text-warning">{triggerLabel(question.trigger)}</h3>
         {pending.length > 1 ? (
           <span className="ui-meta ml-auto tabular-nums">1 of {pending.length}</span>
         ) : null}

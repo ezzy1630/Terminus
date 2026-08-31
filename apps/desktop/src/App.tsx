@@ -21,7 +21,7 @@
  * task inspector and operator cockpit are split behind React.lazy boundaries.
  */
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, Ellipsis, FolderClosed, MessageCircle, PanelLeft, PanelRight, Search } from "lucide-react";
+import { ArrowLeft, ArrowRight, Ellipsis, FileDiff, FolderClosed, MessageCircle, PanelLeft, PanelRight } from "lucide-react";
 import { Layout } from "./components/Layout";
 import { ConnectionBanner, useConnectionIssueVisible } from "./components/ConnectionBanner";
 import { ProviderAccountsNotice } from "./components/ProviderAccountsNotice";
@@ -32,6 +32,7 @@ import { ResizableReviewLayout } from "./components/ResizableReviewLayout";
 import { SHOW_ACTIVITY_EVENT, Sidebar } from "./components/Sidebar";
 import { FOCUS_QUEUE_EVENT } from "./components/TaskQueue";
 import { Composer } from "./components/Composer";
+import { RunBar } from "./components/RunBar";
 import { NewTaskScreen } from "./components/NewTaskScreen";
 import { MissionBoardView } from "./components/MissionBoardView";
 import { EmptyState } from "./ui/EmptyState";
@@ -856,6 +857,15 @@ export function App(): JSX.Element {
     </Suspense>
   );
 
+  const runBar = selectedTask ? (
+    <RunBar
+      onShowChanges={() => setChangesOpen(true)}
+      onShowDetails={() => {
+        if (!inspectorVisible) toggleInspector();
+      }}
+    />
+  ) : null;
+
   return (
     <>
       <Layout
@@ -932,6 +942,7 @@ export function App(): JSX.Element {
               <ResizableReviewLayout
                 conversation={<div className="flex h-full min-w-0 flex-col">
                   <div className="min-h-0 flex-1">{conversation}</div>
+                  {runBar}
                   <div className="composer-dock shrink-0 pb-3 pt-2">
                     <Composer />
                   </div>
@@ -949,6 +960,7 @@ export function App(): JSX.Element {
                 <div className="min-h-0 flex-1">
                   {conversation}
                 </div>
+                {runBar}
                 <div className="composer-dock shrink-0 pb-3 pt-2">
                   <Composer />
                 </div>
@@ -985,17 +997,22 @@ export function App(): JSX.Element {
               data-tooltip="Forward"
               className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-default disabled:opacity-30"
             />
-            <IconButton
-              onClick={() => openOverlay("palette")}
-              label="Search and commands"
-              icon={<Search size={14} />}
-              data-tooltip={`Search and commands ${shortcutDisplay(FIXED_SHORTCUTS.commandPalette)}`}
-              className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary"
-            />
           </>
         }
         right={
           <>
+            {activeDestination === "chat" && selectedTask ? (
+              <Button
+                type="button"
+                variant="bare"
+                onClick={() => setChangesOpen((open) => !open)}
+                aria-pressed={changesOpen}
+                className="titlebar-no-drag flex h-7 items-center gap-1.5 rounded-md border border-subtle bg-subtle px-2.5 text-xs font-medium text-secondary hover:border-default hover:bg-hover hover:text-primary"
+              >
+                <FileDiff size={12} strokeWidth={1.7} aria-hidden />
+                Changes
+              </Button>
+            ) : null}
             {SURFACES_WITH_INSPECTOR.has(activeDestination) && !changesOpen ? (
               <IconButton
                 onClick={toggleInspector}
@@ -1004,7 +1021,7 @@ export function App(): JSX.Element {
                 icon={<PanelRight size={14} />}
                 aria-pressed={inspectorVisible}
                 data-tooltip={contextTaskId ? (inspectorVisible ? "Hide task context" : "Show task context") : "Task context appears when a task is selected"}
-                className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-35"
+                className="details-trigger icon-button rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-35"
               />
             ) : null}
           </>

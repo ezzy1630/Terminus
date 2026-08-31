@@ -6,7 +6,7 @@
  * surface, and dynamic right inspector.
  *
  * ┌──────────────────────────────────────────────────────────────┐
- * │ Native integrated title bar (draggable, 40px)                │
+ * │ Native integrated title bar (draggable, 48px)                │
  * ├──────────┬───────────────────────────────┬───────────────────┤
  * │ Left     │ Main conversation and working surface              │
  * │ sidebar  │                          ╭─ Dynamic inspector ─╮  │
@@ -50,7 +50,7 @@ interface LayoutProps {
   backgroundInert?: boolean;
 }
 
-const TITLEBAR_HEIGHT = 40;
+const TITLEBAR_HEIGHT = 48;
 const TRAFFIC_LIGHTS_PAD = 80;
 const SIDEBAR_DEFAULT_WIDTH = 276;
 const SIDEBAR_MIN_WIDTH = 220;
@@ -60,6 +60,7 @@ const INSPECTOR_MIN_WIDTH = 260;
 const INSPECTOR_MAX_WIDTH = 420;
 const MIN_MAIN_WIDTH = 360;
 const RESIZE_HANDLE_WIDTH = 4;
+const NARROW_INSPECTOR_BREAKPOINT = 1120;
 // The task-centered shell uses a narrower range than the retired cockpit.
 // Version the preference so an old 380px admin-sidebar setting cannot make
 // the new workspace open at the wrong density.
@@ -230,10 +231,14 @@ function LayoutImpl({
   const [sidebarWidth, setSidebarWidth] = useState(() => readWidth(SIDEBAR_WIDTH_KEY, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH));
   const [inspectorWidth, setInspectorWidth] = useState(() => readWidth(INSPECTOR_WIDTH_KEY, INSPECTOR_DEFAULT_WIDTH, INSPECTOR_MIN_WIDTH, INSPECTOR_MAX_WIDTH));
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  // The details card is useful only while the transcript still has room to
+  // breathe. Narrow windows close it instead of covering composer controls.
+  // The visibility preference stays intact and applies again when widened.
+  const inspectorDocked = inspectorVisible && viewportWidth >= NARROW_INSPECTOR_BREAKPOINT;
   const fittedDocks = fitDockWidths({
     viewportWidth,
     sidebarVisible,
-    inspectorVisible,
+    inspectorVisible: inspectorDocked,
     preferredSidebarWidth: sidebarWidth,
     preferredInspectorWidth: inspectorWidth,
   });
@@ -241,7 +246,7 @@ function LayoutImpl({
     SIDEBAR_MIN_WIDTH,
     Math.min(
       SIDEBAR_MAX_WIDTH,
-      fittedDocks.dockBudget - (inspectorVisible ? INSPECTOR_MIN_WIDTH : 0),
+      fittedDocks.dockBudget - (inspectorDocked ? INSPECTOR_MIN_WIDTH : 0),
     ),
   );
   const inspectorResizeMax = Math.max(
@@ -253,7 +258,7 @@ function LayoutImpl({
   );
   const resizeSidebar = (nextWidth: number): void => {
     setSidebarWidth(nextWidth);
-    if (inspectorVisible && nextWidth + inspectorWidth > fittedDocks.dockBudget) {
+    if (inspectorDocked && nextWidth + inspectorWidth > fittedDocks.dockBudget) {
       setInspectorWidth(Math.max(INSPECTOR_MIN_WIDTH, fittedDocks.dockBudget - nextWidth));
     }
   };
@@ -328,7 +333,7 @@ function LayoutImpl({
             <div className="min-h-0 flex-1 overflow-hidden">{main}</div>
           </section>
 
-          {inspectorVisible ? (
+          {inspectorDocked ? (
             <>
               <ResizeHandle
                 testId="inspector-resize-handle"

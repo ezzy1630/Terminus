@@ -14,7 +14,9 @@ for JavaScript. `useThemeStore` only selects `data-theme` and `data-density`.
 - Radii: 5, 6, 8, and 10px, plus fully round.
 - Elevation: three levels mapped to Tailwind's `shadow-sm`, `shadow-md`, and
   `shadow-lg` utilities.
-- Motion: 120, 180, and 260ms with standard and emphasized easings.
+- Motion: 120, 180, and 260ms with standard and emphasized easings. Active
+  progress uses a 1s transform-only ring; loading skeletons use a
+  transform-only sweep.
 - Layers: base, sticky, popover, dialog, and toast.
 
 Compact density is the desktop default. It uses 28px navigation rows, a 224px
@@ -40,10 +42,11 @@ plain CSS, add arbitrary color values in JSX, or install tokens at runtime.
 ## Interaction
 
 Focus uses one `outline` and inherits each control's own radius. Scrollable
-panes use stable thin scrollbars. Progress rings, loading skeletons, streaming
-carets, and status dots stay static so an active task does not continuously
-repaint the renderer. Finite entrance transitions use the motion scale and stop
-under `prefers-reduced-motion` or the app's Reduce Motion setting.
+panes use stable thin scrollbars. Progress rings rotate only while work is
+active and skeletons sweep only while their loading rows are mounted. Both
+animate `transform` only. Finite entrance transitions use the motion scale.
+All motion stops under `prefers-reduced-motion` or the app's Reduce Motion
+setting.
 
 The Electron window is opaque. The sidebar, canvas, terminal, diff, composer,
 and inspector use explicit surfaces; there is no vibrancy layer to paint over.

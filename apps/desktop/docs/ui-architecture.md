@@ -16,9 +16,10 @@ chat + Changes                   → Conversation + ReviewPane split
 board                            → canonical task board/list + shared inspector
 ```
 
-The sidebar has two explicit modes. Projects owns project and task navigation;
-Activity owns the attention queue and recent work. Agents is intentionally not
-a destination because the current control plane does not expose a complete,
+The sidebar opens to the attention inbox and recent Threads. A project
+switcher owns repository context; the project tree remains a compact secondary
+reading rather than a permanent segmented mode. Agents is intentionally not a
+destination because the current control plane does not expose a complete,
 actionable agent workspace.
 
 The Board projects canonical ARP v2 tasks. An interactive record carries a
@@ -30,9 +31,11 @@ Non-interactive operational records may remain unassigned and open their
 context in the shared inspector. No client title-matches or fabricates
 conversation history.
 
-The shell has a 40px native title bar, a 224px default resizable sidebar,
-primary surface, and resizable docked inspector, hidden by default and
-remembered per task. Overlays are Command Palette,
+The shell has a 48px native title bar, a 276px default resizable sidebar,
+primary surface, and resizable docked details card, hidden by default,
+remembered per task, and automatically closed below 1120px. The task title and
+Changes action stay in the title bar; Search lives with New task and Board in
+the sidebar. Overlays are Command Palette,
 Settings, onboarding, Attention Center, and structured interventions. The
 command catalog is a pure startup dependency; the palette renderer is
 lazy-loaded after the first open request. There is no renderer terminal
@@ -50,7 +53,8 @@ App
 │   ├── TitleBar
 │   ├── Sidebar
 │   ├── primary destination
-│   │   ├── Conversation → Message, ActivityBlock, ApprovalCard, Composer
+│   │   ├── NewTaskScreen → intent shortcuts + Composer
+│   │   ├── Conversation → Message, ActivityBlock, ApprovalCard, RunBar, Composer
 │   │   ├── ReviewPane → DiffViewer
 │   │   └── lazy grouped product view
 │   └── Inspector
@@ -70,13 +74,12 @@ Interactive controls use shared Radix tabs, menus, and tooltips for keyboard
 behavior and accessible names. A delegated tooltip layer serves truncated non-interactive text,
 without a DOM mutation observer or continuously repainting animation.
 
-The task inspector is intentionally tabbed: `Run` contains the current
-lifecycle, event tail, delegation, approvals, and material questions;
-`Context` contains the reported model, effort, route, permission profile,
-contract, workspace, and change source; `Proof` contains only explicit
-verification evidence and artifacts. It does not manufacture cache hit rates,
-computer-use state, or effect receipts when the control plane did not report
-them. Cache metrics are shown only when a raw count is available.
+The task inspector is one scan-first details surface rather than three tabs.
+An unanswered material question leads, followed by Run, Environment, Model &
+access, Activity, Verification, Artifacts, Approvals, and Task details. Empty
+groups disappear. It does not manufacture cache hit rates, computer-use state,
+or effect receipts when the control plane did not report them. Cache metrics
+are shown only when a raw count is available.
 
 ## State ownership
 

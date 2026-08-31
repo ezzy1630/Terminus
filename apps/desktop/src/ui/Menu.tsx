@@ -1,5 +1,6 @@
 import * as ContextMenuPrimitive from "@radix-ui/react-context-menu";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
+import { Check } from "lucide-react";
 import { Fragment } from "react";
 import type { ReactElement, ReactNode } from "react";
 
@@ -23,7 +24,9 @@ function ItemContent({ item }: { item: MenuItem }): JSX.Element {
   return (
     <>
       {item.selected === undefined ? null : (
-        <span className="mr-1.5 w-3 shrink-0 text-center text-xs" aria-hidden>{item.selected ? "✓" : ""}</span>
+        <span className="mr-1.5 flex w-3 shrink-0 items-center justify-center" aria-hidden>
+          {item.selected ? <Check size={12} strokeWidth={1.75} /> : null}
+        </span>
       )}
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="truncate">{item.label}</span>

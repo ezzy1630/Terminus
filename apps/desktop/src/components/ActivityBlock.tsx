@@ -119,18 +119,9 @@ function ActivityBlockImpl({
       // A failure is announced, not just drawn. Everything else is quiet.
       role={failed ? "alert" : undefined}
       className={cn(
-        // No divider. Consecutive blocks share one continuous rail
-        // (.activity-block::before), so a rule under each one cut the timeline
-        // the rail exists to draw into a stack of table rows.
-        //
-        // `overflow-hidden` used to sit here and clipped that rail's 3px bleed
-        // flush to the block's own box, so the rail could never have joined two
-        // blocks even before the listitem wrappers broke the `:first-of-type`
-        // clamp. Nothing inside needs clipping — the detail pane scrolls itself
-        // and the header truncates its own title.
+        // Flat rows keep tool activity subordinate to the reply. Expansion is
+        // the only state change; status remains visible in the compact glyph.
         "activity-block selectable my-0.5",
-        joinsAbove && "before:top-[-3px]!",
-        joinsBelow && "before:bottom-[-3px]!",
         expanded && "is-expanded",
       )}
     >

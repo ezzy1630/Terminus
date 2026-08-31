@@ -227,14 +227,15 @@ describe("Layout — sidebar responsive collapse", () => {
     expect(titlebarSidebarWidth()).toBe("0px");
   });
 
-  test("sidebar is a resizable dock at every supported width", () => {
+  test("keeps the sidebar docked and closes details before the main surface is cramped", () => {
     setViewport(900, 900);
     renderLayout();
     const aside = document.querySelector("aside");
     expect(aside).not.toBeNull();
-    expect(aside!.getAttribute("style") ?? "").toContain("width: 272px");
-    expect(screen.getByRole("separator", { name: "Resize sidebar" })).toHaveAttribute("aria-valuenow", "272");
-    expect(titlebarSidebarWidth()).toBe("272px");
+    expect(aside!.getAttribute("style") ?? "").toContain("width: 276px");
+    expect(screen.getByRole("separator", { name: "Resize sidebar" })).toHaveAttribute("aria-valuenow", "276");
+    expect(screen.queryByTestId("inspector-dock")).toBeNull();
+    expect(titlebarSidebarWidth()).toBe("276px");
   });
 
   test("sidebar does not become a rail at a narrow desktop width", () => {
@@ -242,10 +243,10 @@ describe("Layout — sidebar responsive collapse", () => {
     renderLayout();
     const aside = document.querySelector("aside");
     expect(aside).not.toBeNull();
-    expect(aside!.getAttribute("style") ?? "").toContain("width: 272px");
-    expect(titlebarSidebarWidth()).toBe("272px");
+    expect(aside!.getAttribute("style") ?? "").toContain("width: 276px");
+    expect(titlebarSidebarWidth()).toBe("276px");
     fireEvent.keyDown(screen.getByRole("separator", { name: "Resize sidebar" }), { key: "ArrowLeft" });
-    expect(screen.getByRole("separator", { name: "Resize sidebar" })).toHaveAttribute("aria-valuenow", "264");
+    expect(screen.getByRole("separator", { name: "Resize sidebar" })).toHaveAttribute("aria-valuenow", "268");
   });
 });
 
@@ -269,15 +270,14 @@ describe("Layout — docked inspector", () => {
     expect(screen.getByTestId("inspector-dock")).toHaveAttribute("data-layout", "docked");
   });
 
-  test("reserves the main working surface when both stored docks are maximal", () => {
+  test("does not render a narrow-window inspector even when a wide width was stored", () => {
     window.localStorage.setItem("terminus-desktop.sidebar-width.v5", "360");
     window.localStorage.setItem("terminus-desktop.inspector-width.v3", "420");
     setViewport(900, 900);
     renderLayout();
 
-    const sidebarWidth = Number(screen.getByRole("separator", { name: "Resize sidebar" }).getAttribute("aria-valuenow"));
-    const inspectorWidth = Number(screen.getByRole("separator", { name: "Resize inspector" }).getAttribute("aria-valuenow"));
-    expect(sidebarWidth + inspectorWidth).toBeLessThanOrEqual(572);
+    expect(screen.queryByRole("separator", { name: "Resize inspector" })).toBeNull();
+    expect(screen.queryByTestId("inspector-dock")).toBeNull();
     expect(screen.getByTestId("main-content")).toBeInTheDocument();
   });
 });

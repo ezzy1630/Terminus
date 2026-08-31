@@ -143,18 +143,19 @@ describe("CSS-first theme", () => {
     }
   });
 
-  test("does not keep the renderer repainting continuous CSS animation", () => {
-    // Narrowed from a blanket ban. A spinner that does not spin is not a
-    // bounded transition, it is a broken affordance — .spinner set
-    // border-top-color with no keyframes and rendered as a frozen ring, and
-    // .skeleton carried overflow:hidden for a sweep that had no source.
-    // Continuous animation is allowed only for marks that report ongoing
-    // indeterminate work, and every one stays under the Reduce Motion gate.
+  test("limits continuous motion to transform-only progress marks with a reduce-motion gate", () => {
     const continuous = new Set(
       [...globalsCss.matchAll(/animation:\s*([a-z-]+)[^;]*\binfinite\b/g)].map((match) => match[1]),
     );
-    expect(continuous).toEqual(new Set());
+    expect(continuous).toEqual(new Set(["status-ring-spin", "skeleton-sweep"]));
+    expect(globalsCss).toContain("to { transform: rotate(360deg); }");
+    expect(globalsCss).toContain("from { transform: translateX(-110%); }");
     expect(globalsCss).toContain('html[data-reduce-motion="true"] *');
+  });
+
+  test("removes inspector triggers when the responsive layout cannot show details", () => {
+    expect(globalsCss).toContain("@media (max-width: 1119px)");
+    expect(globalsCss).toContain(".details-trigger { display: none; }");
   });
 });
 

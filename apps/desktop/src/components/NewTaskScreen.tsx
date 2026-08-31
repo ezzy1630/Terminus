@@ -13,9 +13,9 @@
  * while the composer lands in the same place as the chat view after the first
  * turn starts.
  *
- * No starter chips. Four generic prompts ("Explain this codebase",
- * "Find a bug", …) occupied the space under the composer on every launch and
- * were never what anyone wanted to run; the composer is the affordance.
+ * Four concise intent chips can seed the objective without creating a second
+ * composer. They describe modes of work rather than canned toy prompts, and
+ * disappear from the operator's path as soon as a task starts.
  *
  * No "Starting task…" line either. It appeared below the composer, pushed
  * everything up at the exact moment the user had committed, and duplicated
@@ -26,18 +26,27 @@
  * immediately."
  */
 import { memo, useCallback } from "react";
+import { Command } from "lucide-react";
 import { cn } from "../lib/cn";
 import { api } from "../lib/api";
 import { WORKSPACE_TASK_SCOPE } from "../lib/task-scope";
 import { useTerminusStore } from "../hooks/use-terminus";
 import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-logical-mutation";
 import { Composer, type TurnRouting } from "./Composer";
+import { Button } from "../ui/Button";
 import type { Session } from "../types";
 
 interface NewTaskScreenProps {
   className?: string;
   onOpenProject?: () => void;
 }
+
+const TASK_INTENTS = [
+  { label: "Plan a feature", prompt: "Plan this feature, identify the important decisions, and propose the smallest coherent implementation." },
+  { label: "Build from a spec", prompt: "Implement the supplied specification end to end and verify the real user-facing result." },
+  { label: "Fix a bug", prompt: "Reproduce this bug, find its root cause, implement the fix, and verify the original failure no longer occurs." },
+  { label: "Review changes", prompt: "Review the current changes for correctness, security, maintainability, and user-facing regressions." },
+] as const;
 
 function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JSX.Element {
   const selectedSessionId = useTerminusStore((s) => s.selectedSessionId);
@@ -48,6 +57,11 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
 
   const session: Session | undefined = sessions.find((s) => s.id === selectedSessionId);
   const taskMutation = useLogicalMutation(`new-task.${selectedSessionId ?? "no-project"}`);
+  const chooseIntent = useCallback((prompt: string): void => {
+    window.dispatchEvent(new CustomEvent("terminus:replace-draft", {
+      detail: { taskId: "__new__", text: prompt },
+    }));
+  }, []);
   const createTask = useCallback(async (objective: string, routing: TurnRouting): Promise<void> => {
     if (!session) {
       throw new Error("Select or create a project first.");
@@ -137,10 +151,29 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
     <div className={cn("flex h-full w-full flex-col overflow-hidden bg-canvas", className)}>
       {/* Center the prompt in the usable surface. The composer is independently
           docked below, so starting a task never moves the input. */}
-      <main className="scrollable flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-8 py-10">
+      <main className="scrollable flex min-h-0 flex-1 flex-col items-center overflow-y-auto px-8 pb-10 pt-[clamp(4.5rem,15vh,9rem)]">
+        <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-[13px] border border-default bg-elevated text-primary shadow-sm" aria-hidden>
+          <Command size={21} strokeWidth={1.55} />
+        </div>
         <h1 id="new-task-heading" className="ui-display-title max-w-[24ch] text-balance text-center text-primary">
           What should Terminus do?
         </h1>
+        <p className="mt-2 max-w-md text-balance text-center text-sm leading-6 text-secondary">
+          Give an agent a clear outcome. Terminus keeps the run inspectable and the finish evidence-backed.
+        </p>
+        <div className="mt-6 flex max-w-2xl flex-wrap justify-center gap-2" role="group" aria-label="Task intents">
+          {TASK_INTENTS.map((intent) => (
+            <Button
+              key={intent.label}
+              type="button"
+              variant="bare"
+              onClick={() => chooseIntent(intent.prompt)}
+              className="h-8 rounded-full border border-default bg-elevated px-3 text-xs font-medium text-secondary shadow-xs transition-colors hover:border-strong hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+            >
+              {intent.label}
+            </Button>
+          ))}
+        </div>
       </main>
 
       {/* Docked with the same padding as the chat view's composer (App.tsx),

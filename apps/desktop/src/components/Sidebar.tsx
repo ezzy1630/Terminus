@@ -5,7 +5,7 @@
  *
  *   ✎ New task
  *   ▤ Board
- *   [ Projects ] [ Activity 2 ]          ← an explicit, remembered view
+ *   Terminus ▾                     ◉ 2   ← project switcher + inbox shortcut
  *   Needs you                          2   ← the queue: see TaskQueue
  *   • Fix the auth race        Website  !
  *     DB migration             Platform !
@@ -27,9 +27,9 @@
  * queue and in the day groups alike, and reading a task clears it without
  * moving the row anywhere.
  *
- * Projects and Activity are two useful readings of the same work. The switch
- * stays visible and names both choices. A button whose icon changes between a
- * bell and a folder makes the current mode legible only after hovering it.
+ * Project selection and attention are separate jobs. The project switcher
+ * owns context; one trailing icon moves between the thread inbox and the
+ * project tree without spending a full row on a web-style segmented control.
  *
  * Per SPEC §7.1: "Projects contain nested tasks. Do not expose worktrees or
  * branches as another permanent hierarchy level."
@@ -55,7 +55,7 @@ import {
   Columns3,
   Folder,
   FolderOpen,
-  Plus,
+  Search,
   Settings,
   SquarePen,
 } from "lucide-react";
@@ -179,14 +179,15 @@ function SidebarImpl({
   const refreshVisibleSessionTasks = useTerminusStore((s) => s.refreshVisibleSessionTasks);
 
   const pinnedTasks = usePinnedTasks();
+  const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const projectNameById = useMemo(() => {
     const names = new Map<string, string>();
     for (const session of sessions) names.set(session.id, session.title);
     return names;
   }, [sessions]);
-  // Activity is a projection over the same tasks, not a second navigation
-  // destination. Projects is the default because the tree is how a coding
-  // workspace is normally entered; Activity remains one explicit choice away.
+  // The inbox and project tree are projections over the same tasks, not
+  // separate destinations. The inbox is the first-run default because the
+  // desktop opens to supervise work; the project tree stays one click away.
   // The choice is durable and changing it never creates or selects a task.
   const [activityVisible, setActivityVisible] = useState(
     () => readSidebarGrouping() === "recent",
@@ -340,53 +341,53 @@ function SidebarImpl({
           onClick={() => onNavigateRef.current?.("board")}
           tooltip="Board — every task, by stage"
         />
+        <NavRow
+          icon={<Search size={14} strokeWidth={1.7} aria-hidden />}
+          label="Search"
+          active={false}
+          onClick={() => window.dispatchEvent(new Event("terminus:open-command-palette"))}
+          tooltip="Search and commands  ⌘K"
+        />
       </nav>
 
-      <div className="px-2 pb-1 pt-1">
-        <div
-          role="group"
-          aria-label="Sidebar view"
-          className="grid grid-cols-2 gap-0.5 rounded-lg border border-subtle bg-elevated p-0.5"
-        >
-          <Button
+      <div className="flex items-center gap-1 px-2 pb-1 pt-1">
+        <ProjectMenu
+          label="Switch project"
+          onProjectSelected={() => onNewTask()}
+          {...(onOpenProject ? { onOpenProject } : {})}
+          trigger={(
+            <Button
+              type="button"
+              variant="bare"
+              className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-sm font-medium text-primary hover:bg-hover"
+            >
+              <Folder size={14} strokeWidth={1.75} className="shrink-0 text-tertiary" aria-hidden />
+              <span className="truncate">{selectedSession?.title ?? "All projects"}</span>
+              <ChevronDown size={12} strokeWidth={1.75} className="ml-auto shrink-0 text-tertiary" aria-hidden />
+            </Button>
+          )}
+        />
+        <span className="relative shrink-0">
+          <IconButton
             type="button"
-            variant="bare"
-            aria-pressed={!activityVisible}
-            onClick={() => setActivityVisible(false)}
-            className={cn(
-              "flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-xs",
-              activityVisible
-                ? "text-tertiary hover:bg-hover hover:text-secondary"
-                : "bg-selected text-primary shadow-sm",
-            )}
-          >
-            <Folder size={13} strokeWidth={1.7} aria-hidden />
-            <span className="truncate">Projects</span>
-          </Button>
-          <Button
-            type="button"
-            variant="bare"
-            aria-pressed={activityVisible}
-            onClick={() => setActivityVisible(true)}
-            className={cn(
-              "flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2 text-xs",
-              activityVisible
-                ? "bg-selected text-primary shadow-sm"
-                : "text-tertiary hover:bg-hover hover:text-secondary",
-            )}
-          >
-            <Bell size={13} strokeWidth={1.7} aria-hidden />
-            <span className="truncate">Activity</span>
-            {attentionCount > 0 ? (
-              <span
-                className="ui-meta ml-auto min-w-4 rounded-full bg-hover px-1 text-center text-warning"
-                aria-label={`${attentionCount} ${attentionCount === 1 ? "task needs" : "tasks need"} you`}
-              >
-                {attentionCount > 99 ? "99+" : attentionCount}
-              </span>
-            ) : null}
-          </Button>
-        </div>
+            onClick={() => setActivityVisible((visible) => !visible)}
+            label={activityVisible ? "Show project threads" : "Show thread inbox"}
+            data-tooltip={activityVisible ? "Show project threads" : "Show thread inbox"}
+            icon={activityVisible
+              ? <Folder size={14} strokeWidth={1.75} aria-hidden />
+              : <Bell size={14} strokeWidth={1.75} aria-hidden />}
+            size="sm"
+            className="h-8 w-8 rounded-md text-tertiary hover:bg-hover hover:text-primary"
+          />
+          {attentionCount > 0 && !activityVisible ? (
+            <span
+              className="ui-meta pointer-events-none absolute -right-0.5 -top-0.5 flex min-h-4 min-w-4 items-center justify-center rounded-full bg-warning px-1 font-semibold leading-none text-inverse"
+              aria-label={`${attentionCount} ${attentionCount === 1 ? "thread needs" : "threads need"} you`}
+            >
+              {attentionCount > 99 ? "99+" : attentionCount}
+            </span>
+          ) : null}
+        </span>
       </div>
 
       {/* ── The body ──────────────────────────────────────────────────────── */}
@@ -458,32 +459,6 @@ function SidebarImpl({
 
             <SidebarSection
               label="Projects"
-              action={(
-            /* Revealed on hover, except when there are no projects at all —
-               hiding "add a project" precisely when the list is empty is
-               exactly backwards, which is how it used to behave. */
-            <span
-              className={cn(
-                "flex items-center gap-0.5 opacity-0 transition-opacity group-hover/section:opacity-100 group-focus-within/section:opacity-100",
-                sessions.length === 0 && "opacity-100",
-              )}
-            >
-              <ProjectMenu
-                align="end"
-                label="Add or switch project"
-                onProjectSelected={onNewTask}
-                {...(onOpenProject ? { onOpenProject } : {})}
-                trigger={(
-                  <IconButton
-                    label="Add or switch project"
-                    icon={<Plus size={12} strokeWidth={1.7} aria-hidden />}
-                    size="sm"
-                    className="h-5 w-5 rounded-sm text-tertiary hover:bg-hover hover:text-primary"
-                  />
-                )}
-              />
-            </span>
-              )}
             >
           {(loadingSessions || sessionsFreshness.status === "loading") && sessions.length === 0 ? (
             <div className="grid gap-2 px-2 py-2" role="status" aria-label="Loading projects">

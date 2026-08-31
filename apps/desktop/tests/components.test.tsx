@@ -959,12 +959,14 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(screen.queryByRole("button", { name: /Steer/ })).not.toBeInTheDocument();
   });
 
-  test("task.status=ACTIVE with a running turn → the button steers", () => {
+  test("task.status=ACTIVE with a running turn → blank stops, text queues", async () => {
     makeTask("ACTIVE");
     useTerminusStore.setState({
       eventsByTask: { "task-1": [{ id: "1", event: "turn.started", data: "{}" }] },
     });
     render(<Composer />);
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+    await userEvent.setup().type(screen.getByRole("textbox", { name: "Message composer" }), "Check the retry path");
     expect(screen.getByRole("button", { name: /Queue for the current run|Steer/ })).toBeInTheDocument();
   });
 
@@ -1374,14 +1376,17 @@ describe("NewTaskScreen — first turn lifecycle", () => {
     });
   });
 
-  // Four generic prompt chips sat under the composer on every launch. Nobody
-  // wanted to run "Find a bug" against an unspecified file, and they were the
-  // only thing between the heading and the fold.
-  test("offers no canned starter prompts", () => {
+  // Intent chips seed the existing composer; they never create a second input
+  // or submit an underspecified task on their own.
+  test("offers intent chips that seed the one composer", async () => {
+    const user = userEvent.setup();
     render(<NewTaskScreen />);
-    for (const label of ["Explain this codebase", "Find a bug", "Add a test", "Review recent changes"]) {
-      expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
-    }
+
+    await user.click(screen.getByRole("button", { name: "Fix a bug" }));
+
+    expect(screen.getByRole("textbox", { name: "Message composer" })).toHaveValue(
+      "Reproduce this bug, find its root cause, implement the fix, and verify the original failure no longer occurs.",
+    );
   });
 
   test("starts the task and submits the objective as its first turn", async () => {
@@ -1432,7 +1437,7 @@ describe("NewTaskScreen — first turn lifecycle", () => {
     expect(screen.getByRole("heading", { name: "What should Terminus do?" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change project" })).toHaveTextContent("Terminus");
     expect(screen.getAllByRole("textbox", { name: "Message composer" })).toHaveLength(1);
-    expect(screen.queryByText("Map the codebase")).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Task intents" })).toBeInTheDocument();
   });
 
   test("leaves connection status to the sidebar rather than repeating it", async () => {
@@ -1459,10 +1464,8 @@ describe("NewTaskScreen — first turn lifecycle", () => {
  * The rail opens on the inbox. Cases about the project tree ask for it through
  * the stored view, so the setup stays out of the assertions.
  */
-/** The rail groups by project. The stored value predates the rename and is
- *  still honoured, which is the point of reading it here. */
 function openOnProjectsTree(): void {
-  window.localStorage.setItem("terminus-desktop.sidebar-view.v1", "projects");
+  window.localStorage.setItem("terminus-desktop.sidebar-view.v2", "project");
 }
 
 describe("Sidebar — navigation destinations", () => {
@@ -1504,10 +1507,10 @@ describe("Sidebar — navigation destinations", () => {
     window.removeEventListener("terminus:open-settings", listener);
   });
 
-  test("does not duplicate global search inside the rail", () => {
+  test("keeps search with the primary sidebar destinations", () => {
     render(<Sidebar />);
 
-    expect(screen.queryByRole("button", { name: "Search tasks" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Search" })).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Search tasks" })).not.toBeInTheDocument();
   });
 
@@ -2492,9 +2495,9 @@ describe("Sidebar — remembered shape", () => {
   test("restores the explicitly selected project hierarchy", () => {
     openOnProjectsTree();
     render(<Sidebar />);
-    expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Projects" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Activity" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Switch project" })).toHaveTextContent("Terminus");
+    expect(screen.getByRole("button", { name: "Show thread inbox" })).toBeInTheDocument();
+    expect(screen.getByText("Projects")).toBeInTheDocument();
   });
 
   // The question is what the *list* holds, not what the workspace holds. Six

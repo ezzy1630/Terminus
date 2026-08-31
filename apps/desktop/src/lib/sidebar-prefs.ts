@@ -16,7 +16,11 @@
  */
 
 const VISIBLE_KEY = "terminus-desktop.sidebar-visible.v1";
-const VIEW_KEY = "terminus-desktop.sidebar-view.v1";
+// v2 changes the first-run default from the project tree to the attention
+// inbox. A versioned key separates the new default from old implicit state;
+// an explicit legacy choice is still migrated below.
+const VIEW_KEY = "terminus-desktop.sidebar-view.v2";
+const LEGACY_VIEW_KEY = "terminus-desktop.sidebar-view.v1";
 const COLLAPSED_PROJECTS_KEY = "terminus-desktop.sidebar-collapsed-projects.v1";
 const EXPANDED_PROJECTS_KEY = "terminus-desktop.sidebar-expanded-projects.v1";
 
@@ -81,18 +85,20 @@ export function writeSidebarVisible(visible: boolean): void {
 /**
  * How the rail files its tasks.
  *
- * Projects is the default because it is the stable map of the workspace.
- * Activity is an explicit second view for returning to running, blocked, and
- * recent work. The old `"projects"` value still means `"project"`, so an
- * existing choice survives the rename.
+ * The attention inbox is the default because the desktop opens to supervise
+ * work, not browse a repository tree. Project selection remains available in
+ * the switcher, and an explicit tree choice is still remembered.
  */
 export function readSidebarGrouping(): SidebarGrouping {
-  if (typeof window === "undefined") return "project";
+  if (typeof window === "undefined") return "recent";
   try {
     const stored = window.localStorage.getItem(VIEW_KEY);
-    return stored === "recent" ? "recent" : "project";
+    if (stored === "project" || stored === "recent") return stored;
+
+    const legacy = window.localStorage.getItem(LEGACY_VIEW_KEY);
+    return legacy === "project" || legacy === "projects" ? "project" : "recent";
   } catch {
-    return "project";
+    return "recent";
   }
 }
 

@@ -46,9 +46,9 @@ describe("Inspector relevance", () => {
   test("omits task groups that have no supporting runtime evidence", () => {
     render(<Inspector />);
 
-    // Context is the only group backed by fields the decoder requires, so it
-    // is the only group a bare task can justify. Everything else stays out.
-    expect(screen.getByRole("heading", { name: "Context" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Run" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Model & access" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Task details" })).toBeInTheDocument();
     expect(screen.queryByText("Context Compiler")).not.toBeInTheDocument();
     for (const name of ["Environment", "Activity", "Approvals"]) {
       expect(screen.queryByRole("heading", { name })).not.toBeInTheDocument();
@@ -78,12 +78,9 @@ describe("Inspector relevance", () => {
       />,
     );
 
-    await userEvent.setup().click(screen.getByRole("tab", { name: "Run" }));
-    for (const name of [/Subagents, 1 working/, "Verification, 1/1"]) {
-      expect(screen.getByRole("button", { name })).toBeInTheDocument();
-    }
+    expect(screen.getByRole("button", { name: /Subagents, 1 working/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Verification" })).toBeInTheDocument();
     for (const name of ["Activity", "Approvals"]) expect(screen.getByRole("heading", { name })).toBeInTheDocument();
-    await userEvent.setup().click(screen.getByRole("tab", { name: "Context" }));
     expect(screen.getByRole("heading", { name: "Environment" })).toBeInTheDocument();
     // The Changes row carries the +/- counts parsed off the proposed patch and
     // is the panel's only route into the review surface.

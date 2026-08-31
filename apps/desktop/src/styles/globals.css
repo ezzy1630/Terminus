@@ -499,6 +499,18 @@ textarea::placeholder,
     transform var(--duration-fast) var(--easing-default);
 }
 
+.run-bar {
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-elevated) 58%, transparent);
+}
+
+/* Layout closes the inspector below this width. Hide its triggers too: a
+   visible button that can only flip a hidden preference is a dead control. */
+@media (max-width: 1119px) {
+  .details-trigger { display: none; }
+}
+
 /* The composer is focused for almost the whole life of the app — both start
    and task surfaces focus it on mount. So its focused state is its *resting*
    state, and it cannot be drawn with the accent focus ring: a permanently lit
@@ -812,12 +824,18 @@ textarea::placeholder,
 
 .inspector-dock {
   padding: 12px 12px 12px 0;
+  animation: inspector-dock-in var(--duration-normal) var(--easing-emphasized) both;
 }
 
 .inspector-card {
   background: var(--bg-inspector);
-  border-radius: 18px;
+  border-radius: var(--radius-xl);
   box-shadow: var(--elevation-sm);
+}
+
+@keyframes inspector-dock-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 
 .inspector-section { transition: background var(--duration-fast) var(--easing-default); }
@@ -838,24 +856,9 @@ textarea::placeholder,
 
 /* ────────────────────────── Activity Blocks ──────────────────────────── */
 
-/* Consecutive blocks share one continuous rail, so a run of activity reads as
-   a single timeline rather than three unrelated stripes. Each block sits in
-   its own list-item wrapper, so sibling selectors cannot see a neighbour; a
-   block's rail is clamped by default and the component extends it across the
-   gap (`joinsAbove` / `joinsBelow`) when it knows one is there. */
-.activity-block { position: relative; padding-left: 12px; }
-.activity-block::before {
-  content: "";
-  position: absolute;
-  top: 6px;
-  bottom: 6px;
-  left: 3px;
-  width: 1.5px;
-  border-radius: 999px;
-  background: var(--border-default);
-}
-.activity-block { transition: background var(--duration-fast) var(--easing-default), border-color var(--duration-fast) var(--easing-default), box-shadow var(--duration-fast) var(--easing-default); }
-.activity-block:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border-default) 65%, transparent); }
+/* Tool groups are quiet, flat transcript rows. State lives in the glyph; a
+   decorative vertical timeline made three small facts dominate the reply. */
+.activity-block { position: relative; }
 .activity-header svg { transition: transform var(--duration-fast) var(--easing-default), color var(--duration-fast) var(--easing-default); }
 .activity-detail { animation: fade-in var(--duration-fast) var(--easing-default); }
 
@@ -871,9 +874,17 @@ pre.text-primary { color: var(--text-code); }
 
 /* ────────────────────────── Progress marks ───────────────────────────── */
 
-/* Progress stays legible without permanent repaint loops. A coloured broken
-   ring, solid working dot, static caret, and quiet skeleton communicate state
-   while leaving high-refresh macOS displays idle when the transcript is. */
+/* Motion reports active work. Both indeterminate animations touch only
+   transform/opacity, and the global Reduce Motion rules below collapse them. */
+
+@keyframes status-ring-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes skeleton-sweep {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(110%); }
+}
 
 .spinner {
   width: 12px;
@@ -881,6 +892,7 @@ pre.text-primary { color: var(--text-code); }
   border: 1.5px solid var(--border-default);
   border-top-color: var(--color-agent-working);
   border-radius: 50%;
+  animation: status-ring-spin 1s linear infinite;
 }
 
 /* Compact progress mark for sidebar status indicators. */
@@ -890,6 +902,7 @@ pre.text-primary { color: var(--text-code); }
   border: 1.5px solid color-mix(in srgb, var(--border-default) 50%, transparent);
   border-top-color: var(--color-agent-working);
   border-radius: 50%;
+  animation: status-ring-spin 1s linear infinite;
 }
 
 .streaming-caret {
@@ -907,7 +920,11 @@ pre.text-primary { color: var(--text-code); }
 }
 
 .skeleton::after {
-  content: none;
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text-primary) 8%, transparent), transparent);
+  animation: skeleton-sweep 1.4s var(--easing-default) infinite;
 }
 
 /* ────────────────────────── Status Dots ──────────────────────────────── */

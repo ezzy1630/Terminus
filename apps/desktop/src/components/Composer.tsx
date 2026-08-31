@@ -11,7 +11,7 @@
  * Always-visible controls:
  *   - Effective access level
  *   - Model and reasoning effort
- *   - Send / steer, and Stop while a run is in flight
+ *   - One contextual primary action: send, queue/steer, or stop
  *
  * Per SPEC §10: "Expand vertically within sensible limits" — max
  * 280px spacious / 224px compact (from theme.css).
@@ -23,10 +23,9 @@
  * render at all when the host supports neither.
  *
  * Drafts and keyboard shortcuts remain available. The composer clearly
- * distinguishes send and steer, and keeps Stop as its own control: steering a
- * run and killing it must never be the same click. It remains stable during
- * streaming and never jumps because metadata appeared or disappeared. It
- * matches the reading-column width.
+ * distinguishes send and steer. During a run, an empty draft makes the one
+ * action Stop; typing turns it into Queue/Steer. It remains stable during
+ * streaming and never jumps because metadata appeared or disappeared.
  *
  * Keyboard shortcuts:
  *   Cmd+Enter          → send (or steer if work is running)
@@ -957,6 +956,15 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
     : runIsActive
       ? "Queue after this run · ↵ · Steer now with ⌘↵"
       : `${sendButtonContent.label} · ↵`;
+  // One circle, one immediate action. An empty running composer stops; once a
+  // message exists the same position queues or steers it. Stop also remains in
+  // the native menu and on ⌘., so this removes duplicate chrome, not control.
+  const primaryActionIsStop = canStop && draft.trim().length === 0;
+  const primaryLabel = primaryActionIsStop ? "Stop" : sendButtonContent.label;
+  const primaryTitle = primaryActionIsStop
+    ? (stopping ? "Stopping…" : "Stop this run · ⌘.")
+    : sendTitle;
+  const primaryDisabled = primaryActionIsStop ? stopping : sendDisabled;
 
   return (
     <div className={cn("relative", className)}>
@@ -1081,34 +1089,23 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
                 {...(budgetDetail ? { metaDetail: budgetDetail } : {})}
               />
 
-              {canStop ? (
-                <Button
-                  type="button"
-                  onClick={() => void onStop()}
-                  disabled={stopping}
-                  aria-label="Stop"
-                  data-tooltip={stopping ? "Stopping…" : "Stop this run · ⌘."}
-                  variant="secondary"
-                  className="stop-control flex h-7 w-7 items-center justify-center rounded-full px-0"
-                >
-                  <Square size={10} strokeWidth={2.5} fill="currentColor" aria-hidden />
-                  <span className="sr-only">Stop</span>
-                </Button>
-              ) : null}
-
               <Button
                 type="button"
-                onClick={() => void onSubmit(sendButtonContent.mode)}
-                disabled={sendDisabled}
-                aria-label={sendButtonContent.label}
-                data-tooltip={sendTitle}
-                variant={sendLooksReady ? "primary" : "ghost"}
+                onClick={() => primaryActionIsStop
+                  ? void onStop()
+                  : void onSubmit(sendButtonContent.mode)}
+                disabled={primaryDisabled}
+                aria-label={primaryLabel}
+                data-tooltip={primaryTitle}
+                variant={primaryActionIsStop ? "secondary" : sendLooksReady ? "primary" : "ghost"}
                 className="send-control flex h-7 w-7 items-center justify-center rounded-full px-0"
               >
-                {sending
+                {sending || stopping
                   ? <span className="spinner border-current/30 border-t-current" aria-hidden />
-                  : sendButtonContent.icon}
-                <span className="sr-only">{sendButtonContent.label}</span>
+                  : primaryActionIsStop
+                    ? <Square size={10} strokeWidth={2.5} fill="currentColor" aria-hidden />
+                    : sendButtonContent.icon}
+                <span className="sr-only">{primaryLabel}</span>
               </Button>
             </div>
           </div>

@@ -112,9 +112,9 @@ describe("the inspector's environment section", () => {
     install({ sessions: [session({ default_permission_profile: "secure-local-default" })] });
     render(<Inspector />);
 
-    expect(await screen.findByText("secure-local-default")).toBeInTheDocument();
+    expect(await screen.findByTitle("secure-local-default")).toBeInTheDocument();
     expect(screen.queryByText("Local UDS")).not.toBeInTheDocument();
-    expect(screen.queryByText("Full access")).not.toBeInTheDocument();
+    expect(screen.getByText("Full access")).toBeInTheDocument();
     // The contract version is the task's, not a default of 1.
     expect(screen.getByText("v3")).toBeInTheDocument();
   });

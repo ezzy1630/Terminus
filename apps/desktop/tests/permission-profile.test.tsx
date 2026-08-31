@@ -175,7 +175,7 @@ describe("the access chip", () => {
     const items = within(menu).getAllByRole("menuitem");
     expect(items).toHaveLength(3);
     expect(items.map((item) => item.textContent)).toEqual([
-      "✓Full accessEdits files and runs commands without asking",
+      "Full accessEdits files and runs commands without asking",
       "AutoWorks in the workspace freely; asks before network access",
       "Ask for approvalAsks before every edit, command, or fetch",
     ]);

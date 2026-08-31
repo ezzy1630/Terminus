@@ -431,37 +431,27 @@ function MessageImpl({ message, isLast = false }: MessageProps): JSX.Element {
           Codex's row, but Terminus's control plane exposes neither a feedback
           nor a fork endpoint — rendering them would be two buttons that
           silently do nothing. */}
-      {showActions || message.model ? (
+      {showActions ? (
         <div className="mt-1.5 flex h-6 items-center gap-2">
-          {showActions ? (
-            <Button
-              variant="bare"
-              onClick={() => void copyReply()}
-              aria-label={replyCopyState === "copied"
-                ? "Reply copied"
-                : replyCopyState === "failed" ? "Copy reply failed" : "Copy reply"}
-              data-tooltip={replyCopyState === "copied"
-                ? "Copied"
-                : replyCopyState === "failed" ? "Copy failed" : "Copy"}
-              className={cn(
-                "-ml-1 flex size-6 items-center justify-center rounded-md text-tertiary transition-opacity",
-                "hover:bg-hover hover:text-secondary focus-visible:opacity-100",
-                isLast || replyCopyState !== null
-                  ? "opacity-100"
-                  : "opacity-0 group-hover/turn:opacity-100",
-              )}
-            >
-              {replyCopyState === "copied" ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />}
-            </Button>
-          ) : null}
-          {/* What actually produced this reply. Reported by the control plane
-              on `turn.profile_selected`; absent when it did not report one,
-              never filled in from the composer's current pick. */}
-          {message.model ? (
-            <span className="ui-meta truncate" data-testid="message-model">
-              {message.model}
-            </span>
-          ) : null}
+          <Button
+            variant="bare"
+            onClick={() => void copyReply()}
+            aria-label={replyCopyState === "copied"
+              ? "Reply copied"
+              : replyCopyState === "failed" ? "Copy reply failed" : "Copy reply"}
+            data-tooltip={replyCopyState === "copied"
+              ? "Copied"
+              : replyCopyState === "failed" ? "Copy failed" : "Copy"}
+            className={cn(
+              "-ml-1 flex size-6 items-center justify-center rounded-md text-tertiary transition-opacity",
+              "hover:bg-hover hover:text-secondary focus-visible:opacity-100",
+              isLast || replyCopyState !== null
+                ? "opacity-100"
+                : "opacity-0 group-hover/turn:opacity-100",
+            )}
+          >
+            {replyCopyState === "copied" ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />}
+          </Button>
         </div>
       ) : null}
     </div>

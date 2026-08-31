@@ -591,8 +591,8 @@ describe("truthful operator cockpit", () => {
     // Exactly one, deliberately: the sidebar used to offer "Open project"
     // three times at once — the Spaces header, the empty state, and a docked
     // nav row.
-    await user.click(screen.getByRole("button", { name: "Projects" }));
-    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await user.click(screen.getByRole("button", { name: "Switch project" }));
+    await user.click(screen.getByRole("menuitem", { name: "Add repository…" }));
 
     expect(await screen.findByRole("dialog", { name: "Open project" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Project path" })).toHaveValue("");
@@ -606,7 +606,7 @@ describe("truthful operator cockpit", () => {
     await waitFor(() => expect(refreshAll).toHaveBeenCalled());
 
     // Global search and navigation share one visible command surface.
-    const searchTrigger = screen.getByRole("button", { name: "Search and commands" });
+    const searchTrigger = screen.getByRole("button", { name: "Search" });
     await userEvent.click(searchTrigger);
 
     const commandDialog = await screen.findByRole("dialog", { name: "Command palette" });
@@ -621,6 +621,8 @@ describe("truthful operator cockpit", () => {
   });
 
   test("opens Board-only canonical task context in the shared inspector", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
+    window.dispatchEvent(new Event("resize"));
     const refreshAll = vi.fn(async () => {});
     useTerminusStore.setState({ refreshAll });
     window.localStorage.setItem("terminus-desktop.onboarding.completed.v1", "true");
