@@ -39,6 +39,36 @@ cleanup() {
   if [[ "$status" -ne 0 ]]; then
     echo "[e2e] failed; diagnostic bundle preserved at $TMP_DIR" >&2
     if [[ "${CI:-}" == "true" ]]; then
+      if [[ -f "$TMP_DIR/control.db" ]]; then
+        TERMINUS_DIAGNOSTIC_DB="$TMP_DIR/control.db" bun -e '
+          import { Database } from "bun:sqlite";
+
+          const path = process.env.TERMINUS_DIAGNOSTIC_DB;
+          if (!path) process.exit(0);
+          const db = new Database(path, { readonly: true });
+          const rows = db.query(`
+            SELECT node_id, status, exit_code, command_or_query,
+                   structured_observations_json
+            FROM verification_results
+            WHERE status IN ("fail", "error")
+            ORDER BY completed_at DESC
+            LIMIT 4
+          `).all();
+          db.close();
+          for (const row of rows) {
+            const observations = typeof row.structured_observations_json === "string"
+              ? row.structured_observations_json.slice(-8_000)
+              : "{}";
+            console.error("[e2e] failed verification", JSON.stringify({
+              node_id: row.node_id,
+              status: row.status,
+              exit_code: row.exit_code,
+              command: row.command_or_query,
+              observations,
+            }));
+          }
+        ' 2>&1 | tail -c 12000 >&2
+      fi
       for diagnostic_log in "$TMP_DIR/kernel.log" "$TMP_DIR"/control-*.log; do
         [[ -f "$diagnostic_log" ]] || continue
         echo "[e2e] bounded diagnostic tail for $(basename "$diagnostic_log"); earlier matches omitted" >&2
