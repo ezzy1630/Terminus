@@ -195,7 +195,32 @@ export async function executeLocalProviderCommand(
       jobId: started.jobId,
       reason: "provider-transport-failed",
     }).catch(() => undefined);
+    const settled = await settleForDiagnostics(output, 1_000);
+    const stderr = settled === null ? "" : tail(settled.stderr, 4_096).trim();
+    if (stderr.length > 0) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; provider stderr: ${stderr}`,
+        { cause: error },
+      );
+    }
     throw error;
+  }
+}
+
+async function settleForDiagnostics(
+  output: Promise<CollectedJobOutput>,
+  timeoutMs: number,
+): Promise<CollectedJobOutput | null> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      output.catch(() => null),
+      new Promise<null>((resolve) => {
+        timeout = setTimeout(() => resolve(null), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }
 
