@@ -99,6 +99,55 @@ export type CapabilityDiscoveryOutcome =
   | { readonly ok: true; readonly data: CapabilityDiscoveryData; readonly summary: string }
   | { readonly ok: false; readonly message: string };
 
+export interface CapabilityTransitionEvent {
+  readonly eventType: "capability.activated" | "capability.deactivated";
+  readonly aggregateType: "turn";
+  readonly aggregateId: string;
+  readonly correlationId: string;
+  readonly payload: {
+    readonly capability_id: string;
+    readonly provider_call_id: string;
+    readonly active_capabilities: readonly string[];
+    readonly active_tool_set_hash: ContentHash;
+    readonly next_tool_ids: readonly string[];
+  };
+}
+
+/** Build the durable post-action snapshot paired with a successful result. */
+export function capabilityTransitionEvent(input: {
+  readonly action: CapabilityDiscoveryCommand["action"] | "activate_workspace";
+  readonly capabilityId?: string | undefined;
+  readonly turnId: string;
+  readonly taskId: string;
+  readonly providerCallId: string;
+  readonly activeCapabilities: readonly string[];
+  readonly activeToolSetHash: ContentHash;
+  readonly nextToolIds: readonly string[];
+}): CapabilityTransitionEvent | null {
+  if (
+    input.action !== "activate_workspace"
+    && input.action !== "activate"
+    && input.action !== "deactivate"
+  ) return null;
+  const capabilityId = input.action === "activate_workspace" ? "workspace" : input.capabilityId;
+  if (capabilityId === undefined || capabilityId.length === 0) {
+    throw new Error(`${input.action} capability transition requires an exact capability id`);
+  }
+  return {
+    eventType: input.action === "deactivate" ? "capability.deactivated" : "capability.activated",
+    aggregateType: "turn",
+    aggregateId: input.turnId,
+    correlationId: input.taskId,
+    payload: {
+      capability_id: capabilityId,
+      provider_call_id: input.providerCallId,
+      active_capabilities: [...input.activeCapabilities],
+      active_tool_set_hash: input.activeToolSetHash,
+      next_tool_ids: [...input.nextToolIds],
+    },
+  };
+}
+
 /**
  * Restore the latest exact active-set snapshot emitted after activation or
  * deactivation. Unknown historical capabilities are dropped rather than

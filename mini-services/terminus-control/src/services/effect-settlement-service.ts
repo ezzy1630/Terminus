@@ -1,5 +1,9 @@
 import type { ToolResultStatus } from "@terminus/aci";
-import type { MutationRunner, ServiceEventAppender } from "./service-types.js";
+import type {
+  MutationRunner,
+  ServiceEventAppender,
+  ServiceEventInput,
+} from "./service-types.js";
 
 export type EffectToolState = "SETTLED" | "DENIED" | "FAILED";
 
@@ -88,6 +92,10 @@ export interface EffectSettlementTransaction {
 
 export interface EffectSettlementDependencies<TTransaction> {
   readonly appendEvent: ServiceEventAppender<TTransaction>;
+  readonly appendEvents: (
+    events: readonly ServiceEventInput[],
+    mutation: (transaction: TTransaction) => Promise<void>,
+  ) => Promise<void>;
   readonly transaction: (transaction: TTransaction) => EffectSettlementTransaction;
   readonly mutate: MutationRunner;
 }
@@ -153,12 +161,16 @@ export class EffectSettlementService<TTransaction> {
     }
   }
 
-  async settle(input: EffectSettlementInput): Promise<void> {
-    await this.run(
-      input.status === "success" || input.status === "partial" ? "tool.settled" : "tool.failed",
-      input.taskId,
-      input.toolCallId,
-      {
+  async settle(
+    input: EffectSettlementInput,
+    companionEvents: readonly ServiceEventInput[] = [],
+  ): Promise<void> {
+    const settlementEvent: ServiceEventInput = {
+      eventType: input.status === "success" || input.status === "partial" ? "tool.settled" : "tool.failed",
+      aggregateType: "tool_call",
+      aggregateId: input.toolCallId,
+      correlationId: input.taskId,
+      payload: {
         tool_call_id: input.toolCallId,
         ...(input.toolId === undefined ? {} : { tool_id: input.toolId }),
         provider_call_id: input.providerCallId,
@@ -166,9 +178,16 @@ export class EffectSettlementService<TTransaction> {
         summary: input.summary,
         truncation: input.truncation,
       },
-      (transaction) => this.dependencies.transaction(transaction).settle(input),
-      [input.resultArtifactUri, input.resultTranscriptArtifactUri],
-    );
+      artifactRefs: [input.resultArtifactUri, input.resultTranscriptArtifactUri],
+    };
+    const mutation = (transaction: TTransaction) => this.dependencies.transaction(transaction).settle(input);
+    if (companionEvents.length === 0) {
+      await this.runEvent(settlementEvent, mutation);
+      return;
+    }
+    await this.dependencies.mutate(async () => {
+      await this.dependencies.appendEvents([settlementEvent, ...companionEvents], mutation);
+    });
   }
 
   /** Cancel an admitted tool before dispatch when the turn signal wins. */
@@ -203,20 +222,25 @@ export class EffectSettlementService<TTransaction> {
     idempotencyKey: string | null | undefined = null,
     acquireMutationLock = true,
   ): Promise<void> {
-    const operation = async (): Promise<void> => {
-      await this.dependencies.appendEvent(
-        {
-          eventType,
-          aggregateType: "tool_call",
-          aggregateId: toolCallId,
-          correlationId: taskId,
-          idempotencyKey,
-          payload,
-          artifactRefs,
-        },
-        mutation,
-      );
-    };
+    const operation = () => this.runEvent({
+      eventType,
+      aggregateType: "tool_call",
+      aggregateId: toolCallId,
+      correlationId: taskId,
+      idempotencyKey,
+      payload,
+      artifactRefs,
+    }, mutation, false);
+    if (acquireMutationLock) await this.dependencies.mutate(operation);
+    else await operation();
+  }
+
+  private async runEvent(
+    event: ServiceEventInput,
+    mutation: (transaction: TTransaction) => Promise<void>,
+    acquireMutationLock = true,
+  ): Promise<void> {
+    const operation = () => this.dependencies.appendEvent(event, mutation);
     if (acquireMutationLock) await this.dependencies.mutate(operation);
     else await operation();
   }

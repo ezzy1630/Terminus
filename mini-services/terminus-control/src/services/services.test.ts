@@ -450,20 +450,29 @@ describe("control-plane service boundaries", () => {
   test("EffectSettlementService keeps lifecycle events paired with transaction mutations", async () => {
     type Transaction = { readonly name: "effect" };
     const events: string[] = [];
+    const eventBatches: string[][] = [];
     const eventIdempotencyKeys: Array<string | null | undefined> = [];
     const operations: string[] = [];
+    let failSettlement = false;
     const service = new EffectSettlementService<Transaction>({
       appendEvent: async (event, mutation) => {
         events.push(event.eventType);
         eventIdempotencyKeys.push(event.idempotencyKey);
         await mutation({ name: "effect" });
       },
+      appendEvents: async (batch, mutation) => {
+        await mutation({ name: "effect" });
+        eventBatches.push(batch.map((event) => event.eventType));
+      },
       transaction: () => ({
         authorize: async () => { operations.push("authorize"); },
         start: async () => { operations.push("start"); },
         markUnknown: async () => { operations.push("unknown"); },
         cancel: async () => { operations.push("cancel"); },
-        settle: async () => { operations.push("settle"); },
+        settle: async () => {
+          if (failSettlement) throw new Error("settlement transaction failed");
+          operations.push("settle");
+        },
       }),
       mutate: async (operation) => operation(),
     });
@@ -516,6 +525,35 @@ describe("control-plane service boundaries", () => {
     expect(events).toEqual(["tool.authorized", "tool.started", "tool.cancelled", "tool.settlement_unknown", "tool.settled"]);
     expect(eventIdempotencyKeys[3]).toBe("effect-recovery:effect-1");
     expect(operations).toEqual(["authorize", "start", "cancel", "unknown", "settle"]);
+
+    const capabilityEvent = {
+      eventType: "capability.activated",
+      aggregateType: "turn",
+      aggregateId: "turn-1",
+      correlationId: "task-1",
+      payload: {
+        capability_id: "workspace",
+        provider_call_id: "provider-call-2",
+        active_capabilities: ["standalone.web_fetch"],
+      },
+    } as const;
+    await service.settle({
+      ...settlement,
+      toolCallId: "call-2",
+      providerCallId: "provider-call-2",
+      sideEffectId: null,
+    }, [capabilityEvent]);
+    expect(eventBatches).toEqual([["tool.settled", "capability.activated"]]);
+    expect(operations).toEqual(["authorize", "start", "cancel", "unknown", "settle", "settle"]);
+
+    failSettlement = true;
+    await expect(service.settle({
+      ...settlement,
+      toolCallId: "call-3",
+      providerCallId: "provider-call-3",
+      sideEffectId: null,
+    }, [capabilityEvent])).rejects.toThrow("settlement transaction failed");
+    expect(eventBatches).toEqual([["tool.settled", "capability.activated"]]);
   });
 
   test("ToolEpisodeService bounds per-turn calls and loads bounded model episodes", async () => {

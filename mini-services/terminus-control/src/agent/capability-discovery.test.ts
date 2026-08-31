@@ -3,6 +3,7 @@ import { computeContentHash } from "@terminus/context-ir";
 import type { CapabilityCard } from "@terminus/aci";
 import {
   CapabilityDiscoverySession,
+  capabilityTransitionEvent,
   recoverCommittedActiveCapabilityIds,
 } from "./capability-discovery.js";
 
@@ -117,6 +118,42 @@ describe("CapabilityDiscoverySession", () => {
       ],
       cards.map((entry) => entry.id),
     )).toEqual(["standalone.web_fetch"]);
+  });
+
+  test("builds an exact post-action snapshot that recovery can replay", () => {
+    const session = new CapabilityDiscoverySession(cards, []);
+    session.execute({ action: "activate", capability_id: "standalone.web_fetch" });
+    const event = capabilityTransitionEvent({
+      action: "activate",
+      capabilityId: "standalone.web_fetch",
+      turnId: "turn-1",
+      taskId: "task-1",
+      providerCallId: "provider-call-1",
+      activeCapabilities: session.activeCapabilityIds(),
+      activeToolSetHash: session.activeToolSetHash(),
+      nextToolIds: ["capability", "read", "web_fetch"],
+    });
+    expect(event).toMatchObject({
+      eventType: "capability.activated",
+      payload: {
+        active_capabilities: ["standalone.web_fetch"],
+        next_tool_ids: ["capability", "read", "web_fetch"],
+      },
+    });
+    expect(recoverCommittedActiveCapabilityIds(
+      [],
+      [JSON.stringify(event?.payload)],
+      cards.map((entry) => entry.id),
+    )).toEqual(["standalone.web_fetch"]);
+    expect(capabilityTransitionEvent({
+      action: "status",
+      turnId: "turn-1",
+      taskId: "task-1",
+      providerCallId: "provider-call-2",
+      activeCapabilities: session.activeCapabilityIds(),
+      activeToolSetHash: session.activeToolSetHash(),
+      nextToolIds: [],
+    })).toBeNull();
   });
 
   test("rejects duplicate and invalid admitted cards instead of resolving ambiguously", () => {

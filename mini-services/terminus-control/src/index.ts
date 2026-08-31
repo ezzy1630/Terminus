@@ -407,7 +407,9 @@ import {
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
 import {
   CapabilityDiscoverySession,
+  capabilityTransitionEvent,
   recoverCommittedActiveCapabilityIds,
+  type CapabilityTransitionEvent,
 } from "./agent/capability-discovery.js";
 import {
   buildWorkingMemoryContextSection,
@@ -3832,6 +3834,17 @@ const effectSettlementService = new EffectSettlementService<Prisma.TransactionCl
       payload: event.payload,
       artifactRefs: event.artifactRefs === undefined ? undefined : [...event.artifactRefs],
     }, mutation);
+  },
+  appendEvents: async (events, mutation): Promise<void> => {
+    await emitAtomicBatch(events.map((event) => ({
+      eventType: event.eventType,
+      aggregateType: event.aggregateType,
+      aggregateId: event.aggregateId,
+      correlationId: event.correlationId,
+      idempotencyKey: event.idempotencyKey,
+      payload: event.payload,
+      artifactRefs: event.artifactRefs === undefined ? undefined : [...event.artifactRefs],
+    })), mutation);
   },
   transaction: (tx) => ({
     authorize: async (input: EffectAuthorizationInput) => {
@@ -14961,6 +14974,8 @@ interface StandaloneToolSettlementInput {
   readonly artifactClient: ArtifactClient;
   readonly observedSources: ObservedSourceTracker;
   readonly capabilitySession: CapabilityDiscoverySession;
+  /** Compute the exact post-transition schema ids before atomic settlement. */
+  readonly nextWorkspaceToolIds: () => readonly string[];
   /** Read the authoritative workspace identity around the kernel effect. */
   readonly workspaceRevision?: (() => Promise<string | null>) | undefined;
   /** Current verifier/repair association, if this turn has one. */
@@ -15745,6 +15760,25 @@ async function settleStandaloneProviderTool(
           status: "error",
           summary: outcome.message,
         });
+    const action = call.arguments.action;
+    const transitionEvent = outcome.ok && (
+      action === "activate_workspace"
+      || action === "activate"
+      || action === "deactivate"
+    )
+      ? capabilityTransitionEvent({
+          action,
+          ...(action === "activate" || action === "deactivate"
+            ? { capabilityId: call.arguments.capability_id }
+            : {}),
+          turnId: input.turnId,
+          taskId: input.taskId,
+          providerCallId: call.providerCallId,
+          activeCapabilities: input.capabilitySession.activeCapabilityIds(),
+          activeToolSetHash: input.capabilitySession.activeToolSetHash(),
+          nextToolIds: input.nextWorkspaceToolIds(),
+        })
+      : null;
     return persistSettledToolResult({
       input,
       call,
@@ -15754,6 +15788,7 @@ async function settleStandaloneProviderTool(
       result,
       workspaceRevisionBefore,
       workspaceRevisionAfter: workspaceRevisionBefore,
+      ...(transitionEvent === null ? {} : { settlementEvents: [transitionEvent] }),
       ...operationContext,
     });
   }
@@ -16785,6 +16820,8 @@ async function persistSettledToolResult(input: {
   readonly hypothesisId?: string | null | undefined;
   readonly criterionIds?: readonly string[] | undefined;
   readonly objectiveStep?: string | null | undefined;
+  /** Semantic transitions committed atomically with the settled tool result. */
+  readonly settlementEvents?: readonly CapabilityTransitionEvent[] | undefined;
 }): Promise<EngineToolSettlement> {
   // Keep the model-facing projection minimal, while the authoritative result
   // artifact retains denial provenance and the kernel decision identity.
@@ -16856,7 +16893,7 @@ async function persistSettledToolResult(input: {
         }),
     truncation: input.result.truncation,
     observedSourceVersions: observedSourceVersionsOf(input.result),
-  });
+  }, input.settlementEvents ?? []);
   const status = input.result.status;
   return {
     status: status === "success" || status === "partial" || status === "error"
@@ -17707,6 +17744,7 @@ async function agentLoop(turnId: string): Promise<void> {
         contractHash: toolInput.contractHash,
         artifactClient: toolInput.artifactClient,
         capabilitySession,
+        nextWorkspaceToolIds: () => selectWorkspaceToolSchemas().map((schema) => schema.id),
         rejection: toolInput.rejection,
         observedSources,
         workspaceRevision: operationWorkspaceRevision,
@@ -19840,36 +19878,9 @@ async function agentLoop(turnId: string): Promise<void> {
         ) {
           const action = parsedCall.arguments.action;
           if (action === "activate_workspace") {
+            // The durable activation snapshot committed atomically with the
+            // result. This assignment only advances the current process.
             workspaceActivated = true;
-            await mutateAgentState(() => emit({
-              eventType: "capability.activated",
-              aggregateType: "turn",
-              aggregateId: turnId,
-              correlationId: task.id,
-              payload: {
-                capability_id: "workspace",
-                provider_call_id: parsedCall.providerCallId,
-                next_tool_ids: selectWorkspaceToolSchemas().map((schema) => schema.id),
-              },
-            }));
-          } else if (action === "activate" || action === "deactivate") {
-            const capabilityId = "capability_id" in parsedCall.arguments
-              ? parsedCall.arguments.capability_id
-              : null;
-            if (capabilityId === null) throw new Error(`${action} capability call lost its capability_id`);
-            await mutateAgentState(() => emit({
-              eventType: action === "activate" ? "capability.activated" : "capability.deactivated",
-              aggregateType: "turn",
-              aggregateId: turnId,
-              correlationId: task.id,
-              payload: {
-                capability_id: capabilityId,
-                provider_call_id: parsedCall.providerCallId,
-                active_capabilities: capabilitySession.activeCapabilityIds(),
-                active_tool_set_hash: capabilitySession.activeToolSetHash(),
-                next_tool_ids: selectActiveToolSchemas().map((schema) => schema.id),
-              },
-            }));
           }
         }
         if (
