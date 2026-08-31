@@ -179,7 +179,7 @@ describe("the access chip", () => {
     const items = within(menu).getAllByRole("menuitemradio");
     expect(items).toHaveLength(3);
     expect(items.map((item) => item.textContent)).toEqual([
-      "✓Full workspace accessRuns commands and edits this workspace without asking; host access stays sandboxed",
+      "Full workspace accessRuns commands and edits this workspace without asking; host access stays sandboxed",
       "AutoWorks in the workspace freely; asks before network access",
       "Ask for approvalAsks before every edit, command, or fetch",
     ]);
