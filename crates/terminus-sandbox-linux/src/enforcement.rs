@@ -90,7 +90,8 @@ pub fn run_launcher(args: &[String]) -> Result<i32, SandboxError> {
     let _cgroup = CgroupGuard::create(payload_limits(bwrap_args)?)?;
     let status = std::process::Command::new(bwrap)
         .args(bwrap_args)
-        .status()?;
+        .status()
+        .map_err(|error| contextual_io_error(format!("spawn Bubblewrap at {bwrap}"), error))?;
     Ok(status.code().unwrap_or(128))
 }
 
@@ -492,7 +493,9 @@ impl CgroupGuard {
             ));
         }
         let parent = root.join("terminus");
-        std::fs::create_dir_all(&parent)?;
+        std::fs::create_dir_all(&parent).map_err(|error| {
+            contextual_io_error(format!("create cgroup parent {}", parent.display()), error)
+        })?;
         // The delegated root has controllers enabled for its direct children,
         // but the per-launch parent must enable them again before its job
         // child can receive `*.max` controls. This happens before the
@@ -500,7 +503,9 @@ impl CgroupGuard {
         // is preserved.
         write_control(&parent, "cgroup.subtree_control", "+cpu +memory +pids")?;
         let path = parent.join(format!("job-{}-{}", std::process::id(), monotonic_nonce()));
-        std::fs::create_dir(&path)?;
+        std::fs::create_dir(&path).map_err(|error| {
+            contextual_io_error(format!("create cgroup job {}", path.display()), error)
+        })?;
         let result = (|| {
             if let Some(memory) = limits.memory_bytes {
                 write_control(&path, "memory.max", &memory.to_string())?;
@@ -579,11 +584,19 @@ pub(crate) fn delegated_cgroup_root() -> Option<PathBuf> {
 #[cfg(target_os = "linux")]
 fn write_control(path: &Path, name: &str, value: &str) -> Result<(), SandboxError> {
     std::fs::write(path.join(name), value).map_err(|error| {
-        SandboxError::Io(std::io::Error::new(
-            error.kind(),
-            format!("write cgroup control {name}: {error}"),
-        ))
+        contextual_io_error(
+            format!("write cgroup control {}", path.join(name).display()),
+            error,
+        )
     })
+}
+
+#[cfg(target_os = "linux")]
+fn contextual_io_error(context: impl std::fmt::Display, error: std::io::Error) -> SandboxError {
+    SandboxError::Io(std::io::Error::new(
+        error.kind(),
+        format!("{context}: {error}"),
+    ))
 }
 
 #[cfg(target_os = "linux")]
