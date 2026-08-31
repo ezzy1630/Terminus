@@ -105,8 +105,8 @@ const buildPatchSettled = hasToolResultContaining(request.body, [
   "new_sha256",
 ]);
 const buildExecSettled = hasToolResultContaining(request.body, [
+  "fixture-build-exec",
   "exit_code",
-  "stdout",
 ]);
 const emitDone = (): void => {
   console.log(JSON.stringify({
