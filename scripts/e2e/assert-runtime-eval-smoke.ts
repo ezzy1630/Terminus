@@ -53,8 +53,8 @@ async function main(): Promise<void> {
   const expectedInspect = process.env.TERMINUS_E2E_EXPECT_INSPECT === "1";
   const expectedProviderAttempts = expectedProfile === "adaptive"
     ? expectedInspect ? 5 : 4
-    : 5;
-  const expectedToolSettlements = expectedProfile === "adaptive" && !expectedInspect ? 3 : 4;
+    : 4;
+  const expectedToolSettlements = 3;
   invariant(record.harness === "terminus-live", "run did not use TerminusHarness");
   invariant(record.outcome === "completed", `run outcome was ${String(record.outcome)}`);
   invariant(record.success === true, "declared task grader did not pass");
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
   );
   const expectedKernelOperations = expectedProfile === "adaptive"
     ? expectedInspect ? 4 : 3
-    : 3;
+    : 2;
   invariant(
     count(eventCounts["tool.authorized"], "tool.authorized count") >= expectedKernelOperations,
     "kernel authorizations are missing",

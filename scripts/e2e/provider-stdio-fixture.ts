@@ -104,11 +104,6 @@ const buildPatchSettled = hasToolResultContaining(request.body, [
   "src/main.py",
   "new_sha256",
 ]);
-const buildVerificationReadSettled = hasToolResultContaining(request.body, [
-  "src/main.py",
-  "import sys",
-  "file_sha256",
-]);
 const emitDone = (): void => {
   console.log(JSON.stringify({
     kind: "done",
@@ -213,22 +208,6 @@ if __name__ == "__main__":
         path: "src/main.py",
         expected_utf8: expectedUtf8,
         replacement_utf8: replacementUtf8,
-      },
-    },
-  }));
-  emitDone();
-  process.exit(0);
-}
-
-if (isBuildFailureTask && !buildVerificationReadSettled) {
-  console.log(JSON.stringify({
-    kind: "tool_call",
-    tool_call: {
-      tool_call_id: "fixture-build-verify",
-      tool_name: "read",
-      arguments: {
-        path: "src/main.py",
-        render: "raw",
       },
     },
   }));
