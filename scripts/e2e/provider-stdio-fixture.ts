@@ -104,8 +104,9 @@ const buildPatchSettled = hasToolResultContaining(request.body, [
   "src/main.py",
   "new_sha256",
 ]);
+// A successful command may have empty or artifact-backed output. This task
+// has exactly one exec step, so its typed exit code is the stable marker.
 const buildExecSettled = hasToolResultContaining(request.body, [
-  "fixture-build-exec",
   "exit_code",
 ]);
 const emitDone = (): void => {
