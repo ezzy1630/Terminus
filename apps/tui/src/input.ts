@@ -51,13 +51,22 @@ const SCROLL_ACTIONS: Record<number, MouseInput["action"]> = {
   65: "scroll_down",
 };
 
+const MOUSE_PREFIX = "\u001b[<";
+const MOUSE_FINAL_CHARS = new Set(["M", "m"]);
+const isDigit = (ch: string): boolean => ch >= "0" && ch <= "9";
+const isDigitRun = (value: string): boolean => {
+  if (value.length === 0) return false;
+  for (const ch of value) {
+    if (!isDigit(ch)) return false;
+  }
+  return true;
+};
+
 // skipcq: JS-0067
 function getMouseAction(code: number, finalChar: string): MouseInput["action"] {
   if ((code & 32) !== 0) return "move";
   return finalChar === "M" ? "down" : "up";
 }
-
-const MOUSE_PATTERN = /^\u001b\[<(\d+);(\d+);(\d+)([mM])$/;
 
 // Wheel events carry the button bits differently from press/release events:
 // codes 64/65 map directly to scroll actions and never carry a button.
@@ -67,24 +76,38 @@ const decodeScrollMouse = (code: number, x: number, y: number): MouseInput | nul
   return { kind: "mouse", action: scroll, button: "none", x, y };
 };
 
+// Parses the SGR mouse encoding "ESC [ < code ; x ; y M|m" with segmented
+// string parsing. This keeps the scan linear and keeps the ESC control
+// character out of a regex literal (DeepSource JS-0004 / JS-0117).
+const parseMouseParams = (
+  sequence: string,
+): { readonly code: number; readonly x: number; readonly y: number; readonly finalChar: string } | null => {
+  if (!sequence.startsWith(MOUSE_PREFIX)) return null;
+  const parts = sequence.slice(MOUSE_PREFIX.length).split(";");
+  if (parts.length !== 3) return null;
+  const tail = parts[2]!;
+  const finalChar = tail.slice(-1);
+  if (!MOUSE_FINAL_CHARS.has(finalChar)) return null;
+  const fields = [parts[0]!, parts[1]!, tail.slice(0, -1)];
+  if (!fields.every((field) => isDigitRun(field))) return null;
+  return { code: Number(fields[0]!), x: Number(fields[1]!), y: Number(fields[2]!), finalChar };
+};
+
 // skipcq: JS-0067
 export function decodeMouse(sequence: string): MouseInput | null {
-  const match = MOUSE_PATTERN.exec(sequence);
-  if (match === null) return null;
-  const code = Number(match[1]);
-  const x = Number(match[2]);
-  const y = Number(match[3]);
-  const scroll = decodeScrollMouse(code, x, y);
+  const params = parseMouseParams(sequence);
+  if (params === null) return null;
+  const scroll = decodeScrollMouse(params.code, params.x, params.y);
   if (scroll !== null) return scroll;
   return {
     kind: "mouse",
-    action: getMouseAction(code, match[4] as string),
+    action: getMouseAction(params.code, params.finalChar),
     // The mask always lands inside MOUSE_BUTTONS (4 entries), so the index
     // lookup is total; `code % 4` is equivalent to `code & 3` for non-negative
     // codes and keeps the decision structure flat.
-    button: MOUSE_BUTTONS[code % MOUSE_BUTTONS.length] as MouseInput["button"],
-    x,
-    y,
+    button: MOUSE_BUTTONS[params.code % MOUSE_BUTTONS.length] as MouseInput["button"],
+    x: params.x,
+    y: params.y,
   };
 }
 

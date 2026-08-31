@@ -103,51 +103,62 @@ function parsePytestLine(line: string): { primaryPath: string; testName: string;
 }
 
 const isWhitespace = (ch: string): boolean => " \t\r\n\f\v".includes(ch);
-const isStackNameChar = (ch: string): boolean => /[A-Za-z0-9_$.<>]/.test(ch);
+const STACK_NAME_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$.<>";
+const isStackNameChar = (ch: string): boolean => STACK_NAME_CHARS.includes(ch);
 const isDigit = (ch: string): boolean => ch >= "0" && ch <= "9";
 
-// Reads a run of ASCII digits starting at `from`. Returns the index just past
-// the run, or -1 when the run is empty.
-const readDigits = (line: string, from: number): number => {
+// Skips a run of accepted characters; returns the index just past the run.
+const skipRun = (line: string, from: number, accept: (ch: string) => boolean): number => {
   let i = from;
-  while (i < line.length && isDigit(line[i]!)) i++;
-  return i > from ? i : -1;
+  while (i < line.length && accept(line[i]!)) i++;
+  return i;
+};
+
+// Requires at least one accepted character; returns the index just past the
+// run, or -1 when the run is empty.
+const readRun = (line: string, from: number, accept: (ch: string) => boolean): number => {
+  const end = skipRun(line, from, accept);
+  return end === from ? -1 : end;
+};
+
+// Parses ":LINE:COLUMN)" after the path colon of a V8-style frame.
+const parseStackNumbers = (line: string, from: number): { line: number; column: number } | null => {
+  const lineEnd = readRun(line, from, isDigit);
+  if (lineEnd < 0 || line[lineEnd] !== ":") return null;
+  const columnEnd = readRun(line, lineEnd + 1, isDigit);
+  if (columnEnd < 0 || line[columnEnd] !== ")") return null;
+  return {
+    line: Number.parseInt(line.slice(from, lineEnd), 10),
+    column: Number.parseInt(line.slice(lineEnd + 1, columnEnd), 10),
+  };
+};
+
+// Parses "(<path>:<line>:<column>)" after the frame name.
+const parseStackTail = (line: string, from: number, frameIndex: number, functionName: string): StackFrame | null => {
+  const pathColon = line.indexOf(":", from + 1);
+  if (pathColon <= from + 1) return null;
+  const numbers = parseStackNumbers(line, pathColon + 1);
+  if (numbers === null) return null;
+  return {
+    frameIndex,
+    functionName,
+    path: line.slice(from + 1, pathColon),
+    line: numbers.line,
+    column: numbers.column,
+  };
 };
 
 // Parses one V8-style stack frame starting at the `at` occurrence:
 // "at <name> (<path>:<line>:<column>)". Each segment is bounded by a literal
 // delimiter, so scanning never walks the whole line per candidate.
 const parseStackFrameAt = (line: string, at: number, frameIndex: number): StackFrame | null => {
-  let i = at + 2;
-  if (i >= line.length || !isWhitespace(line[i]!)) return null;
-  while (i < line.length && isWhitespace(line[i]!)) i++;
-
-  const nameStart = i;
-  if (i >= line.length || !isStackNameChar(line[i]!)) return null;
-  while (i < line.length && isStackNameChar(line[i]!)) i++;
-  const functionName = line.slice(nameStart, i);
-
-  if (i >= line.length || !isWhitespace(line[i]!)) return null;
-  while (i < line.length && isWhitespace(line[i]!)) i++;
-  if (line[i] !== "(") return null;
-
-  const pathStart = i + 1;
-  const pathColon = line.indexOf(":", pathStart);
-  if (pathColon < 0 || pathColon === pathStart) return null;
-  const path = line.slice(pathStart, pathColon);
-
-  const lineEnd = readDigits(line, pathColon + 1);
-  if (lineEnd < 0 || line[lineEnd] !== ":") return null;
-  const columnEnd = readDigits(line, lineEnd + 1);
-  if (columnEnd < 0 || line[columnEnd] !== ")") return null;
-
-  return {
-    frameIndex,
-    functionName,
-    path,
-    line: Number.parseInt(line.slice(pathColon + 1, lineEnd), 10),
-    column: Number.parseInt(line.slice(lineEnd + 1, columnEnd), 10),
-  };
+  const nameStart = readRun(line, at + 2, isWhitespace);
+  if (nameStart < 0) return null;
+  const nameEnd = readRun(line, nameStart, isStackNameChar);
+  if (nameEnd < 0) return null;
+  const paren = readRun(line, nameEnd, isWhitespace);
+  if (paren < 0 || line[paren] !== "(") return null;
+  return parseStackTail(line, paren, frameIndex, line.slice(nameStart, nameEnd));
 };
 
 // skipcq: JS-0067

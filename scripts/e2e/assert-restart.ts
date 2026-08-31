@@ -108,6 +108,11 @@ async function boundedCleanup(operation: Promise<unknown>): Promise<boolean> {
   return completed;
 }
 
+// The SSE replay loop is one timing-sensitive block: the bounded-cleanup
+// fences and the live-mutation settle window only make sense together, and
+// splitting them would trade a measured wait for indirection. The complexity
+// is accepted here on purpose.
+// skipcq: JS-R1005
 const readReplayEvents = async (
   cursor: string,
   filterTaskId: string,
