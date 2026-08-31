@@ -545,15 +545,12 @@ function defineConfigProperty(target: Record<string, unknown>, key: string, valu
  *  - a strictly smaller numeric value (for limits),
  *  - a shorter array (for deny-lists).
  */
-function isWeakenedString(prev: string, next: string): boolean {
-  if (prev === "deny") return next === "allow" || next === "optional";
-  if (prev === "required") return next === "optional";
-  return false;
-}
+const WEAKEN_TRANSITIONS = new Set(["deny->allow", "deny->optional", "required->optional"]);
 
+// skipcq: JS-0067
 function isWeakened(prev: unknown, next: unknown): boolean {
   if (typeof prev === "string" && typeof next === "string") {
-    return isWeakenedString(prev, next);
+    return WEAKEN_TRANSITIONS.has(`${prev}->${next}`);
   }
   if (typeof prev === "number" && typeof next === "number") {
     return next < prev;

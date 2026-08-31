@@ -53,18 +53,23 @@ export const DEFAULT_PROMOTION_POLICY: PromotionPolicy = {
   requireVerification: true,
 };
 
+function isProcedureClaim(claim: MemoryClaim): boolean {
+  return claim.kind === "procedure" && claim.status === "active" && claim.procedureArtifactHash !== null;
+}
+
+function satisfiesPromotionUsage(claim: MemoryClaim, policy: PromotionPolicy): boolean {
+  if (claim.usage.successfulUses < policy.minSuccessfulUses) return false;
+  if (claim.usage.harmfulUses > policy.maxHarmfulUses) return false;
+  if (policy.requireVerification && claim.verification.lastVerifiedAt === null) return false;
+  return true;
+}
+
+// skipcq: JS-0067
 export function isPromotionEligible(
   claim: MemoryClaim,
   policy: PromotionPolicy = DEFAULT_PROMOTION_POLICY,
 ): boolean {
-  return (
-    claim.kind === "procedure" &&
-    claim.status === "active" &&
-    claim.procedureArtifactHash !== null &&
-    claim.usage.successfulUses >= policy.minSuccessfulUses &&
-    claim.usage.harmfulUses <= policy.maxHarmfulUses &&
-    (!policy.requireVerification || claim.verification.lastVerifiedAt !== null)
-  );
+  return isProcedureClaim(claim) && satisfiesPromotionUsage(claim, policy);
 }
 
 export function toPromotionCandidate(claim: MemoryClaim): SkillPromotionCandidate {

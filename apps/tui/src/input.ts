@@ -43,8 +43,10 @@ function key(name: string, text = "", options: Partial<Omit<KeyInput, "kind" | "
   };
 }
 
+const MOUSE_BUTTONS: readonly ("left" | "middle" | "right" | "none")[] = ["left", "middle", "right", "none"];
+
 // skipcq: JS-0067
-const decodeMouse = (sequence: string): MouseInput | null => {
+export function decodeMouse(sequence: string): MouseInput | null {
   const match = /^\u001b\[<(\d+);(\d+);(\d+)([mM])$/.exec(sequence);
   if (!match) return null;
   const code = Number(match[1]);
@@ -52,11 +54,10 @@ const decodeMouse = (sequence: string): MouseInput | null => {
   const y = Number(match[3]);
   if (code === 64) return { kind: "mouse", action: "scroll_up", button: "none", x, y };
   if (code === 65) return { kind: "mouse", action: "scroll_down", button: "none", x, y };
-  const buttonCode = code & 3;
-  const button = buttonCode === 0 ? "left" : buttonCode === 1 ? "middle" : buttonCode === 2 ? "right" : "none";
+  const button = MOUSE_BUTTONS[code & 3] ?? "none";
   const action = (code & 32) !== 0 ? "move" : match[4] === "M" ? "down" : "up";
   return { kind: "mouse", action, button, x, y };
-};
+}
 
 /** Decode one terminal data chunk. Bracketed paste is returned as text. */
 export function decodeTerminalInput(data: Uint8Array | string): readonly TerminalInput[] {

@@ -19,6 +19,7 @@
  * immediately before an object/array closer, drop them. Then append the
  * closers for any openers still open, honoring string state.
  */
+// skipcq: JS-0067
 function repairUnbalancedJson(text: string): string | null {
   // Pass 1: drop commas directly followed by a closer, outside strings.
   let out = "";

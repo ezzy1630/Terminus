@@ -211,19 +211,27 @@ export type EscalationReason =
 
 // ────────────────────────── Scoring ──────────────────────────────────────────
 
+function meetsQuality(model: ModelCapabilitySnapshot, min: CapabilityRequirements): boolean {
+  if (min.codingQuality === "high") return model.snapshot.reliability.editCohortSuccess >= 0.85;
+  if (min.codingQuality === "medium") return model.snapshot.reliability.editCohortSuccess >= 0.7;
+  return true;
+}
+
+function meetsToolAndContext(model: ModelCapabilitySnapshot, min: CapabilityRequirements): boolean {
+  if (min.toolReliability === "high" && model.snapshot.reliability.toolCallSuccess < 0.95) return false;
+  if (min.toolReliability === "medium" && model.snapshot.reliability.toolCallSuccess < 0.85) return false;
+  if (min.structuredOutput === "required" && !model.snapshot.context.structuredOutput) return false;
+  if (min.context === "large" && model.snapshot.context.testedSafeTokens < 128_000) return false;
+  if (min.context === "medium" && model.snapshot.context.testedSafeTokens < 32_000) return false;
+  return true;
+}
+
+// skipcq: JS-0067
 function meetsMinimum(
   model: ModelCapabilitySnapshot,
   min: CapabilityRequirements,
 ): boolean {
-  return (
-    (min.codingQuality !== "high" || model.snapshot.reliability.editCohortSuccess >= 0.85) &&
-    (min.codingQuality !== "medium" || model.snapshot.reliability.editCohortSuccess >= 0.7) &&
-    (min.toolReliability !== "high" || model.snapshot.reliability.toolCallSuccess >= 0.95) &&
-    (min.toolReliability !== "medium" || model.snapshot.reliability.toolCallSuccess >= 0.85) &&
-    (min.structuredOutput !== "required" || Boolean(model.snapshot.context.structuredOutput)) &&
-    (min.context !== "large" || model.snapshot.context.testedSafeTokens >= 128_000) &&
-    (min.context !== "medium" || model.snapshot.context.testedSafeTokens >= 32_000)
-  );
+  return meetsQuality(model, min) && meetsToolAndContext(model, min);
 }
 
 function scoreModel(model: ModelCapabilitySnapshot, input: RouterInputs): number {
@@ -275,6 +283,7 @@ function scoreModel(model: ModelCapabilitySnapshot, input: RouterInputs): number
   return score;
 }
 
+// skipcq: JS-0067
 function isStrongerThan(a: ModelCapabilitySnapshot, b: ModelCapabilitySnapshot): boolean {
   // A model is "stronger" if it has a larger tested-safe context window AND
   // >= reliability on edit cohort, OR if it has higher reliability.
