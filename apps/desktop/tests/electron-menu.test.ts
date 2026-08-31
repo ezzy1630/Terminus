@@ -57,7 +57,7 @@ function accelerators(items: readonly MenuItemConstructorOptions[]): string[] {
 describe("application menu", () => {
   test("has the expected top-level menus", () => {
     expect(template().map((item) => item.label))
-      .toEqual(["Terminus", "File", "Edit", "View", "Task", "Window", "Help"]);
+      .toEqual(["Terminus", "File", "Edit", "View", "Run", "Window", "Help"]);
   });
 
   test("leaves the number accelerators to the renderer's task selection", () => {
@@ -84,14 +84,14 @@ describe("application menu", () => {
     expect(actions.calls.showMainWindow).toBeDefined();
   });
 
-  test("Task ▸ Stop run is bound to ⌘.", () => {
-    const stop = submenu(template(), "Task").find((entry) => entry.label === "Stop run");
+  test("Run ▸ Stop run is bound to ⌘.", () => {
+    const stop = submenu(template(), "Run").find((entry) => entry.label === "Stop run");
     expect(stop?.accelerator).toBe("CommandOrControl+.");
   });
 
-  test("Task ▸ Stop run sends the stop-run command", () => {
+  test("Run ▸ Stop run sends the stop-run command", () => {
     const actions = actionSpies();
-    const stop = submenu(template({ actions }), "Task").find((entry) => entry.label === "Stop run");
+    const stop = submenu(template({ actions }), "Run").find((entry) => entry.label === "Stop run");
     stop?.click?.(undefined as never, undefined as never, undefined as never);
     expect(actions.calls.sendCommand).toEqual(["stop-run"]);
   });

@@ -24,7 +24,7 @@ import type { ReactNode } from "react";
 interface LayoutProps {
   sidebar: ReactNode;
   sidebarVisible?: boolean;
-  /** Overlay the sidebar at narrow widths while a technical surface is open. */
+  /** Retained for call-site compatibility; narrow layouts never overlay content. */
   sidebarOverlay?: boolean;
   main: ReactNode;
   inspector: ReactNode;
@@ -46,7 +46,7 @@ const SIDEBAR_MAX_WIDTH = 360;
 const INSPECTOR_DEFAULT_WIDTH = 320;
 const INSPECTOR_MIN_WIDTH = 260;
 const INSPECTOR_MAX_WIDTH = 420;
-const MIN_MAIN_WIDTH = 360;
+const MIN_MAIN_WIDTH = 560;
 const RESIZE_HANDLE_WIDTH = 4;
 // The task-centered shell uses a narrower range than the retired cockpit.
 // Version the preference so an old 380px admin-sidebar setting cannot make
@@ -158,7 +158,7 @@ function ResizeHandle({ label, value, min, max, direction, testId, onChange }: R
 function LayoutImpl({
   sidebar,
   sidebarVisible = true,
-  sidebarOverlay = false,
+  sidebarOverlay: _sidebarOverlay = false,
   main,
   inspector,
   inspectorVisible = true,
@@ -170,22 +170,26 @@ function LayoutImpl({
   const [sidebarWidth, setSidebarWidth] = useState(() => readWidth(SIDEBAR_WIDTH_KEY, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH));
   const [inspectorWidth, setInspectorWidth] = useState(() => readWidth(INSPECTOR_WIDTH_KEY, INSPECTOR_DEFAULT_WIDTH, INSPECTOR_MIN_WIDTH, INSPECTOR_MAX_WIDTH));
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
-  const useSidebarOverlay = sidebarVisible && sidebarOverlay && viewportWidth < 1080;
-  const useInspectorOverlay = inspectorVisible && viewportWidth < 1200;
+  // Optional context yields before the primary work surface. Overlaying either
+  // dock made a 1000px window look roomy while silently covering the composer.
+  // Keep navigation docked and auto-hide details when both cannot fit beside a
+  // useful 560px transcript.
+  const renderInspector = inspectorVisible
+    && viewportWidth >= SIDEBAR_MIN_WIDTH + INSPECTOR_MIN_WIDTH + MIN_MAIN_WIDTH + (RESIZE_HANDLE_WIDTH * 2);
   const fittedDocks = fitDockWidths({
     viewportWidth,
-    sidebarVisible: sidebarVisible && !useSidebarOverlay,
-    inspectorVisible: inspectorVisible && !useInspectorOverlay,
+    sidebarVisible,
+    inspectorVisible: renderInspector,
     preferredSidebarWidth: sidebarWidth,
     preferredInspectorWidth: inspectorWidth,
   });
-  const renderedSidebarWidth = useSidebarOverlay ? sidebarWidth : fittedDocks.sidebarWidth;
-  const renderedInspectorWidth = useInspectorOverlay ? Math.min(inspectorWidth, 360) : fittedDocks.inspectorWidth;
+  const renderedSidebarWidth = fittedDocks.sidebarWidth;
+  const renderedInspectorWidth = fittedDocks.inspectorWidth;
   const sidebarResizeMax = Math.max(
     SIDEBAR_MIN_WIDTH,
     Math.min(
       SIDEBAR_MAX_WIDTH,
-      fittedDocks.dockBudget - (inspectorVisible ? INSPECTOR_MIN_WIDTH : 0),
+      fittedDocks.dockBudget - (renderInspector ? INSPECTOR_MIN_WIDTH : 0),
     ),
   );
   const inspectorResizeMax = Math.max(
@@ -197,7 +201,7 @@ function LayoutImpl({
   );
   const resizeSidebar = (nextWidth: number): void => {
     setSidebarWidth(nextWidth);
-    if (inspectorVisible && nextWidth + inspectorWidth > fittedDocks.dockBudget) {
+    if (renderInspector && nextWidth + inspectorWidth > fittedDocks.dockBudget) {
       setInspectorWidth(Math.max(INSPECTOR_MIN_WIDTH, fittedDocks.dockBudget - nextWidth));
     }
   };
@@ -226,7 +230,6 @@ function LayoutImpl({
       className="app-shell relative flex h-full w-full flex-col bg-canvas text-primary"
       style={{
         fontFamily: "var(--font-family)",
-        "--window-drag-width": sidebarVisible ? `${renderedSidebarWidth}px` : "124px",
       } as React.CSSProperties}
     >
       <div className="window-drag-zone" aria-hidden />
@@ -245,7 +248,6 @@ function LayoutImpl({
           className={cn(
             "flex h-full flex-col border-r bg-sidebar",
             density === "compact" && "py-0",
-            useSidebarOverlay && "absolute inset-y-0 left-0 z-30 shadow-2xl",
           )}
           style={{
             borderColor: 'var(--sidebar-separator)',
@@ -257,7 +259,7 @@ function LayoutImpl({
           {sidebar}
         </aside> : null}
 
-        {sidebarVisible && !useSidebarOverlay ? (
+        {sidebarVisible ? (
           <ResizeHandle
             testId="sidebar-resize-handle"
             label="Resize sidebar"
@@ -275,26 +277,21 @@ function LayoutImpl({
             <div className="min-h-0 flex-1 overflow-hidden">{main}</div>
           </section>
 
-          {inspectorVisible ? (
+          {renderInspector ? (
             <>
-              {!useInspectorOverlay ? (
-                <ResizeHandle
-                  testId="inspector-resize-handle"
-                  label="Resize inspector"
-                  value={fittedDocks.inspectorWidth}
-                  min={INSPECTOR_MIN_WIDTH}
-                  max={inspectorResizeMax}
-                  direction="left"
-                  onChange={resizeInspector}
-                />
-              ) : null}
+              <ResizeHandle
+                testId="inspector-resize-handle"
+                label="Resize inspector"
+                value={fittedDocks.inspectorWidth}
+                min={INSPECTOR_MIN_WIDTH}
+                max={inspectorResizeMax}
+                direction="left"
+                onChange={resizeInspector}
+              />
               <div
                 data-testid="inspector-dock"
-                data-layout={useInspectorOverlay ? "overlay" : "docked"}
-                className={cn(
-                  "inspector-dock flex h-full shrink-0 flex-col",
-                  useInspectorOverlay && "absolute inset-y-0 right-0 z-30 shadow-2xl",
-                )}
+                data-layout="docked"
+                className="inspector-dock flex h-full shrink-0 flex-col"
                 style={{ width: renderedInspectorWidth }}
               >
                 {/* One contextual surface, inset from the transcript. It is

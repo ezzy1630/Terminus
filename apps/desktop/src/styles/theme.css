@@ -157,25 +157,25 @@
      paints chrome a hair lighter than the transcript, not darker). No blue in
      the neutrals — the base is a true warm-neutral charcoal so the one accent
      reads as the only colour in the room. */
-  --bg-canvas: #0d0d0f;
-  --bg-elevated: #171719;
-  --bg-sidebar: #141416;
-  --bg-inspector: #141416;
-  --bg-terminal: #161613;
-  --bg-diff: #0c0c0e;
-  --bg-composer: #1a1a1d;
-  --bg-card: #161618;
-  --bg-hover: #1c1c1f;
+  --bg-canvas: #151516;
+  --bg-elevated: #1e1e20;
+  --bg-sidebar: #1b1b1d;
+  --bg-inspector: #1b1b1d;
+  --bg-terminal: #191918;
+  --bg-diff: #141416;
+  --bg-composer: #202023;
+  --bg-card: #1d1d1f;
+  --bg-hover: #262629;
   /* Selection is a neutral fill, like Codex — no accent wash, no bar. */
-  --bg-selected: #26262b;
-  --bg-subtle: #19191b;
-  --bg-nav-hover: #1a1a1c;
-  --bg-control-pressed: #2e2e33;
-  --bg-popover: #1e1e21;
+  --bg-selected: #313136;
+  --bg-subtle: #202022;
+  --bg-nav-hover: #232325;
+  --bg-control-pressed: #36363a;
+  --bg-popover: #252527;
   --text-primary: #ededee;
   --text-secondary: #a2a2a9;
-  --text-tertiary: #8e8e96;
-  --text-placeholder: #8e8e96;
+  --text-tertiary: #9898a0;
+  --text-placeholder: #9898a0;
   --text-inverse: #131417;
   --text-on-accent: #ffffff;
   --text-code: #eaeaec;
@@ -192,10 +192,10 @@
   --accent-dim: color-mix(in srgb, var(--accent) 62%, var(--bg-canvas));
   --accent-wash: color-mix(in srgb, var(--accent) 12%, transparent);
   --text-accent: var(--accent);
-  --border-subtle: #202023;
-  --border-default: #2b2b2f;
-  --border-strong: #3c3c42;
-  --sidebar-separator: #1d1d20;
+  --border-subtle: #2a2a2d;
+  --border-default: #37373b;
+  --border-strong: #4a4a50;
+  --sidebar-separator: #27272a;
   --semantic-success: #57b96d;
   --semantic-error: #ee6a62;
   /* Codex draws its "Full access" indicator in a warm caution-orange, not
@@ -260,7 +260,7 @@
     --bg-elevated: #ffffff;
     --bg-sidebar: #ebedf1;
     --bg-inspector: #ffffff;
-    --bg-terminal: #1b1b19;
+    --bg-terminal: #f0f1f3;
     --bg-diff: #f8f9fb;
     --bg-composer: #ffffff;
     --bg-card: #ffffff;
@@ -275,7 +275,7 @@
     --text-placeholder: #59626e;
     --text-inverse: #ffffff;
     --text-on-accent: #ffffff;
-    --text-code: #ececea;
+    --text-code: #24272d;
     --accent: #007AFF;
     --accent-hover: color-mix(in srgb, var(--accent) 84%, #000000);
     --accent-pressed: color-mix(in srgb, var(--accent) 70%, #000000);
@@ -309,7 +309,7 @@
   --bg-elevated: #ffffff;
   --bg-sidebar: #ebedf1;
   --bg-inspector: #ffffff;
-  --bg-terminal: #1b1b19;
+  --bg-terminal: #f0f1f3;
   --bg-diff: #f8f9fb;
   --bg-composer: #ffffff;
   --bg-card: #ffffff;
@@ -324,7 +324,7 @@
   --text-placeholder: #59626e;
   --text-inverse: #ffffff;
   --text-on-accent: #ffffff;
-  --text-code: #ececea;
+  --text-code: #24272d;
   --accent: #007AFF;
   --accent-hover: color-mix(in srgb, var(--accent) 84%, #000000);
   --accent-pressed: color-mix(in srgb, var(--accent) 70%, #000000);

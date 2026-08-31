@@ -3,8 +3,7 @@
  *
  * Per SPEC §9.3: hybrid response structure. Normal explanation stays as
  * prose; structured actions use purpose-built compact blocks. A run of them
- * reads as one continuous timeline against a single hairline rail
- * (`.activity-block::before` in globals.css), the way Codex reports its work:
+ * reads as one quiet list of inline progress disclosures:
  *
  *   › ● Explored codebase · 12 files
  *   › ● Ran commands · 3 runs passed
@@ -28,7 +27,7 @@ import { clockTimestamp } from "../lib/time";
 import type { ActivityBlock as ActivityBlockData, ActivityBlockStatus } from "../types";
 import { Button } from "../ui/Button";
 import type { TaskLifecycle } from "../lib/task-lifecycle";
-import { boundedActivityDetail, ProgressDrawer } from "./ProgressDrawer";
+import { boundedActivityDetail } from "./ProgressDrawer";
 
 interface ActivityBlockProps {
   block: ActivityBlockData;
@@ -100,11 +99,10 @@ function ActivityBlockImpl({
   block,
   defaultExpanded = false,
   onRetry,
-  joinsAbove = false,
-  joinsBelow = false,
+  joinsAbove: _joinsAbove = false,
+  joinsBelow: _joinsBelow = false,
 }: ActivityBlockProps): JSX.Element {
   const [expanded, setExpanded] = useState(defaultExpanded);
-  const [progressOpen, setProgressOpen] = useState(false);
   const kind = statusKind(block.status);
 
   const failed = block.status === "failed";
@@ -114,18 +112,7 @@ function ActivityBlockImpl({
       // A failure is announced, not just drawn. Everything else is quiet.
       role={failed ? "alert" : undefined}
       className={cn(
-        // No divider. Consecutive blocks share one continuous rail
-        // (.activity-block::before), so a rule under each one cut the timeline
-        // the rail exists to draw into a stack of table rows.
-        //
-        // `overflow-hidden` used to sit here and clipped that rail's 3px bleed
-        // flush to the block's own box, so the rail could never have joined two
-        // blocks even before the listitem wrappers broke the `:first-of-type`
-        // clamp. Nothing inside needs clipping — the detail pane scrolls itself
-        // and the header truncates its own title.
         "activity-block selectable my-0.5",
-        joinsAbove && "before:top-[-3px]!",
-        joinsBelow && "before:bottom-[-3px]!",
         expanded && "is-expanded",
       )}
     >
@@ -134,33 +121,16 @@ function ActivityBlockImpl({
         <Button
           type="button"
           variant="bare"
-          onClick={() => setExpanded((e) => !e)}
+          onClick={() => setExpanded((value) => !value)}
           aria-expanded={expanded}
           aria-label={`${expanded ? "Collapse" : "Expand"} details for ${block.title}`}
-          className={cn(
-            "ml-0.5 flex h-6 w-5 shrink-0 items-center justify-center rounded-md text-tertiary hover:bg-selected hover:text-primary",
-            expanded
-              ? "opacity-100"
-              : "opacity-0 group-hover/activity:opacity-100 group-focus-within/activity:opacity-100",
-          )}
+          className="flex min-h-7 min-w-0 flex-1 items-center justify-start gap-2 rounded-md px-1.5 text-left"
         >
           <ChevronRight
             size={12}
-            className={cn("flex-shrink-0 text-tertiary transition-transform", expanded && "rotate-90")}
+            className={cn("shrink-0 text-tertiary transition-transform", expanded && "rotate-90")}
             aria-hidden
           />
-        </Button>
-        <Button
-          type="button"
-          variant="bare"
-          onClick={() => block.entries.length > 0
-            ? setProgressOpen(true)
-            : setExpanded((value) => !value)}
-          aria-label={block.entries.length > 0
-            ? `Open progress for ${block.title}`
-            : `${block.title}, status ${block.status}${block.metric ? `, ${block.metric}` : ""}`}
-          className="flex min-h-7 min-w-0 flex-1 items-center justify-start gap-2 rounded-md px-1.5 text-left"
-        >
           <span className="activity-status flex w-4 flex-shrink-0 items-center justify-center">
             <StatusIndicator status={kind} size={10} />
           </span>
@@ -251,7 +221,6 @@ function ActivityBlockImpl({
           </span>
         </div>
       ) : null}
-      <ProgressDrawer block={block} open={progressOpen} onOpenChange={setProgressOpen} />
     </div>
   );
 }

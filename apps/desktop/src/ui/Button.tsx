@@ -48,7 +48,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       data-tooltip-radix={tooltip ? "" : undefined}
       className={cn(
         variant === "bare"
-          ? "cursor-pointer appearance-none border-0 bg-transparent p-0 text-left disabled:cursor-not-allowed disabled:opacity-45"
+          ? "appearance-none border-0 bg-transparent p-0 text-left disabled:cursor-not-allowed disabled:opacity-45"
           : cn(
             "ui-button inline-flex shrink-0 items-center justify-center whitespace-nowrap border transition-[background,color,border-color,transform,filter] disabled:cursor-not-allowed disabled:opacity-45",
             variantClasses[variant],

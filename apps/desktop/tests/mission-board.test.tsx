@@ -7,6 +7,7 @@ import { buildDefaultCommands } from "../src/lib/command-catalog";
 import {
   attentionReason,
   attentionTone,
+  boardLifecycle,
   boardColumnForStatus,
   boardColumnForTaskPlacement,
   boardTransitionForDrop,
@@ -166,6 +167,10 @@ describe("mission board domain mapping", () => {
     // the running column while the sidebar rendered the same task as "Queued".
     expect(boardColumnForStatus("DRAFT")).toBe("queued");
     expect(boardColumnForStatus("READY")).toBe("queued");
+  });
+
+  test("does not claim an unhydrated durable task has an active turn", () => {
+    expect(boardLifecycle(task("task-running", "RUNNING", "Running task"), undefined, "unknown")).toBe("idle");
   });
 
   test("projects runtime states into stable workflow columns", () => {
@@ -666,8 +671,9 @@ describe("MissionBoardView", () => {
       await new Promise((resolve) => window.setTimeout(resolve, 180));
     });
 
-    // The live event moved it to RUNNING, so it crosses into Working.
-    expect(await screen.findByTestId("mission-board-column-working")).toHaveTextContent("Live task");
-    expect(screen.getByTestId("mission-board-column-queued")).not.toHaveTextContent("Live task");
+    // V2 RUNNING says the durable task is active, not that a turn is executing.
+    // Without a hydrated turn record the board must not invent live work.
+    expect(await screen.findByTestId("mission-board-column-queued")).toHaveTextContent("Live task");
+    expect(screen.getByTestId("mission-board-column-working")).not.toHaveTextContent("Live task");
   });
 });

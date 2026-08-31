@@ -174,7 +174,7 @@ describe("ActivityBlock", () => {
     expect(screen.getByText("18 passed, 0 failed")).toBeInTheDocument();
   });
 
-  test("opens read-only progress from the activity data already in the transcript", async () => {
+  test("keeps exact progress inline instead of opening a second surface", async () => {
     render(
       <ActivityBlock
         block={{
@@ -195,16 +195,9 @@ describe("ActivityBlock", () => {
       />,
     );
 
-    await userEvent.setup().click(screen.getByRole("button", { name: "Open progress for Ran focused tests" }));
-    const drawer = screen.getByRole("dialog", { name: "Progress for Ran focused tests" });
-    expect(within(drawer).getByText("bun run test -- auth-refresh")).toBeInTheDocument();
-    expect(within(drawer).getByText(/Succeeded/)).toBeInTheDocument();
-    expect(within(drawer).getByText("6 passed, 0 failed")).not.toBeVisible();
-
-    fireEvent.click(within(drawer).getByText("Exact details"));
-    expect(within(drawer).getByText("operation-1")).toBeInTheDocument();
-    expect(within(drawer).getByText("6 passed, 0 failed")).toBeInTheDocument();
-    fireEvent.click(within(drawer).getByRole("button", { name: "Close progress" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "Expand details for Ran focused tests" }));
+    expect(screen.getByText("bun run test -- auth-refresh")).toBeInTheDocument();
+    expect(screen.getByText("6 passed, 0 failed")).toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: "Progress for Ran focused tests" })).not.toBeInTheDocument();
   });
 
@@ -1362,10 +1355,10 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(composer).toHaveValue("Keep this exact retry");
   });
 
-  test("opts the native composer out of browser writing-assistant injection", () => {
+  test("keeps native spelling while opting out of third-party writing assistants", () => {
     render(<Composer onCreateTask={vi.fn(async () => undefined)} />);
     const textbox = screen.getByRole("textbox", { name: "Message composer" });
-    expect(textbox).toHaveAttribute("spellcheck", "false");
+    expect(textbox).toHaveAttribute("spellcheck", "true");
     expect(textbox).toHaveAttribute("data-gramm", "false");
     expect(textbox).toHaveAttribute("data-gramm_editor", "false");
   });
@@ -1463,7 +1456,8 @@ describe("NewTaskScreen — first turn lifecycle", () => {
   test("keeps the start surface focused on project context and one composer", () => {
     render(<NewTaskScreen />);
 
-    expect(screen.getByRole("heading", { name: "What should we build in Terminus?" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What should Terminus do?" })).toBeInTheDocument();
+    expect(screen.getByText(/Working in/)).toHaveTextContent("Working in Terminus");
     expect(screen.getByRole("button", { name: "Change project" })).toHaveTextContent("Terminus");
     expect(screen.getAllByRole("textbox", { name: "Message composer" })).toHaveLength(1);
     expect(screen.queryByText("Map the codebase")).not.toBeInTheDocument();
@@ -1513,8 +1507,8 @@ describe("Sidebar — navigation destinations", () => {
     render(<Sidebar onSearch={onSearch} />);
 
     expect(screen.getAllByRole("button", { name: "New thread" })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Board" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Search" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^(Board|Kanban|Sessions)/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Needs you/ })).not.toBeInTheDocument();
     // "Agents" joins this list: it rendered a directory of departments,
     // operators and rooms that no route supplies.
@@ -1558,8 +1552,8 @@ describe("Sidebar — navigation destinations", () => {
     render(<Sidebar onToggleSidebar={onToggleSidebar} />);
 
     const toggle = screen.getByRole("button", { name: "Hide sidebar" });
-    const threads = screen.getByRole("tab", { name: "Threads" });
-    const projects = screen.getByRole("tab", { name: "Projects" });
+    const threads = screen.getByRole("button", { name: "Threads" });
+    const projects = screen.getByRole("button", { name: "Projects" });
     expect(toggle.parentElement).toHaveAttribute("class", expect.stringContaining("items-center"));
     expect(toggle.parentElement).not.toContainElement(threads);
     expect(threads.parentElement).toBe(projects.parentElement);
@@ -1665,7 +1659,7 @@ describe("Sidebar — navigation destinations", () => {
     await userEvent.click(screen.getByRole("button", { name: "Load more projects" }));
 
     await waitFor(() => expect(useTerminusStore.getState().sessions.some((session) => session.id === "session-page-2")).toBe(true));
-    await userEvent.click(screen.getByRole("tab", { name: "Projects" }));
+    await userEvent.click(screen.getByRole("button", { name: "Projects" }));
     expect(screen.getByText("Second project")).toBeInTheDocument();
     expect(api.listSessions).toHaveBeenCalledWith({ cursor: "cursor-projects" });
     expect(useTerminusStore.getState().sessionsPage.nextCursor).toBeNull();
@@ -1692,7 +1686,7 @@ describe("Sidebar — navigation destinations", () => {
     act(() => useTerminusStore.setState({ refreshSessions: originalRefreshSessions }));
   });
 
-  test("keeps offline recovery reachable without duplicating project errors", async () => {
+  test("delegates offline recovery to the one global connection banner", () => {
     const originalRefreshAll = useTerminusStore.getState().refreshAll;
     const refreshAll = vi.fn(async () => undefined);
     useTerminusStore.setState({
@@ -1709,8 +1703,8 @@ describe("Sidebar — navigation destinations", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByText(/Failed to fetch/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry projects" })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Retry connection" }));
-    expect(refreshAll).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Retry connection" })).not.toBeInTheDocument();
+    expect(refreshAll).not.toHaveBeenCalled();
     act(() => useTerminusStore.setState({
       refreshAll: originalRefreshAll,
       healthReady: true,

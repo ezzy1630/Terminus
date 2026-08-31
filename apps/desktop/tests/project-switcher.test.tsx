@@ -127,12 +127,14 @@ describe("the switcher menu", () => {
 
     await user.click(screen.getByRole("button", { name: "Switch project" }));
 
-    const items = await screen.findAllByRole("menuitem");
-    expect(items.map((item) => item.textContent)).toEqual([
-      "✓Terminus/Volumes/Workspace/Terminus",
+    const projects = await screen.findAllByRole("menuitemradio");
+    expect(projects.map((item) => item.textContent)).toEqual([
+      "Terminus/Volumes/Workspace/Terminus",
       "Site",
-      "Add repository…",
     ]);
+    expect(projects[0]).toHaveAttribute("aria-checked", "true");
+    expect(projects[1]).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByRole("menuitem", { name: "Add repository…" })).toBeInTheDocument();
   });
 
   test("switching selects the project", async () => {
@@ -142,7 +144,7 @@ describe("the switcher menu", () => {
     render(<ProjectMenu trigger={<Button type="button">Open</Button>} onProjectSelected={onProjectSelected} />);
 
     await user.click(screen.getByRole("button", { name: "Switch project" }));
-    await user.click(await screen.findByRole("menuitem", { name: /Site/ }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /Site/ }));
 
     await waitFor(() => expect(useTerminusStore.getState().selectedSessionId).toBe("b"));
     expect(onProjectSelected).toHaveBeenCalledWith("b");
@@ -294,8 +296,8 @@ describe("the sidebar inbox", () => {
     expect(screen.queryByText("Project: Terminus")).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "New thread" })).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Search" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Threads" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "Projects" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("button", { name: "Threads" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Projects" })).toHaveAttribute("aria-pressed", "false");
   });
 
   test("switches between thread priority and the project tree", async () => {
@@ -305,13 +307,44 @@ describe("the sidebar inbox", () => {
     render(<Sidebar onOpenProject={() => undefined} />);
 
     expect(screen.queryByRole("button", { name: "Switch project" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("tab", { name: "Projects" }));
+    await user.click(screen.getByRole("button", { name: "Projects" }));
 
     expect(screen.getByRole("region", { name: "Projects" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Switch project" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: "Threads" }));
+    await user.click(screen.getByRole("button", { name: "Threads" }));
     expect(screen.queryByRole("button", { name: "Switch project" })).not.toBeInTheDocument();
+  });
+
+  test("keeps Board visible and routes it independently from the thread tabs", async () => {
+    const onNavigate = vi.fn();
+    install([session("a", "Terminus")], "a");
+    render(<Sidebar onNavigate={onNavigate} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Board" }));
+
+    expect(onNavigate).toHaveBeenCalledWith("board");
+    expect(screen.getByRole("button", { name: "Threads" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Projects" })).toBeInTheDocument();
+  });
+
+  test("selects a project for a new thread without coupling disclosure to selection", async () => {
+    openOnProjectsTree();
+    install([session("a", "Terminus"), session("b", "Site")], "a");
+    const onNavigate = vi.fn();
+    const user = userEvent.setup();
+    render(<Sidebar onNavigate={onNavigate} />);
+
+    await user.click(screen.getByRole("button", { name: "Site" }));
+
+    await waitFor(() => expect(useTerminusStore.getState().selectedSessionId).toBe("b"));
+    expect(useTerminusStore.getState().selectedTaskId).toBeNull();
+    expect(onNavigate).toHaveBeenCalledWith("new_task");
+    expect(screen.getByRole("button", { name: "Collapse Site" })).toHaveAttribute("aria-expanded", "true");
+
+    await user.click(screen.getByRole("button", { name: "Collapse Site" }));
+
+    expect(screen.getByRole("button", { name: "Expand Site" })).toHaveAttribute("aria-expanded", "false");
   });
 
   test("keeps long project trees compact until the operator expands them", async () => {

@@ -51,7 +51,14 @@ describe("DiffViewer decision controls", () => {
       ...added,
     ].join("\n");
     try {
-      render(<DiffViewer files={parseUnifiedDiff(largeDiff)} />);
+      render(<DiffViewer files={parseUnifiedDiff(largeDiff)} autoFocus />);
+
+      const viewer = screen.getByRole("region", { name: "Diff viewer" });
+      expect(viewer).toContainElement(document.activeElement as HTMLElement);
+      const minimap = screen.getByRole("slider", { name: "Diff minimap" });
+      minimap.focus();
+      fireEvent.keyDown(minimap, { key: "End" });
+      expect(minimap).toHaveAttribute("aria-valuenow", "81");
 
       const first = screen.getByLabelText("Removed; old line 1; no new line; old 1");
       first.focus();

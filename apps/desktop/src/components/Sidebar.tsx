@@ -3,10 +3,11 @@
  *
  * The default view is a project-filtered thread queue. Native window controls
  * keep their own compact row, while Threads and Projects share one dedicated
- * switch below it. Board and technical projections remain in commands.
+ * switch below it. Board is a first-class navigation destination alongside
+ * the thread actions.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ChevronDown, ChevronRight, Folder, FolderOpen, PanelLeft, RefreshCw, Search, Settings, SquarePen } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Columns3, Folder, FolderOpen, PanelLeft, Search, Settings, SquarePen } from "lucide-react";
 import { cn } from "../lib/cn";
 import { useTerminusStore, usePinnedTasks } from "../hooks/use-terminus";
 import { useTaskReadStore } from "../hooks/use-task-read";
@@ -81,9 +82,9 @@ function SidebarImpl({
   const runActivityByTask = useTerminusStore((s) => s.runActivityByTask);
 
   const selectTask = useTerminusStore((s) => s.selectTask);
+  const selectSession = useTerminusStore((s) => s.selectSession);
   const togglePin = useTerminusStore((s) => s.togglePin);
   const refreshSessions = useTerminusStore((s) => s.refreshSessions);
-  const refreshAll = useTerminusStore((s) => s.refreshAll);
   const loadMoreSessions = useTerminusStore((s) => s.loadMoreSessions);
   const loadMoreTasks = useTerminusStore((s) => s.loadMoreTasks);
   const refreshTask = useTerminusStore((s) => s.refreshTask);
@@ -112,6 +113,14 @@ function SidebarImpl({
     onNavigateRef.current?.("chat");
     selectTask(taskId);
   }, [selectTask]);
+
+  const onSelectProject = useCallback((sessionId: string): void => {
+    selectSession(sessionId);
+    // selectSession preserves the current task when the session is already
+    // selected, so clear it explicitly before opening the new-thread surface.
+    selectTask(null);
+    onNavigateRef.current?.("new_task");
+  }, [selectSession, selectTask]);
 
   const onOpenSearch = useCallback((): void => {
     if (onSearch) onSearch();
@@ -167,7 +176,7 @@ function SidebarImpl({
   return (
     <div className="flex h-full flex-col">
       <div className="flex flex-col gap-1.5 px-2 pb-2">
-        <div className="pointer-events-none relative z-40 flex h-9 translate-y-1.5 items-center justify-end">
+        <div className="titlebar-drag pointer-events-none relative z-40 flex h-9 translate-y-1.5 items-center justify-end">
           {onToggleSidebar ? (
             <IconButton
               label="Hide sidebar"
@@ -182,14 +191,13 @@ function SidebarImpl({
 
         <div
           className="grid h-8 min-w-0 grid-cols-2 rounded-lg bg-subtle p-0.5"
-          role="tablist"
+          role="group"
           aria-label="Sidebar view"
         >
           <Button
             type="button"
             variant="bare"
-            role="tab"
-            aria-selected={sidebarGrouping === "recent"}
+            aria-pressed={sidebarGrouping === "recent"}
             onClick={() => setSidebarGrouping("recent")}
             className={cn(
               "ui-body flex h-7 items-center justify-center rounded-md px-2 transition-colors",
@@ -201,8 +209,7 @@ function SidebarImpl({
           <Button
             type="button"
             variant="bare"
-            role="tab"
-            aria-selected={sidebarGrouping === "project"}
+            aria-pressed={sidebarGrouping === "project"}
             onClick={() => setSidebarGrouping("project")}
             className={cn(
               "ui-body flex h-7 items-center justify-center rounded-md px-2 transition-colors",
@@ -219,6 +226,12 @@ function SidebarImpl({
             label="New thread"
             active={activeDestination === "new_task"}
             onClick={onNewThread}
+          />
+          <NavRow
+            icon={<Columns3 size={14} strokeWidth={1.7} aria-hidden />}
+            label="Board"
+            active={activeDestination === "board"}
+            onClick={() => onNavigateRef.current?.("board")}
           />
           <NavRow
             icon={<Search size={14} strokeWidth={1.7} aria-hidden />}
@@ -348,7 +361,9 @@ function SidebarImpl({
           <ProjectTree
             sessions={sessions}
             tasksBySession={tasksBySession}
+            selectedSessionId={selectedSessionId}
             selectedTaskId={selectedTaskId}
+            onSelectProject={onSelectProject}
             onSelectTask={onSelectTask}
           />
         )}
@@ -392,19 +407,6 @@ function SidebarImpl({
             : <Settings size={14} strokeWidth={1.7} aria-hidden />}
           <span className="truncate">{activeDestination === "settings" ? "Back to app" : "Settings"}</span>
         </Button>
-        {healthStatus === "offline" ? (
-          <Button
-            type="button"
-            variant="bare"
-            onClick={() => void refreshAll()}
-            aria-label="Retry connection"
-            data-tooltip="Retry connection"
-            className="flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs text-warning hover:bg-hover"
-          >
-            <RefreshCw size={12} strokeWidth={1.8} aria-hidden />
-            Retry
-          </Button>
-        ) : null}
       </div>
     </div>
   );
@@ -510,12 +512,16 @@ function QuietRow({
 function ProjectTree({
   sessions,
   tasksBySession,
+  selectedSessionId,
   selectedTaskId,
+  onSelectProject,
   onSelectTask,
 }: {
   sessions: readonly Session[];
   tasksBySession: Readonly<Record<string, readonly Task[]>>;
+  selectedSessionId: string | null;
   selectedTaskId: string | null;
+  onSelectProject: (sessionId: string) => void;
   onSelectTask: (taskId: string) => void;
 }): JSX.Element | null {
   const runActivityByTask = useTerminusStore((s) => s.runActivityByTask);
@@ -559,24 +565,43 @@ function ProjectTree({
         const hiddenTaskCount = tasks.length - visibleTasks.length;
         return (
           <div key={session.id} className="flex flex-col">
-            <Button
-              type="button"
-              variant="bare"
-              onClick={() => toggleProject(session.id)}
-              aria-expanded={!projectCollapsed}
-              className="ui-body flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-secondary hover:bg-hover hover:text-primary"
+            <div
+              className={cn(
+                "flex h-8 w-full min-w-0 items-center rounded-md",
+                selectedSessionId === session.id ? "bg-selected text-primary" : "text-secondary",
+              )}
             >
-              {projectCollapsed
-                ? <Folder size={14} strokeWidth={1.7} className="shrink-0 text-tertiary" aria-hidden />
-                : <FolderOpen size={14} strokeWidth={1.7} className="shrink-0 text-tertiary" aria-hidden />}
-              <span className="min-w-0 flex-1 truncate">{session.title}</span>
-              <ChevronRight
-                size={11}
-                strokeWidth={1.8}
-                className={cn("shrink-0 text-tertiary transition-transform", !projectCollapsed && "rotate-90")}
-                aria-hidden
+              <Button
+                type="button"
+                variant="bare"
+                onClick={() => onSelectProject(session.id)}
+                aria-current={selectedSessionId === session.id ? "page" : undefined}
+                className="ui-body flex h-full min-w-0 flex-1 items-center gap-2 rounded-l-md px-2 text-left hover:bg-hover hover:text-primary"
+              >
+                {projectCollapsed
+                  ? <Folder size={14} strokeWidth={1.7} className="shrink-0 text-tertiary" aria-hidden />
+                  : <FolderOpen size={14} strokeWidth={1.7} className="shrink-0 text-tertiary" aria-hidden />}
+                <span className="min-w-0 flex-1 truncate">{session.title}</span>
+              </Button>
+              <IconButton
+                type="button"
+                variant="bare"
+                size="sm"
+                label={`${projectCollapsed ? "Expand" : "Collapse"} ${session.title}`}
+                aria-expanded={!projectCollapsed}
+                data-tooltip={`${projectCollapsed ? "Expand" : "Collapse"} ${session.title}`}
+                onClick={() => toggleProject(session.id)}
+                className="mr-0.5 h-7 w-7 shrink-0 rounded-md text-tertiary hover:bg-hover hover:text-primary"
+                icon={
+                  <ChevronRight
+                    size={11}
+                    strokeWidth={1.8}
+                    className={cn("transition-transform", !projectCollapsed && "rotate-90")}
+                    aria-hidden
+                  />
+                }
               />
-            </Button>
+            </div>
 
             {projectCollapsed ? null : tasks.length === 0 ? (
               <p className="ui-meta py-1 pl-8 pr-2">No threads yet.</p>

@@ -149,6 +149,8 @@ export interface DiffViewerProps {
   initialViewMode?: DiffViewMode;
   /** Hide the file navigation rail (single-file mode). */
   hideFileNav?: boolean;
+  /** Move focus into the review surface when it first opens. */
+  autoFocus?: boolean;
 }
 
 // ────────────────────────── Unified-diff parser ─────────────────────────────
@@ -351,6 +353,7 @@ function DiffViewerImpl({
   initialSelectedPath,
   initialViewMode,
   hideFileNav = false,
+  autoFocus = false,
 }: DiffViewerProps): JSX.Element {
   const [selectedPath, setSelectedPath] = useState<string | null>(
     initialSelectedPath ?? (files.length > 0 ? (files[0]?.displayPath ?? files[0]?.newPath ?? null) : null),
@@ -372,6 +375,10 @@ function DiffViewerImpl({
   const changeLineRefs = useRef<Array<HTMLDivElement | null>>([]);
   const compactViewer = viewerWidth < 760;
   const effectiveViewMode: DiffViewMode = compactViewer ? "unified" : viewMode;
+
+  useEffect(() => {
+    if (autoFocus) viewerRef.current?.focus({ preventScroll: true });
+  }, [autoFocus]);
 
   const attachViewer = useCallback((element: HTMLDivElement | null): void => {
     viewerResizeObserverRef.current?.disconnect();
@@ -1241,7 +1248,13 @@ function DiffMinimap({
   rows: DiffRow[];
   onJumpToRow: (rowIndex: number) => void;
 }): JSX.Element | null {
+  const [targetRow, setTargetRow] = useState(0);
   if (rows.length === 0) return null;
+  const jumpTo = (rowIndex: number): void => {
+    const nextRow = Math.max(0, Math.min(rows.length - 1, rowIndex));
+    setTargetRow(nextRow);
+    onJumpToRow(nextRow);
+  };
   return (
     <div
       className="diff-minimap"
@@ -1249,11 +1262,35 @@ function DiffMinimap({
         const rect = e.currentTarget.getBoundingClientRect();
         const y = e.clientY - rect.top;
         const ratio = Math.max(0, Math.min(1, y / rect.height));
-        const targetRow = Math.floor(ratio * rows.length);
-        onJumpToRow(targetRow);
+        jumpTo(Math.floor(ratio * rows.length));
       }}
-      title="Diff Minimap (click to jump)"
-      role="presentation"
+      onKeyDown={(event) => {
+        const page = Math.max(1, Math.round(rows.length / 10));
+        const next = event.key === "ArrowUp" || event.key === "ArrowLeft"
+          ? targetRow - 1
+          : event.key === "ArrowDown" || event.key === "ArrowRight"
+            ? targetRow + 1
+            : event.key === "PageUp"
+              ? targetRow - page
+              : event.key === "PageDown"
+                ? targetRow + page
+                : event.key === "Home"
+                  ? 0
+                  : event.key === "End"
+                    ? rows.length - 1
+                    : null;
+        if (next === null) return;
+        event.preventDefault();
+        jumpTo(next);
+      }}
+      role="slider"
+      tabIndex={0}
+      aria-label="Diff minimap"
+      aria-valuemin={1}
+      aria-valuemax={rows.length}
+      aria-valuenow={targetRow + 1}
+      aria-valuetext={`Row ${targetRow + 1} of ${rows.length}`}
+      aria-orientation="vertical"
     >
       {rows.map((row, idx) => {
         if (row.kind === "unified-line") {

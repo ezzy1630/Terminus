@@ -21,7 +21,7 @@ export const DialogSurface = forwardRef<HTMLDivElement, DialogSurfaceProps>(func
         <DialogPrimitive.Overlay
           data-testid="dialog-overlay"
           className={cn(
-            "fixed inset-0 z-[var(--z-dialog)] bg-black/55 data-[state=closed]:animate-fade-out data-[state=open]:animate-fade-in",
+            "fixed inset-0 z-[var(--z-dialog)] bg-black/30 data-[state=closed]:animate-fade-out data-[state=open]:animate-fade-in",
             overlayClassName,
           )}
         />

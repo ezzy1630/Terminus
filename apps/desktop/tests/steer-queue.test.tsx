@@ -111,7 +111,7 @@ describe("steering a live turn", () => {
     render(<Composer />);
 
     await user.click(screen.getByRole("button", { name: "Send mode: After current turn" }));
-    await user.click(screen.getByRole("menuitem", { name: /Steer current turn now/ }));
+    await user.click(screen.getByRole("menuitemradio", { name: /Steer current turn now/ }));
     await user.type(screen.getByRole("textbox", { name: "Message composer" }), "change direction now");
     await user.click(screen.getByRole("button", { name: "Steer current turn now" }));
 

@@ -548,9 +548,9 @@ function SettingsImpl({ open, onClose, surface = false, initialCategoryId, categ
 
   const content = (
     <>
-      <div className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-subtle px-4">
+      <div className="titlebar-drag flex h-11 flex-shrink-0 items-center gap-2 border-b border-subtle px-4">
         <span className="ui-body font-semibold text-primary">Settings</span>
-        {!surface ? <div className="ml-auto flex items-center gap-2">
+        {!surface ? <div className="titlebar-no-drag ml-auto flex items-center gap-2">
           <IconButton onClick={onClose} label="Close settings" icon={<X size={14} aria-hidden />} />
         </div> : null}
       </div>
@@ -844,7 +844,7 @@ function SettingsImpl({ open, onClose, surface = false, initialCategoryId, categ
       }}
       onOpenAutoFocus={focusSearchOnOpen}
       accessibleTitle="Settings"
-      overlayClassName="bg-black/40"
+      overlayClassName="bg-black/30"
       className={cn(
         "settings-dialog dialog-panel fixed left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border border-subtle bg-elevated text-primary shadow-lg",
         className,
