@@ -349,7 +349,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
-          sudo install --mode 0755 "$(command -v bun)" /usr/local/bin/bun
+          # `command -v bun` resolves to Mise's multicall shim. Copy the
+          # installed tool itself so the private guest path can use any name.
+          sudo install --mode 0755 "$(mise which bun)" /usr/local/bin/bun
       - name: Prepare delegated cgroup
         run: |
           set -euo pipefail
