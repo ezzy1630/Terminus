@@ -347,7 +347,12 @@ jobs:
       - uses: ./.github/actions/setup-terminus
       - name: Install bubblewrap
         run: sudo apt-get update && sudo apt-get install --yes bubblewrap
-      - run: just eval-smoke
+      - name: Run eval smoke with sandbox privileges
+        run: |
+          # GitHub-hosted runners deny unprivileged user namespaces. Run the
+          # fixture supervisor as root so the eval exercises the enforced
+          # bubblewrap path instead of correctly failing closed at execution.
+          sudo --preserve-env=PATH,HOME,CI "$(command -v just)" eval-smoke
 
   # ---------- Live evaluation (dispatch-only; R8) ----------
   # Runs the real Terminus coding loop against a small internal cohort with
