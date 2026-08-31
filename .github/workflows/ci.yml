@@ -345,13 +345,15 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
-      - name: Install bubblewrap and stage the pinned provider runtime
+      - name: Install bubblewrap and stage pinned eval runtimes
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
-          # `command -v bun` resolves to Mise's multicall shim. Copy the
-          # installed tool itself so the private guest path can use any name.
+          # Mise installs live under the runner home, which the minimal-root
+          # sandbox intentionally hides. Stage the exact pinned binaries in a
+          # read-only runtime tree visible to both provider and verifier execs.
           sudo install --mode 0755 "$(mise which bun)" /usr/local/bin/bun
+          sudo install --mode 0755 "$(mise which just)" /usr/local/bin/just
       - name: Prepare delegated cgroup
         run: |
           set -euo pipefail
