@@ -752,6 +752,7 @@ describe("control-plane service boundaries", () => {
   test("VerificationCoordinator persists repair identity in the same transition transaction", async () => {
     type Transaction = { readonly name: "durable-repair" };
     let taskState = "VERIFYING";
+    let taskPhase = "VERIFY";
     const events: string[] = [];
     const persisted: Array<{ readonly id: string; readonly parentTurnId: string; readonly leaseKey: string }> = [];
     const service = new VerificationCoordinator<Transaction>({
@@ -760,7 +761,10 @@ describe("control-plane service boundaries", () => {
         events.push(event.eventType);
         await mutation({ name: "durable-repair" });
       },
-      updateTask: async (_tx, input) => { taskState = input.status; },
+      updateTask: async (_tx, input) => {
+        taskState = input.status;
+        taskPhase = input.phase;
+      },
       createRepairAttempt: async (_tx, input) => {
         persisted.push({ id: input.id, parentTurnId: input.parentTurnId, leaseKey: input.leaseKey });
       },
@@ -785,6 +789,7 @@ describe("control-plane service boundaries", () => {
     });
 
     expect(taskState).toBe("ACTIVE");
+    expect(taskPhase).toBe("IMPLEMENT");
     expect(persisted).toEqual([{
       id: "attempt-1",
       parentTurnId: "turn-1",

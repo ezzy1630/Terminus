@@ -107,7 +107,7 @@ export class VerificationCoordinator<TTransaction> {
 
   /**
    * Bounded verify–repair loop (deep-audit Rank 3): return an
-   * ACTIVE/EXECUTE task to the actor with a durable repair directive so a
+   * ACTIVE/IMPLEMENT task to the actor with a durable repair directive so a
    * follow-up turn can attempt repair. Verification failures become
    * structured, inspectable repair inputs instead of a terminal state; the
    * task must still pass full required verification before any admission.
@@ -134,12 +134,12 @@ export class VerificationCoordinator<TTransaction> {
     await this.transition({
       taskId,
       status: "ACTIVE",
-      phase: "EXECUTE",
+      phase: "IMPLEMENT",
       completedAt: null,
       terminalReasonJson: null,
       eventType: "task.repair_scheduled",
       payload: {
-        phase: "EXECUTE",
+        phase: "IMPLEMENT",
         status: "ACTIVE",
         repair_attempt: input.attemptNumber,
         repair_attempt_id: input.repairAttemptId,
