@@ -154,13 +154,13 @@ jobs:
             node -e "const fs = require('node:fs'); const crypto = require('node:crypto'); const name = process.argv[1]; const digest = crypto.createHash('sha256').update(fs.readFileSync('dist/' + name)).digest('hex'); fs.writeFileSync('dist/' + name + '.sha256', digest + '  ' + name + '\\n');" "$name"
           done
       - name: Generate kernel SBOM (syft, SPDX-JSON)
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
         with:
           artifact-name: ${{ matrix.artifact }}.sbom.spdx.json
           format: spdx-json
           output-file: dist/${{ matrix.artifact }}.sbom.spdx.json
       - name: Generate control runtime SBOM (syft, SPDX-JSON)
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
         with:
           path: dist/${{ matrix.control_artifact }}
           artifact-name: ${{ matrix.control_artifact }}.sbom.spdx.json
@@ -437,7 +437,7 @@ jobs:
             --commit="$RELEASE_COMMIT" \
             --version="$RELEASE_VERSION"
       - name: Generate desktop SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
         with:
           path: apps/desktop/release
           artifact-name: terminus-desktop.sbom.spdx.json
