@@ -351,19 +351,22 @@ jobs:
         run: |
           set -euo pipefail
           cgroup_root="/sys/fs/cgroup/terminus-eval-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # Ubuntu's AppArmor policy disables unprivileged user namespaces on
+          # hosted runners. Permit them for this ephemeral VM so Bubblewrap
+          # runs as the runner user that owns the Mise toolchain.
+          sudo sysctl --write kernel.apparmor_restrict_unprivileged_userns=0
           printf '+cpu +memory +pids\n' | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null
           sudo mkdir "$cgroup_root"
           printf '+cpu +memory +pids\n' | sudo tee "$cgroup_root/cgroup.subtree_control" >/dev/null
+          sudo chown "$USER:$(id -gn)" \
+            "$cgroup_root" \
+            "$cgroup_root/cgroup.procs" \
+            "$cgroup_root/cgroup.subtree_control"
           printf 'TERMINUS_CGROUP_ROOT=%s\n' "$cgroup_root" >> "$GITHUB_ENV"
-      - name: Run eval smoke with sandbox privileges
+      - name: Run eval smoke with delegated sandbox privileges
         run: |
-          # GitHub-hosted runners deny unprivileged user namespaces. Run the
-          # fixture supervisor as root so the eval exercises the enforced
-          # bubblewrap path instead of correctly failing closed at execution.
-          sudo --preserve-env=PATH,HOME,CI,TERMINUS_CGROUP_ROOT \
-            "$(command -v just)" linux-enforcement-prereqs
-          sudo --preserve-env=PATH,HOME,CI,TERMINUS_CGROUP_ROOT \
-            "$(command -v just)" eval-smoke
+          just linux-enforcement-prereqs
+          just eval-smoke
       - name: Remove delegated cgroup
         if: always() && env.TERMINUS_CGROUP_ROOT != ''
         run: |
