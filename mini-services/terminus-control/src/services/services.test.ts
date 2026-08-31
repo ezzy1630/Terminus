@@ -620,6 +620,37 @@ describe("control-plane service boundaries", () => {
     expect(episodes.episodes.map((episode) => String(episode.id))).toEqual(["legacy-episode-3", "legacy-episode-4"]);
   });
 
+  test("ToolEpisodeService does not read older artifacts after the fixed byte window is exhausted", async () => {
+    const rows = [1, 2].map((sequence) => ({
+      id: `episode-${sequence}`,
+      turnId: "turn-fixed-window",
+      sequence,
+      kind: "user_message",
+      contentArtifact: `artifact://sha256/episode-${sequence}`,
+      toolCallId: null,
+      createdAt: new Date(`2026-01-01T00:00:0${sequence}.000Z`),
+    }));
+    const reads: string[] = [];
+    const service = new ToolEpisodeService({
+      store: {
+        listModelVisibleEpisodes: async () => rows,
+        readArtifact: async (hash) => {
+          reads.push(hash);
+          return hash === "sha256:episode-2"
+            ? new TextEncoder().encode("12345")
+            : null;
+        },
+      },
+      settleCall: async () => {},
+      windowBytes: 5,
+    });
+
+    const episodes = await service.loadModelVisibleEpisodes("turn-fixed-window");
+
+    expect(reads).toEqual(["sha256:episode-2"]);
+    expect(episodes.episodes.map((episode) => String(episode.id))).toEqual(["episode-2"]);
+  });
+
   test("VerificationCoordinator owns the VERIFYING and terminal task CAS transitions", async () => {
     type Transaction = { readonly name: "verification" };
     let state = "ACTIVE";

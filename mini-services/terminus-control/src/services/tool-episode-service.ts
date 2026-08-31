@@ -139,6 +139,10 @@ export class ToolEpisodeService {
       let text = contentRef === null ? "" : content.get(contentRef);
       let bytesLength = 0;
       if (contentRef !== null && text === undefined) {
+        // Preserve the fixed-window contract: once newer unique content has
+        // consumed the byte budget, older artifacts are outside the window
+        // and must not be fetched or decoded.
+        if (tokenWindow === undefined && budgetBytes <= 0) break;
         const bytes = await this.dependencies.store.readArtifact(contentRef);
         if (bytes === null) throw new Error(`episode ${row.id} artifact ${contentRef} is unavailable`);
         if (bytes.byteLength > MAX_MODEL_VISIBLE_EPISODE_BYTES) {
