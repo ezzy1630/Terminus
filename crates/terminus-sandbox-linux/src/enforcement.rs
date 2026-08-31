@@ -244,6 +244,15 @@ else
   echo "network=blocked";
 fi;
 
+# 6a. Local Unix sockets remain available for language runtimes and brokered
+# IPC. Internet socket domains are denied at creation above.
+if /usr/bin/python3 -c 'import socket; socket.socket(socket.AF_UNIX)' 2>/dev/null; then
+  echo "unix_socket=available";
+else
+  echo "unix_socket=failed";
+  exit 26;
+fi;
+
 # 7. Filesystem — write to root should fail (read-only empty root)
 if touch /terminus-sandbox-write-probe 2>/dev/null; then
   echo "filesystem=failed";
@@ -378,6 +387,7 @@ echo "=== probe complete ===";
         ("network_namespace", "blocked"),
         ("seccomp", "blocked"),
         ("network", "blocked"),
+        ("unix_socket", "available"),
         ("filesystem", "readonly"),
         ("protected_git", "blocked"),
         ("process_tree", "blocked"),
@@ -468,7 +478,7 @@ pub fn cgroup_v2_ready() -> bool {
 pub fn seccomp_policy_hash(network_deny: bool) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update("terminus-seccomp-v1\0");
+    hasher.update("terminus-seccomp-v2-unix-sockets\0");
     hasher.update(if network_deny {
         b"deny".as_slice()
     } else {
@@ -639,18 +649,6 @@ fn blocked_syscalls(network_deny: bool) -> Vec<(&'static str, i64)> {
         syscalls.extend([
             ("socket", libc::SYS_socket),
             ("socketpair", libc::SYS_socketpair),
-            ("connect", libc::SYS_connect),
-            ("bind", libc::SYS_bind),
-            ("listen", libc::SYS_listen),
-            ("accept", libc::SYS_accept),
-            ("accept4", libc::SYS_accept4),
-            ("sendto", libc::SYS_sendto),
-            ("sendmsg", libc::SYS_sendmsg),
-            ("recvfrom", libc::SYS_recvfrom),
-            ("recvmsg", libc::SYS_recvmsg),
-            ("getsockopt", libc::SYS_getsockopt),
-            ("setsockopt", libc::SYS_setsockopt),
-            ("shutdown", libc::SYS_shutdown),
         ]);
     }
     syscalls
@@ -658,13 +656,32 @@ fn blocked_syscalls(network_deny: bool) -> Vec<(&'static str, i64)> {
 
 #[cfg(target_os = "linux")]
 fn install_seccomp(network_deny: bool) -> Result<(), SandboxError> {
-    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
+    use seccompiler::{
+        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+        SeccompRule,
+    };
     use std::collections::BTreeMap;
     use std::convert::TryInto;
 
     let mut rules = BTreeMap::new();
-    for (_, syscall) in blocked_syscalls(network_deny) {
-        rules.insert(syscall, Vec::new());
+    for (name, syscall) in blocked_syscalls(network_deny) {
+        let syscall_rules = if name == "socket" || name == "socketpair" {
+            let non_unix_domain = SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Ne,
+                libc::AF_UNIX as u64,
+            )
+            .map_err(|error| {
+                SandboxError::Unsupported(format!("build Unix-socket seccomp condition: {error}"))
+            })?;
+            vec![SeccompRule::new(vec![non_unix_domain]).map_err(|error| {
+                SandboxError::Unsupported(format!("build Unix-socket seccomp rule: {error}"))
+            })?]
+        } else {
+            Vec::new()
+        };
+        rules.insert(syscall, syscall_rules);
     }
     let filter: BpfProgram = SeccompFilter::new(
         rules,
