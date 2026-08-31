@@ -362,6 +362,12 @@ jobs:
             "$cgroup_root" \
             "$cgroup_root/cgroup.procs" \
             "$cgroup_root/cgroup.subtree_control"
+          sudo mkdir "$cgroup_root/terminus"
+          printf '+cpu +memory +pids\n' | sudo tee "$cgroup_root/terminus/cgroup.subtree_control" >/dev/null
+          sudo chown "$USER:$(id -gn)" \
+            "$cgroup_root/terminus" \
+            "$cgroup_root/terminus/cgroup.procs" \
+            "$cgroup_root/terminus/cgroup.subtree_control"
           printf 'TERMINUS_CGROUP_ROOT=%s\n' "$cgroup_root" >> "$GITHUB_ENV"
       - name: Run eval smoke with delegated sandbox privileges
         run: |
