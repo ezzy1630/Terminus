@@ -80,6 +80,26 @@ function getRootCauseHint(errorMessage: string): string | undefined {
 }
 
 // skipcq: JS-0067
+function parsePytestLine(line: string): { primaryPath: string; testName: string; errorMessage: string } | null {
+  const match = line.match(/^FAILED\s+([^:]+)::([^\s]+)\s+-\s+(.+)$/);
+  if (!match) return null;
+  return { primaryPath: match[1]!, testName: match[2]!, errorMessage: match[3]! };
+}
+
+// skipcq: JS-0067
+function parseStackLine(line: string, frameIndex: number): StackFrame | null {
+  const match = line.match(/at\s+([A-Za-z0-9_$.<>]+)\s+\(([^:]+):(\d+):(\d+)\)/);
+  if (!match) return null;
+  return {
+    frameIndex,
+    functionName: match[1]!,
+    path: match[2]!,
+    line: parseInt(match[3]!, 10),
+    column: parseInt(match[4]!, 10),
+  };
+}
+
+// skipcq: JS-0067
 export function parseTestFailures(rawOutput: string): FailureAnalysis {
   const lines = rawOutput.split("\n");
   let testName = "unknown_test";
@@ -88,33 +108,20 @@ export function parseTestFailures(rawOutput: string): FailureAnalysis {
   const frames: StackFrame[] = [];
 
   for (const line of lines) {
-    // Pytest failure header: "FAILED tests/test_auth.py::test_login - AssertionError: assert False"
-    const pytestMatch = line.match(/^FAILED\s+([^:]+)::([^\s]+)\s+-\s+(.+)$/);
-    if (pytestMatch) {
-      primaryPath = pytestMatch[1]!;
-      testName = pytestMatch[2]!;
-      errorMessage = pytestMatch[3]!;
+    const pytest = parsePytestLine(line);
+    if (pytest) {
+      primaryPath = pytest.primaryPath;
+      testName = pytest.testName;
+      errorMessage = pytest.errorMessage;
     }
-
-    // Jest / Vitest failure header: "FAIL src/auth.test.ts"
     const jestMatch = line.match(/^FAIL\s+([^\s]+)/);
     if (jestMatch) {
       primaryPath = jestMatch[1]!;
     }
-
-    // Stack frame matching: "    at Object.<anonymous> (src/auth.test.ts:42:15)"
-    const stackMatch = line.match(/at\s+([A-Za-z0-9_$.<>]+)\s+\(([^:]+):(\d+):(\d+)\)/);
-    if (stackMatch) {
-      if (frames.length === 0 && primaryPath === "unknown_file") {
-        primaryPath = stackMatch[2]!;
-      }
-      frames.push({
-        frameIndex: frames.length,
-        functionName: stackMatch[1]!,
-        path: stackMatch[2]!,
-        line: parseInt(stackMatch[3]!, 10),
-        column: parseInt(stackMatch[4]!, 10),
-      });
+    const frame = parseStackLine(line, frames.length);
+    if (frame) {
+      if (primaryPath === "unknown_file") primaryPath = frame.path;
+      frames.push(frame);
     }
   }
 
