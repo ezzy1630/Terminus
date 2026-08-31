@@ -28,6 +28,22 @@ pub fn payload_wrapper(
     let executable = std::env::current_exe().ok()?;
     let separator = bwrap_args.iter().position(|arg| arg == "--")?;
     let mut payload_args = bwrap_args[..separator].to_vec();
+    let root_freeze = payload_args
+        .windows(2)
+        .position(|args| args[0] == "--remount-ro" && args[1] == "/")
+        .unwrap_or(payload_args.len());
+    let executable_path = executable.to_string_lossy().to_string();
+    // The payload is a second invocation of this exact trusted kernel binary.
+    // Bind only that file into the guest while mount targets are writable;
+    // binding its parent would expose unrelated host temporary state.
+    payload_args.splice(
+        root_freeze..root_freeze,
+        [
+            "--ro-bind".to_string(),
+            executable_path.clone(),
+            executable_path.clone(),
+        ],
+    );
     // The trusted launcher creates the cgroup lease before Bubblewrap starts.
     // The payload receives only this marker and inherits the lease; it never
     // gets write access to a host cgroup filesystem.
@@ -39,7 +55,7 @@ pub fn payload_wrapper(
     payload_args.push("--".to_string());
     let limits_json = serde_json::to_string(&limits).ok()?;
     payload_args.extend([
-        executable.to_string_lossy().to_string(),
+        executable_path,
         PAYLOAD_ARG.to_string(),
         limits_json,
         match network {
@@ -683,5 +699,38 @@ mod tests {
             Some(&"TERMINUS_CGROUP_LEASE".to_string())
         );
         assert_eq!(argv.get(setenv + 2), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn trusted_payload_binary_is_bound_before_the_root_freezes() {
+        let executable = std::env::current_exe().expect("current test executable");
+        let executable = executable.to_string_lossy().to_string();
+        let wrapped = payload_wrapper(
+            Path::new("/usr/bin/bwrap"),
+            &[
+                "--bind".to_string(),
+                "/tmp/empty".to_string(),
+                "/".to_string(),
+                "--remount-ro".to_string(),
+                "/".to_string(),
+                "--".to_string(),
+                "/usr/bin/true".to_string(),
+            ],
+            ResourceLimits::default(),
+            NetworkAccess::Deny,
+        )
+        .expect("payload wrapper");
+        let argv = wrapped.1;
+        let payload_bind = argv
+            .windows(3)
+            .position(|args| {
+                args[0] == "--ro-bind" && args[1] == executable && args[2] == executable
+            })
+            .expect("trusted payload bind");
+        let root_freeze = argv
+            .windows(2)
+            .position(|args| args[0] == "--remount-ro" && args[1] == "/")
+            .expect("root freeze");
+        assert!(payload_bind < root_freeze);
     }
 }
