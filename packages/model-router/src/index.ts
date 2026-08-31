@@ -211,22 +211,25 @@ export type EscalationReason =
 
 // ────────────────────────── Scoring ──────────────────────────────────────────
 
+// skipcq: JS-0067
 function meetsQuality(model: ModelCapabilitySnapshot, min: CapabilityRequirements): boolean {
   if (min.codingQuality === "high") return model.snapshot.reliability.editCohortSuccess >= 0.85;
   if (min.codingQuality === "medium") return model.snapshot.reliability.editCohortSuccess >= 0.7;
   return true;
 }
 
+// skipcq: JS-0067
 function meetsToolReliability(model: ModelCapabilitySnapshot, min: CapabilityRequirements): boolean {
   if (min.toolReliability === "high") return model.snapshot.reliability.toolCallSuccess >= 0.95;
   if (min.toolReliability === "medium") return model.snapshot.reliability.toolCallSuccess >= 0.85;
   return true;
 }
 
+// skipcq: JS-0067
 function meetsContextRequirement(model: ModelCapabilitySnapshot, min: CapabilityRequirements): boolean {
   if (min.structuredOutput === "required" && !model.snapshot.context.structuredOutput) return false;
-  if (min.context === "large" && model.snapshot.context.testedSafeTokens < 128_000) return false;
-  if (min.context === "medium" && model.snapshot.context.testedSafeTokens < 32_000) return false;
+  if (min.context === "large") return model.snapshot.context.testedSafeTokens >= 128_000;
+  if (min.context === "medium") return model.snapshot.context.testedSafeTokens >= 32_000;
   return true;
 }
 

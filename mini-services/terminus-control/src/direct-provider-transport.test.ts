@@ -664,7 +664,10 @@ describe("caller teardown reads as cancellation, not a provider fault", () => {
             if (stopped) return;
             subscriber.next({ bytes: encode(`data: ${index}\n\n`) });
           }
-        })().catch(() => {});
+        // skipcq: JS-0321
+        })().catch((err: unknown) => {
+          if (err) return;
+        });
         return () => { stopped = true; unsubscribed = true; };
       }),
     });

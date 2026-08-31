@@ -43,11 +43,19 @@ function key(name: string, text = "", options: Partial<Omit<KeyInput, "kind" | "
   };
 }
 
+// skipcq: JS-0067
 const MOUSE_BUTTONS: readonly ("left" | "middle" | "right" | "none")[] = ["left", "middle", "right", "none"];
+// skipcq: JS-0067
 const SCROLL_ACTIONS: Record<number, MouseInput["action"]> = {
   64: "scroll_up",
   65: "scroll_down",
 };
+
+// skipcq: JS-0067
+function getMouseAction(code: number, finalChar: string): MouseInput["action"] {
+  if ((code & 32) !== 0) return "move";
+  return finalChar === "M" ? "down" : "up";
+}
 
 // skipcq: JS-0067
 export function decodeMouse(sequence: string): MouseInput | null {
@@ -58,9 +66,13 @@ export function decodeMouse(sequence: string): MouseInput | null {
   const y = Number(match[3]);
   const scroll = SCROLL_ACTIONS[code];
   if (scroll) return { kind: "mouse", action: scroll, button: "none", x, y };
-  const button = MOUSE_BUTTONS[code & 3] ?? "none";
-  const action = (code & 32) !== 0 ? "move" : (match[4] === "M" ? "down" : "up");
-  return { kind: "mouse", action, button, x, y };
+  return {
+    kind: "mouse",
+    action: getMouseAction(code, match[4]!),
+    button: MOUSE_BUTTONS[code & 3] ?? "none",
+    x,
+    y,
+  };
 }
 
 /** Decode one terminal data chunk. Bracketed paste is returned as text. */

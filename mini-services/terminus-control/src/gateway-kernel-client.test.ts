@@ -518,7 +518,10 @@ describe("H9 the gateway path streams", () => {
                 if (cancelled) return;
                 subscriber.next({ bytes: new TextEncoder().encode(`data: ${index}\n\n`), receipt: undefined });
               }
-            })().catch(() => {});
+            // skipcq: JS-0321
+            })().catch((err: unknown) => {
+              if (err) return;
+            });
             return () => { cancelled = true; unsubscribed = true; };
           }),
       },

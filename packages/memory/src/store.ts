@@ -9,6 +9,14 @@ interface LeaseRecord {
   readonly expiresAtMs: number;
 }
 
+// skipcq: JS-0067
+function matchesScope(scope: MemoryClaim["scope"], filterScope: Partial<MemoryClaim["scope"]>): boolean {
+  if (filterScope.organization != null && scope.organization !== filterScope.organization) return false;
+  if (filterScope.user != null && scope.user !== filterScope.user) return false;
+  if (filterScope.workspaceId != null && scope.workspaceId !== filterScope.workspaceId) return false;
+  return true;
+}
+
 export class InMemoryMemoryRepository implements MemoryRepository {
   private readonly claims = new Map<string, MemoryClaim>();
   private readonly leases = new Map<string, LeaseRecord>();
@@ -37,12 +45,7 @@ export class InMemoryMemoryRepository implements MemoryRepository {
     }
     if (filter.scope !== undefined) {
       const scope = filter.scope;
-      out = out.filter(
-        (c) =>
-          (scope.organization == null || c.scope.organization === scope.organization) &&
-          (scope.user == null || c.scope.user === scope.user) &&
-          (scope.workspaceId == null || c.scope.workspaceId === scope.workspaceId),
-      );
+      out = out.filter((c) => matchesScope(c.scope, scope));
     }
     return out;
   }

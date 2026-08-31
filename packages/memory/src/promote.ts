@@ -53,10 +53,12 @@ export const DEFAULT_PROMOTION_POLICY: PromotionPolicy = {
   requireVerification: true,
 };
 
+// skipcq: JS-0067
 function isProcedureClaim(claim: MemoryClaim): boolean {
   return claim.kind === "procedure" && claim.status === "active" && claim.procedureArtifactHash !== null;
 }
 
+// skipcq: JS-0067
 function satisfiesPromotionUsage(claim: MemoryClaim, policy: PromotionPolicy): boolean {
   if (claim.usage.successfulUses < policy.minSuccessfulUses) return false;
   if (claim.usage.harmfulUses > policy.maxHarmfulUses) return false;

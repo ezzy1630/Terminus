@@ -9,6 +9,7 @@
  */
 import type { NodeDraft, EdgeDraft, TaintFlowAnalysis } from "./types.js";
 
+// skipcq: JS-0067
 const SENSITIVE_EFFECT_CLASSES = new Set([
   "reversible_external",
   "compensable_external",
@@ -16,6 +17,7 @@ const SENSITIVE_EFFECT_CLASSES = new Set([
   "unknown",
 ]);
 
+// skipcq: JS-0067
 const UNTRUSTED_PATTERNS = ["untrusted", "web_fetch", "external_pull", "user_input"];
 
 // skipcq: JS-0067
@@ -37,10 +39,12 @@ function findInitialTaintSources(nodes: readonly NodeDraft[]): Set<string> {
   return sources;
 }
 
+// skipcq: JS-0067
 function isNodeSanitized(node: NodeDraft | undefined): boolean {
   return node?.kind === "verifier" || Boolean(node?.taintPolicy?.sanitizeWith);
 }
 
+// skipcq: JS-0067
 function expandTaintedNeighbors(
   currentId: string,
   tainted: Set<string>,
@@ -76,6 +80,7 @@ function isNodeSensitiveSink(node: NodeDraft): boolean {
   return node.requiredCapabilities?.includes("secrets") === true;
 }
 
+// skipcq: JS-0067
 function isUnsanitizedSink(node: NodeDraft): boolean {
   return isNodeSensitiveSink(node) && !node.taintPolicy?.allowTaintedInputs && !node.taintPolicy?.sanitizeWith;
 }

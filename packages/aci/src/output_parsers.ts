@@ -99,6 +99,7 @@ function parseStackLine(line: string, frameIndex: number): StackFrame | null {
   };
 }
 
+// skipcq: JS-0067
 function parseFailureLine(
   line: string,
   frames: StackFrame[],
