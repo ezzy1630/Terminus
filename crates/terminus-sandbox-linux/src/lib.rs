@@ -280,13 +280,18 @@ impl LinuxSandboxBackend {
 
         // Toolchains installed outside the fixed runtime trees (for example,
         // Mise under a runner home) are otherwise absent from the minimal
-        // guest. Expose only the requested executable, never its parent.
+        // guest. Expose only the requested executable at a private path under
+        // the synthetic /run tree, never its parent directories.
         let command_program = Path::new(&command.program);
-        if command_program.is_absolute() && command_program.is_file() {
+        let guest_command = if command_program.is_absolute() && command_program.is_file() {
+            const ABSOLUTE_COMMAND_GUEST_PATH: &str = "/run/terminus-command";
             argv.push("--ro-bind".to_string());
             argv.push(command.program.clone());
-            argv.push(command.program.clone());
-        }
+            argv.push(ABSOLUTE_COMMAND_GUEST_PATH.to_string());
+            ABSOLUTE_COMMAND_GUEST_PATH
+        } else {
+            command.program.as_str()
+        };
 
         // Pseudo-filesystems so basic tools work.
         argv.push("--proc".to_string());
@@ -320,7 +325,7 @@ impl LinuxSandboxBackend {
 
         // The command to run, followed by its arguments.
         argv.push("--".to_string());
-        argv.push(command.program.clone());
+        argv.push(guest_command.to_string());
         for arg in &command.args {
             argv.push(arg.clone());
         }
@@ -1036,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn build_bwrap_argv_binds_only_an_absolute_command_before_root_freeze() {
+    fn build_bwrap_argv_binds_only_an_absolute_command_at_a_private_guest_path() {
         let executable = std::env::current_exe().expect("current test executable");
         let executable = executable.to_string_lossy().to_string();
         let command = simple_command(&executable);
@@ -1044,7 +1049,9 @@ mod tests {
         let executable_bind = argv
             .windows(3)
             .position(|args| {
-                args[0] == "--ro-bind" && args[1] == executable && args[2] == executable
+                args[0] == "--ro-bind"
+                    && args[1] == executable
+                    && args[2] == "/run/terminus-command"
             })
             .expect("absolute command bind");
         let root_freeze = argv
@@ -1052,6 +1059,14 @@ mod tests {
             .position(|args| args[0] == "--remount-ro" && args[1] == "/")
             .expect("root freeze");
         assert!(executable_bind < root_freeze);
+        let separator = argv
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("command separator");
+        assert_eq!(
+            argv.get(separator + 1).map(String::as_str),
+            Some("/run/terminus-command")
+        );
 
         let relative =
             LinuxSandboxBackend::build_bwrap_argv(&simple_command("git"), &restrictive_profile());
