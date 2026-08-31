@@ -345,34 +345,30 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
-      - name: Install bubblewrap
-        run: sudo apt-get update && sudo apt-get install --yes bubblewrap
+      - name: Install bubblewrap and stage the pinned provider runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          sudo install --mode 0755 "$(command -v bun)" /usr/local/bin/bun
       - name: Prepare delegated cgroup
         run: |
           set -euo pipefail
           cgroup_root="/sys/fs/cgroup/terminus-eval-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          # Ubuntu's AppArmor policy disables unprivileged user namespaces on
-          # hosted runners. Permit them for this ephemeral VM so Bubblewrap
-          # runs as the runner user that owns the Mise toolchain.
-          sudo sysctl --write kernel.apparmor_restrict_unprivileged_userns=0
           printf '+cpu +memory +pids\n' | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null
           sudo mkdir "$cgroup_root"
           printf '+cpu +memory +pids\n' | sudo tee "$cgroup_root/cgroup.subtree_control" >/dev/null
-          sudo chown "$USER:$(id -gn)" \
-            "$cgroup_root" \
-            "$cgroup_root/cgroup.procs" \
-            "$cgroup_root/cgroup.subtree_control"
-          sudo mkdir "$cgroup_root/terminus"
-          printf '+cpu +memory +pids\n' | sudo tee "$cgroup_root/terminus/cgroup.subtree_control" >/dev/null
-          sudo chown "$USER:$(id -gn)" \
-            "$cgroup_root/terminus" \
-            "$cgroup_root/terminus/cgroup.procs" \
-            "$cgroup_root/terminus/cgroup.subtree_control"
           printf 'TERMINUS_CGROUP_ROOT=%s\n' "$cgroup_root" >> "$GITHUB_ENV"
-      - name: Run eval smoke with delegated sandbox privileges
+      - name: Run eval smoke with sandbox privileges
         run: |
-          just linux-enforcement-prereqs
-          just eval-smoke
+          # The trusted launcher needs cgroupfs authority. Stage Bun in a
+          # fixed runtime tree so Bubblewrap never traverses the runner home.
+          sandbox_path="/usr/local/bin:$PATH"
+          sudo env PATH="$sandbox_path" HOME="$HOME" CI="$CI" \
+            TERMINUS_CGROUP_ROOT="$TERMINUS_CGROUP_ROOT" \
+            "$(command -v just)" linux-enforcement-prereqs
+          sudo env PATH="$sandbox_path" HOME="$HOME" CI="$CI" \
+            TERMINUS_CGROUP_ROOT="$TERMINUS_CGROUP_ROOT" \
+            "$(command -v just)" eval-smoke
       - name: Remove delegated cgroup
         if: always() && env.TERMINUS_CGROUP_ROOT != ''
         run: |
