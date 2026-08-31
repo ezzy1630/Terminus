@@ -527,13 +527,16 @@ jobs:
       contents: read
       id-token: write
     env:
-      MACOS_EVIDENCE_DIR: ${{ runner.temp }}/macos-evidence
       TERMINUS_RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-terminus
+      - name: Prepare macOS evidence directory
+        run: |
+          echo "MACOS_EVIDENCE_DIR=$RUNNER_TEMP/macos-evidence" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/macos-evidence"
       - name: Run live Seatbelt tests and effective-control probes
         run: >-
           bash scripts/run-security-job.sh
