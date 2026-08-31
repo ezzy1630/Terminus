@@ -38,6 +38,14 @@ cleanup() {
   fi
   if [[ "$status" -ne 0 ]]; then
     echo "[e2e] failed; diagnostic bundle preserved at $TMP_DIR" >&2
+    if [[ "${CI:-}" == "true" ]]; then
+      for diagnostic_log in "$TMP_DIR/kernel.log" "$TMP_DIR"/control-*.log; do
+        [[ -f "$diagnostic_log" ]] || continue
+        echo "[e2e] bounded diagnostic tail for $(basename "$diagnostic_log"); earlier matches omitted" >&2
+        grep -Ei 'agentLoop error|bubblewrap|bwrap|cgroup|sandbox|failed|error' "$diagnostic_log" \
+          | tail -c 12000 >&2
+      done
+    fi
   else
     rm -rf "$TMP_DIR"
   fi
