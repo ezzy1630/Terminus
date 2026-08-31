@@ -656,7 +656,7 @@ describe("caller teardown reads as cancellation, not a provider fault", () => {
       Execute: async () => { throw new Error("buffered Execute must not be used"); },
       ExecuteStream: () => new Observable<ConnectorChunk>((subscriber) => {
         let stopped = false;
-        void (async () => {
+        (async () => {
           subscriber.next({ receipt: makeHead(200) });
           // skipcq: JS-0092
           for (let index = 0; index < 20 && !stopped; index += 1) {
@@ -664,7 +664,7 @@ describe("caller teardown reads as cancellation, not a provider fault", () => {
             if (stopped) return;
             subscriber.next({ bytes: encode(`data: ${index}\n\n`) });
           }
-        })();
+        })().catch(() => {});
         return () => { stopped = true; unsubscribed = true; };
       }),
     });

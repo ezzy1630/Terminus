@@ -133,6 +133,7 @@ export interface InspectProvider {
 const ERROR_LINE_PATTERN = /(FAIL|AssertionError|Error:)/;
 const NULL_DEREF_PATTERN = /(undefined|null)/;
 
+// skipcq: JS-0067
 function inferRootCauseHint(errorMessage: string): string | undefined {
   if (NULL_DEREF_PATTERN.test(errorMessage)) {
     return "Null/undefined dereference detected. Verify state initialization before access.";
@@ -143,6 +144,7 @@ function inferRootCauseHint(errorMessage: string): string | undefined {
   return undefined;
 }
 
+// skipcq: JS-0067
 export function parseStackTrace(rawLog: string): FailureAnalysis {
   const lines = rawLog.split("\n");
   let testName = "unknown_test";

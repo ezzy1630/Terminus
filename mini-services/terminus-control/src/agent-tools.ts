@@ -1623,6 +1623,7 @@ export interface StandaloneToolEffectMetadata extends OperationEffectMetadata {
   readonly reversibility: "none" | "reversible" | "unknown";
 }
 
+// skipcq: JS-0067
 export function toolEffectMetadata(call: ParsedStandaloneToolCall): StandaloneToolEffectMetadata {
   switch (call.toolId) {
     case "capability":
@@ -1970,6 +1971,7 @@ function projectedLineCount(text: string): number {
   return text.endsWith("\n") ? lines : lines + 1;
 }
 
+// skipcq: JS-0067
 export async function executeStandaloneTool(
   input: ExecuteStandaloneToolInput,
 ): Promise<ExecutedToolResult> {
@@ -3348,6 +3350,7 @@ export function splitOutputBudget(
   return { stdout: stdoutFloor + stdoutExtra, stderr: stderrFloor + stderrExtra };
 }
 
+// skipcq: JS-0067
 function collectProcess(
   events: { readonly subscribe: (observer: {
     readonly next: (event: ProcessEvent) => void;

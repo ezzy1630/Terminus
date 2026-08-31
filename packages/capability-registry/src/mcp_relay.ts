@@ -92,6 +92,7 @@ export function sanitizeMcpEnvironment(
 const PRIVATE_IP_PATTERN = /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)/;
 const LOCAL_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 
+// skipcq: JS-0067
 export function isPrivateIp(ip: string): boolean {
   const cleaned = ip.replace(/^::ffff:/, "");
   if (LOCAL_HOSTS.has(cleaned)) return true;

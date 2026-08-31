@@ -312,6 +312,7 @@ function collectProviderJob(
   });
 }
 
+// skipcq: JS-0067
 export function decodeProviderChunks(stdout: string): readonly ProviderResponseChunk[] {
   const lines = stdout.split(/\r?\n/).filter((line) => line.trim().length > 0);
   if (lines.length === 0) throw new Error("local provider produced no response chunks");

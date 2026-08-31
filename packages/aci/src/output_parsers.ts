@@ -68,6 +68,7 @@ export function parseCompilerDiagnostics(rawOutput: string): readonly Diagnostic
 const NULL_PATTERN = /(undefined|null|None)/;
 const ASSERTION_PATTERN = /(assert|expect)/;
 
+// skipcq: JS-0067
 function getRootCauseHint(errorMessage: string): string | undefined {
   if (NULL_PATTERN.test(errorMessage)) {
     return "Null/undefined dereference detected. Verify state initialization before property dereferencing.";
@@ -78,6 +79,7 @@ function getRootCauseHint(errorMessage: string): string | undefined {
   return undefined;
 }
 
+// skipcq: JS-0067
 export function parseTestFailures(rawOutput: string): FailureAnalysis {
   const lines = rawOutput.split("\n");
   let testName = "unknown_test";

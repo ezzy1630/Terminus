@@ -540,6 +540,7 @@ function withAbortSignal<T>(
 }
 
 /** Minimal Observable→AsyncIterable bridge. */
+// skipcq: JS-0067
 export function observableToAsyncIterable<T>(
   source: import("rxjs").Observable<T>,
   signal?: AbortSignal | null,

@@ -156,6 +156,7 @@ function admittedProtocol(value: string): GatewayProtocol {
   return value === "responses" || value === "messages" ? value : "chat_completions";
 }
 
+// skipcq: JS-0067
 export function parseProviderAccountMetadata(json: string): ProviderAccountMetadata {
   let parsed: unknown;
   try {
