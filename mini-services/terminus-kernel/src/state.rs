@@ -151,7 +151,7 @@ impl AppState {
         // SPEC §13.6 / §31.6: well-known dev tokens/secrets are permitted
         // ONLY when TERMINUS_DEV=1. Without it, the kernel fails closed if no
         // real token/secret is configured. Never set TERMINUS_DEV=1 in prod.
-        let dev_mode = env::var("TERMINUS_DEV").map(|v| v == "1").unwrap_or(false);
+        let dev_mode = env::var("TERMINUS_DEV").is_ok_and(|v| v == "1");
 
         let kernel = KernelHandle::new(data_dir.clone())
             .map_err(|e| std::io::Error::other(format!("kernel assembly: {e}")))?;

@@ -512,6 +512,7 @@ describe("H9 the gateway path streams", () => {
           new Observable<ConnectorChunk>((subscriber) => {
             let cancelled = false;
             void (async () => {
+              // skipcq: JS-0092
               for (let index = 0; index < 20 && !cancelled; index += 1) {
                 await new Promise((resolve) => setTimeout(resolve, 5));
                 if (cancelled) return;

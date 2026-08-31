@@ -43,9 +43,7 @@ interface RuntimeSchema<Output> {
   readonly parse: (input: unknown) => Output;
 }
 
-export interface FetchImplementation {
-  (input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
-}
+export type FetchImplementation = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export interface MutationRequestOptions {
   /** Stable key for the logical mutation, reused when that mutation is retried. */

@@ -32,6 +32,7 @@ export interface AcpSelection {
   readonly selectedText: string;
 }
 
+// skipcq: JS-0327
 export class AcpBoundaryAdapter {
   /**
    * Translates an open document into a scoped canonical ResourceHandle.

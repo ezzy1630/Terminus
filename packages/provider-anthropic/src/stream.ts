@@ -270,9 +270,9 @@ function errorChunk(input: unknown): ProviderResponseChunk {
 export function anthropicUsage(
   inputTokens: number,
   outputTokens: number,
-  cacheReadTokens: number = 0,
-  cacheWriteTokens: number = 0,
-  reasoningTokens: number = 0,
+  cacheReadTokens = 0,
+  cacheWriteTokens = 0,
+  reasoningTokens = 0,
 ): UsageRecord {
   return {
     inputTokens: BigInt(inputTokens) as TokenCount,

@@ -77,7 +77,7 @@ export class BrowserDesktopPoolManager {
     poolId: string,
     taskId: string,
     workerId: string,
-    ttlMs: number = 300_000,
+    ttlMs = 300_000,
   ): Promise<PoolLease> {
     if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
       throw new ValidationError("Pool lease TTL must be a positive safe integer", { ttlMs });
@@ -192,7 +192,7 @@ export class BrowserDesktopPoolManager {
     }
   }
 
-  public heartbeatLease(leaseId: string, ttlMs: number = 300_000): PoolLease {
+  public heartbeatLease(leaseId: string, ttlMs = 300_000): PoolLease {
     const lease = this.leases.get(leaseId);
     if (lease === undefined) throw new NotFoundError("pool lease", leaseId);
     if (lease.status !== "active") {

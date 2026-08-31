@@ -351,6 +351,8 @@ export function decodeProviderChunks(stdout: string): readonly ProviderResponseC
         ...(chunk.provider_request_id === undefined ? {} : { providerRequestId: chunk.provider_request_id }),
         ...(chunk.usage === undefined ? {} : { usage: toUsage(chunk.usage) }),
       };
+      default:
+        throw new Error(`unexpected chunk kind: ${String((chunk as { kind?: unknown }).kind)}`);
     }
   });
   if (chunks.at(-1)?.kind !== "done") {

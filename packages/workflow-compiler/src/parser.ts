@@ -18,7 +18,7 @@ export class ParseError extends Error {
   constructor(
     message: string,
     public readonly sourceSpan?: SourceSpan | undefined,
-    public readonly code: string = "PARSE_ERROR",
+    public readonly code = "PARSE_ERROR",
   ) {
     super(message);
     this.name = "ParseError";
@@ -225,7 +225,7 @@ export function parseSkillMarkdown(markdown: string, sourcePath = "SKILL.md"): W
     const rootSpan = createSourceSpan(sourcePath, markdown, 0, Math.min(markdown.length, 500));
     rawNodes.push({
       id: "step-1",
-      title: title,
+      title,
       description: description || title,
       requiredCapabilities: ["read"],
       effectClass: "read_only",

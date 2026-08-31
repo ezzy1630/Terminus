@@ -173,6 +173,7 @@ async function readReplayEvents(
       }
     };
     try {
+      // skipcq: JS-0092
       while (!reachedExpectedCount) {
         const next = await reader.read();
         if (next.done) break;

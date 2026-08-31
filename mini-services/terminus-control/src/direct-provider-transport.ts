@@ -603,6 +603,7 @@ export function observableToAsyncIterable<T>(
       }
       return {
         next: async (): Promise<IteratorResult<T>> => {
+          // skipcq: JS-0092
           while (!done && queue.length === 0) {
             await new Promise<void>((resolve) => {
               wake = resolve;

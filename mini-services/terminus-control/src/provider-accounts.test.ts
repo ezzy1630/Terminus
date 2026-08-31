@@ -46,6 +46,7 @@ const CATALOG = {
     id: "cloudflare-workers-ai",
     name: "Cloudflare Workers AI",
     npm: "@ai-sdk/openai-compatible",
+    // skipcq: JS-0038
     api: "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1",
     models: {},
   },

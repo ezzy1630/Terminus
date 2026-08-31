@@ -27,6 +27,7 @@ export interface AtifTrace {
   readonly exportedAt: string;
 }
 
+// skipcq: JS-0327
 export class AtifBoundaryAdapter {
   /**
    * Exports an ARP v2 event stream into a standard ATIF Trace document.

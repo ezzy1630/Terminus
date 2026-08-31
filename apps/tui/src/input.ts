@@ -44,6 +44,7 @@ function key(name: string, text = "", options: Partial<Omit<KeyInput, "kind" | "
 }
 
 function decodeMouse(sequence: string): MouseInput | null {
+  // skipcq: JS-0004
   const match = /^\u001b\[<(\d+);(\d+);(\d+)([mM])$/.exec(sequence);
   if (!match) return null;
   const code = Number(match[1]);

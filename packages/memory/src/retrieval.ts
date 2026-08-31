@@ -96,13 +96,13 @@ export function retrieveMemories(
   const enableSemantic = options.enableSemantic === true && options.semanticScorer != null;
   const hooks = options.revalidationHooks ?? defaultRevalidationHooks();
 
-  const eligible = claims.filter((c) => {
-    if (c.status !== "active") return false;
-    if (!isWithinValidityWindow(c, options.now)) return false;
-    if (!scopeMatches(c, options.scope)) return false;
-    if (requireProvenance && !hasCompleteProvenance(c)) return false;
-    return true;
-  });
+  const eligible = claims.filter(
+    (c) =>
+      c.status === "active" &&
+      isWithinValidityWindow(c, options.now) &&
+      scopeMatches(c, options.scope) &&
+      (!requireProvenance || hasCompleteProvenance(c)),
+  );
 
   const corpus = eligible.map((c) => ({
     id: c.id as string,

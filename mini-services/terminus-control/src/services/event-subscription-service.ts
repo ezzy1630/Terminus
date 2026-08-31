@@ -151,6 +151,7 @@ export class EventSubscriptionService<TEvent extends EventCursorRecord> {
     };
 
     const drainPending = async (): Promise<void> => {
+      // skipcq: JS-0092
       while (!closed && !aborted && pending.size > 0) {
         const event = [...pending.values()].sort((left, right) =>
           left.eventId === right.eventId ? 0 : left.eventId < right.eventId ? -1 : 1)[0];

@@ -215,8 +215,8 @@ export class KernelConnectorClient implements CredentialBoundGatewayClient {
     let observedStream = false;
     // "Last receipt wins" still yields the terminal one: the head frame is
     // consumed by its own branch and never assigned here.
-    let receipt: ConnectorChunk["receipt"] = undefined;
-    let head: ConnectorChunk["receipt"] = undefined;
+    let receipt: ConnectorChunk["receipt"];
+    let head: ConnectorChunk["receipt"];
     let errorPrefix = new Uint8Array(new ArrayBuffer(0));
     this.lastDispatchedAtMs = Date.now();
     try {

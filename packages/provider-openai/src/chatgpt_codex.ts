@@ -218,8 +218,8 @@ export function chatGptCodexBody(
   options: ChatGptCodexRenderOptions = {},
 ): Readonly<Record<string, unknown>> {
   const body: Record<string, unknown> = { ...base };
-  for (const field of CHATGPT_CODEX_FORBIDDEN_BODY_FIELDS) delete body[field];
-  for (const field of CHATGPT_CODEX_UNVERIFIED_BODY_FIELDS) delete body[field];
+  for (const field of CHATGPT_CODEX_FORBIDDEN_BODY_FIELDS) Reflect.deleteProperty(body, field);
+  for (const field of CHATGPT_CODEX_UNVERIFIED_BODY_FIELDS) Reflect.deleteProperty(body, field);
   body.store = false;
   body.stream = true;
   // Encrypted reasoning is how a stateless (`store: false`) caller keeps a

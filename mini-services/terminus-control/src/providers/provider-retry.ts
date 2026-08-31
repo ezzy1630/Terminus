@@ -225,14 +225,15 @@ export class RetryAbortedError extends Error {
 export function abortableSleep(ms: number, signal?: AbortSignal | null | undefined): Promise<void> {
   if (signal?.aborted === true) return Promise.resolve();
   return new Promise<void>((resolve) => {
-    const timer = setTimeout(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(() => {
       signal?.removeEventListener("abort", onAbort);
       resolve();
     }, ms);
-    const onAbort = (): void => {
-      clearTimeout(timer);
-      resolve();
-    };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }

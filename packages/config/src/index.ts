@@ -546,11 +546,8 @@ function defineConfigProperty(target: Record<string, unknown>, key: string, valu
  *  - a shorter array (for deny-lists).
  */
 function isWeakened(prev: unknown, next: unknown): boolean {
-  if (prev === undefined || next === undefined) return false;
   if (typeof prev === "string" && typeof next === "string") {
-    if (prev === "deny" && (next === "allow" || next === "optional")) return true;
-    if (prev === "required" && next === "optional") return true;
-    return false;
+    return (prev === "deny" && (next === "allow" || next === "optional")) || (prev === "required" && next === "optional");
   }
   if (typeof prev === "number" && typeof next === "number") {
     return next < prev;

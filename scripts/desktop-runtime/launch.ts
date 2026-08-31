@@ -176,14 +176,15 @@ async function waitForExit(
 ): Promise<boolean> {
   if (!childRunning(child)) return true;
   return await new Promise<boolean>((resolveWait) => {
-    const timer = setTimeout(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onExit = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      resolveWait(true);
+    };
+    timer = setTimeout(() => {
       child.removeListener("exit", onExit);
       resolveWait(false);
     }, timeoutMs);
-    const onExit = (): void => {
-      clearTimeout(timer);
-      resolveWait(true);
-    };
     child.once("exit", onExit);
   });
 }

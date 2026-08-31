@@ -280,13 +280,25 @@ function isSqlAllowedPath(p: string): boolean {
   // `rusqlite`, which requires SQL strings — there is no Prisma for Rust. R5
   // governs the TypeScript control plane (no raw SQL outside Prisma); Rust
   // storage crates are the legitimate low-level layer, so .rs files are exempt.
-  if (rel.endsWith(".rs")) return true;
-  if (SQL_ALLOWED_FILES.has(rel)) return true;
-  if (rel.endsWith(".test.ts") || rel.endsWith(".spec.ts") || rel.endsWith(".test.tsx") || rel.endsWith(".spec.tsx")) return true;
-  if (rel.endsWith("_test.py") || rel.endsWith(".test.py")) return true;
-  if (rel.includes("/.venv/") || rel.includes("/venv/") || rel.includes("/__pycache__/") || rel.includes("/site-packages/")) return true;
-  if (rel.includes("/node_modules/") || rel.includes("/dist/") || rel.includes("/.next/") || rel.includes("/build/") || rel.includes("/target/")) return true;
-  return false;
+  return (
+    rel.endsWith(".rs") ||
+    SQL_ALLOWED_FILES.has(rel) ||
+    rel.endsWith(".test.ts") ||
+    rel.endsWith(".spec.ts") ||
+    rel.endsWith(".test.tsx") ||
+    rel.endsWith(".spec.tsx") ||
+    rel.endsWith("_test.py") ||
+    rel.endsWith(".test.py") ||
+    rel.includes("/.venv/") ||
+    rel.includes("/venv/") ||
+    rel.includes("/__pycache__/") ||
+    rel.includes("/site-packages/") ||
+    rel.includes("/node_modules/") ||
+    rel.includes("/dist/") ||
+    rel.includes("/.next/") ||
+    rel.includes("/build/") ||
+    rel.includes("/target/")
+  );
 }
 
 function checkNoRawSqlOutsideRepositories(): void {

@@ -11,6 +11,7 @@ import type { EventEnvelope } from "@terminus/runtime-protocol";
 import type { EventEnvelopeV2 } from "@terminus/runtime-protocol";
 import { generateUuid7, nowTimestamp, asContentHash } from "@terminus/domain";
 
+// skipcq: JS-0327
 export class CompatibilityGateway {
   /**
    * Evidence a claim must carry. A task that cannot touch the workspace

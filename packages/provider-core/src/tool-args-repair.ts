@@ -51,8 +51,7 @@ function repairUnbalancedJson(text: string): string | null {
   const stack: string[] = [];
   inString = false;
   escaped = false;
-  for (let index = 0; index < out.length; index += 1) {
-    const char = out[index]!;
+  for (const char of out) {
     if (inString) {
       if (escaped) escaped = false;
       else if (char === "\\") escaped = true;

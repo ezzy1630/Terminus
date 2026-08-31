@@ -72,8 +72,7 @@ export function parseTestFailures(rawOutput: string): FailureAnalysis {
   let primaryPath = "unknown_file";
   const frames: StackFrame[] = [];
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
+  for (const line of lines) {
 
     // Pytest failure header: "FAILED tests/test_auth.py::test_login - AssertionError: assert False"
     const pytestMatch = line.match(/^FAILED\s+([^:]+)::([^\s]+)\s+-\s+(.+)$/);

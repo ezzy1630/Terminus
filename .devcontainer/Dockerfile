@@ -8,8 +8,11 @@
 
 FROM mcr.microsoft.com/dev-typescript-node:22 AS base
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # Install OS dependencies needed by the Rust toolchain, Prisma's engine,
 # and the Linux sandbox backends (bubblewrap, landlock, etc.).
+# skipcq: DOK-DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -31,6 +34,7 @@ ENV PATH="/usr/local/cargo/bin:${PATH}"
 
 # Create the vscode user with sudo (the dev-typescript-node image already
 # provides it; we just ensure sudo is present).
+# skipcq: DOK-DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends sudo \
     && rm -rf /var/lib/apt/lists/* \

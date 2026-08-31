@@ -839,8 +839,6 @@ def test_cli_routes_swe_bench_pro_to_the_instance_path(
     control_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`--suite swe-bench-pro` materialises the instance and writes predictions."""
-    import subprocess
-
     source = tmp_path / "repos" / "acme__widget"
     source.mkdir(parents=True)
     subprocess.run(["git", "-C", str(source), "init", "-q", "-b", "main"], check=True)

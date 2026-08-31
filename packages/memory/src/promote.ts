@@ -57,13 +57,14 @@ export function isPromotionEligible(
   claim: MemoryClaim,
   policy: PromotionPolicy = DEFAULT_PROMOTION_POLICY,
 ): boolean {
-  if (claim.kind !== "procedure") return false;
-  if (claim.status !== "active") return false;
-  if (claim.procedureArtifactHash === null) return false;
-  if (claim.usage.successfulUses < policy.minSuccessfulUses) return false;
-  if (claim.usage.harmfulUses > policy.maxHarmfulUses) return false;
-  if (policy.requireVerification && claim.verification.lastVerifiedAt === null) return false;
-  return true;
+  return (
+    claim.kind === "procedure" &&
+    claim.status === "active" &&
+    claim.procedureArtifactHash !== null &&
+    claim.usage.successfulUses >= policy.minSuccessfulUses &&
+    claim.usage.harmfulUses <= policy.maxHarmfulUses &&
+    (!policy.requireVerification || claim.verification.lastVerifiedAt !== null)
+  );
 }
 
 export function toPromotionCandidate(claim: MemoryClaim): SkillPromotionCandidate {

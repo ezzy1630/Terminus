@@ -100,12 +100,13 @@ export function isPrivateIp(ip: string): boolean {
   const p1 = parts[1];
   if (p0 === undefined || p1 === undefined) return false;
 
-  if (p0 === 127) return true;
-  if (p0 === 10) return true;
-  if (p0 === 172 && p1 >= 16 && p1 <= 31) return true;
-  if (p0 === 192 && p1 === 168) return true;
-  if (p0 === 169 && p1 === 254) return true;
-  return false;
+  return (
+    p0 === 127 ||
+    p0 === 10 ||
+    (p0 === 172 && p1 >= 16 && p1 <= 31) ||
+    (p0 === 192 && p1 === 168) ||
+    (p0 === 169 && p1 === 254)
+  );
 }
 
 export interface McpHttpPort {

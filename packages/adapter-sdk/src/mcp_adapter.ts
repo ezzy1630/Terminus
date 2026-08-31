@@ -26,6 +26,7 @@ export interface McpPromptDescriptor {
   readonly arguments?: readonly { readonly name: string; readonly description?: string; readonly required?: boolean }[] | undefined;
 }
 
+// skipcq: JS-0327
 export class McpBoundaryAdapter {
   /**
    * Translates an MCP Tool descriptor into a canonical CapabilityDescriptor.

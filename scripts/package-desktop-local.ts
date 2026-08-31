@@ -188,6 +188,7 @@ try {
   }
   await run(["bun", "run", "build:electron"], DESKTOP);
 
+  // skipcq: JS-0038
   const runtimeSource = join(PACKAGE_CACHE, "runtime", "${arch}");
   const builderArguments = [
     "bunx",

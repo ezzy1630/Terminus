@@ -42,6 +42,14 @@ const FormField = <
   )
 }
 
+type FormItemContextValue = {
+  id: string
+}
+
+const FormItemContext = React.createContext<FormItemContextValue>(
+  {} as FormItemContextValue
+)
+
 const useFormField = () => {
   const fieldContext = React.useContext(FormFieldContext)
   const itemContext = React.useContext(FormItemContext)
@@ -64,14 +72,6 @@ const useFormField = () => {
     ...fieldState,
   }
 }
-
-type FormItemContextValue = {
-  id: string
-}
-
-const FormItemContext = React.createContext<FormItemContextValue>(
-  {} as FormItemContextValue
-)
 
 function FormItem({ className, ...props }: React.ComponentProps<"div">) {
   const id = React.useId()
@@ -96,7 +96,7 @@ function FormLabel({
   return (
     <Label
       data-slot="form-label"
-      data-error={!!error}
+      data-error={Boolean(error)}
       className={cn("data-[error=true]:text-destructive", className)}
       htmlFor={formItemId}
       {...props}
@@ -116,7 +116,7 @@ function FormControl({ ...props }: React.ComponentProps<typeof Slot>) {
           ? `${formDescriptionId}`
           : `${formDescriptionId} ${formMessageId}`
       }
-      aria-invalid={!!error}
+      aria-invalid={Boolean(error)}
       {...props}
     />
   )

@@ -215,14 +215,15 @@ function meetsMinimum(
   model: ModelCapabilitySnapshot,
   min: CapabilityRequirements,
 ): boolean {
-  if (min.codingQuality === "high" && model.snapshot.reliability.editCohortSuccess < 0.85) return false;
-  if (min.codingQuality === "medium" && model.snapshot.reliability.editCohortSuccess < 0.7) return false;
-  if (min.toolReliability === "high" && model.snapshot.reliability.toolCallSuccess < 0.95) return false;
-  if (min.toolReliability === "medium" && model.snapshot.reliability.toolCallSuccess < 0.85) return false;
-  if (min.structuredOutput === "required" && !model.snapshot.context.structuredOutput) return false;
-  if (min.context === "large" && model.snapshot.context.testedSafeTokens < 128_000) return false;
-  if (min.context === "medium" && model.snapshot.context.testedSafeTokens < 32_000) return false;
-  return true;
+  return (
+    (min.codingQuality !== "high" || model.snapshot.reliability.editCohortSuccess >= 0.85) &&
+    (min.codingQuality !== "medium" || model.snapshot.reliability.editCohortSuccess >= 0.7) &&
+    (min.toolReliability !== "high" || model.snapshot.reliability.toolCallSuccess >= 0.95) &&
+    (min.toolReliability !== "medium" || model.snapshot.reliability.toolCallSuccess >= 0.85) &&
+    (min.structuredOutput !== "required" || Boolean(model.snapshot.context.structuredOutput)) &&
+    (min.context !== "large" || model.snapshot.context.testedSafeTokens >= 128_000) &&
+    (min.context !== "medium" || model.snapshot.context.testedSafeTokens >= 32_000)
+  );
 }
 
 function scoreModel(model: ModelCapabilitySnapshot, input: RouterInputs): number {
@@ -281,9 +282,7 @@ function isStrongerThan(a: ModelCapabilitySnapshot, b: ModelCapabilitySnapshot):
   const bCtx = b.snapshot.context.testedSafeTokens;
   const aEdit = a.snapshot.reliability.editCohortSuccess;
   const bEdit = b.snapshot.reliability.editCohortSuccess;
-  if (aCtx > bCtx && aEdit >= bEdit) return true;
-  if (aEdit > bEdit && aCtx >= bCtx) return true;
-  return false;
+  return (aCtx > bCtx && aEdit >= bEdit) || (aEdit > bEdit && aCtx >= bCtx);
 }
 
 // ────────────────────────── Fallback record (§38.5) ──────────────────────────

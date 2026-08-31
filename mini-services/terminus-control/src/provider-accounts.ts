@@ -173,6 +173,7 @@ export function parseProviderAccountMetadata(json: string): ProviderAccountMetad
       : {}),
     ...(typeof parsed.email === "string"
       && parsed.email.length <= 320
+      // skipcq: JS-0004
       && !/[\u0000-\u001f\u007f]/.test(parsed.email)
       ? { email: parsed.email }
       : {}),

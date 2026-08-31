@@ -114,8 +114,8 @@ class TaskPackage:
         }
 
 
-def load_task_package(dir: Path | str) -> TaskPackage:
-    """Load a task package from ``dir``.
+def load_task_package(task_dir: Path | str) -> TaskPackage:
+    """Load a task package from ``task_dir``.
 
     Required files: ``task.yaml``, ``prompt.md``.
     Optional files (default to empty): ``environment.lock``, ``setup.sh``,
@@ -123,10 +123,10 @@ def load_task_package(dir: Path | str) -> TaskPackage:
     ``README.md``.
 
     Raises:
-        TaskPackageError: if ``dir`` does not exist or required files are
+        TaskPackageError: if ``task_dir`` does not exist or required files are
             missing.
     """
-    d = Path(dir)
+    d = Path(task_dir)
     if not d.exists():
         raise TaskPackageError(f"task package directory does not exist: {d}")
     if not d.is_dir():

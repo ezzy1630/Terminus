@@ -116,7 +116,7 @@ function getChangedFiles(): string[] {
     if (!trimmed) continue;
     // Format: 'XY path' or 'XY orig -> dest'
     const match = trimmed.match(/^[A-Z?]{1,2}\s+(?:.*?->\s+)?(.+)$/);
-    if (match && match[1]) {
+    if (match?.[1]) {
       files.push(match[1].trim());
     }
   }

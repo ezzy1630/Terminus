@@ -22,7 +22,7 @@ export class ControllerError extends Error {
   constructor(
     message: string,
     public readonly nodeId?: string,
-    public readonly code: string = "CONTROLLER_ERROR",
+    public readonly code = "CONTROLLER_ERROR",
   ) {
     super(message);
     this.name = "ControllerError";

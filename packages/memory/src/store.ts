@@ -37,12 +37,12 @@ export class InMemoryMemoryRepository implements MemoryRepository {
     }
     if (filter.scope !== undefined) {
       const scope = filter.scope;
-      out = out.filter((c) => {
-        if (scope.organization != null && c.scope.organization !== scope.organization) return false;
-        if (scope.user != null && c.scope.user !== scope.user) return false;
-        if (scope.workspaceId != null && c.scope.workspaceId !== scope.workspaceId) return false;
-        return true;
-      });
+      out = out.filter(
+        (c) =>
+          (scope.organization == null || c.scope.organization === scope.organization) &&
+          (scope.user == null || c.scope.user === scope.user) &&
+          (scope.workspaceId == null || c.scope.workspaceId === scope.workspaceId),
+      );
     }
     return out;
   }

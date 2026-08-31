@@ -33,6 +33,7 @@ export interface AgUiCockpitViewModel {
   readonly attentionRequired: boolean;
 }
 
+// skipcq: JS-0327
 export class AgUiBoundaryAdapter {
   /**
    * Projects domain aggregates into a consolidated cockpit view model.

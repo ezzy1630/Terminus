@@ -80,8 +80,8 @@ export function analyzeTaintFlow(
     const isSensitiveSink =
       node.kind === "effect" ||
       node.kind === "connector" ||
-      (node.effectClass && SENSITIVE_EFFECT_CLASSES.includes(node.effectClass)) ||
-      (node.requiredCapabilities && node.requiredCapabilities.includes("secrets"));
+      (typeof node.effectClass === "string" && SENSITIVE_EFFECT_CLASSES.includes(node.effectClass)) ||
+      node.requiredCapabilities?.includes("secrets") === true;
 
     if (isSensitiveSink && !node.taintPolicy?.allowTaintedInputs && !node.taintPolicy?.sanitizeWith) {
       violations.push(

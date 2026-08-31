@@ -137,8 +137,7 @@ export function parseStackTrace(rawLog: string): FailureAnalysis {
   let path = "unknown_file";
   const frames: StackFrame[] = [];
 
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i]!;
+  for (const l of lines) {
     if (l.includes("FAIL") || l.includes("AssertionError") || l.includes("Error:")) {
       errorMessage = l.trim();
     }

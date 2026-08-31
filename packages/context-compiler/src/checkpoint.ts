@@ -481,6 +481,15 @@ export type CheckpointTrigger =
   | "scope_expansion"
   | "external_effect";
 
+const defaultEnabledTriggers: ReadonlySet<CheckpointTrigger> = new Set([
+  "turn_boundary",
+  "compaction_event",
+  "epoch_change",
+  "failure_detected",
+  "task_completion",
+  "scope_expansion",
+]);
+
 /**
  * Returns true if the given event should trigger a checkpoint, per SPEC §9.4.
  */
@@ -491,12 +500,3 @@ export function shouldCreateCheckpoint(
   const enabled = _enabledTriggers ?? defaultEnabledTriggers;
   return enabled.has(trigger);
 }
-
-const defaultEnabledTriggers: ReadonlySet<CheckpointTrigger> = new Set([
-  "turn_boundary",
-  "compaction_event",
-  "epoch_change",
-  "failure_detected",
-  "task_completion",
-  "scope_expansion",
-]);

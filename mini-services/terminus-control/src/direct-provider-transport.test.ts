@@ -658,6 +658,7 @@ describe("caller teardown reads as cancellation, not a provider fault", () => {
         let stopped = false;
         void (async () => {
           subscriber.next({ receipt: makeHead(200) });
+          // skipcq: JS-0092
           for (let index = 0; index < 20 && !stopped; index += 1) {
             await new Promise((resolve) => setTimeout(resolve, 5));
             if (stopped) return;

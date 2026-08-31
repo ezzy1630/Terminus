@@ -1,0 +1,83 @@
+version = 1
+
+test_patterns = [
+  "**/tests/**/*.ts",
+  "**/*.test.ts",
+  "**/*.test.tsx",
+  "**/tests/**/*.py",
+  "**/*_test.rs",
+  "**/tests/**/*.rs",
+  "**/tests/**"
+]
+
+exclude_patterns = [
+  "**/node_modules/**",
+  "**/dist/**",
+  "**/build/**",
+  "**/coverage/**",
+  "**/out/**",
+  "**/.next/**",
+  "**/__pycache__/**",
+  "**/.venv/**",
+  "**/venv/**",
+  "**/.tox/**",
+  "**/.pytest_cache/**",
+  "**/*.egg-info/**",
+  "**/target/**",
+  "**/.gradle/**",
+  "**/.mvn/**",
+  "**/gradle/**",
+  "**/*.log",
+  "artifacts/**",
+  "docs/generated/**",
+  "skills/**",
+  "Terminus — Research/**",
+  "evals/**",
+  "**/generated/**",
+  "mini-services/terminus-kernel/src/generated/**",
+  "packages/terminus-kernel-client/src/generated/**"
+]
+
+[[analyzers]]
+name = "javascript"
+enabled = true
+
+  [analyzers.meta]
+  dialect = "typescript"
+  module_system = "esmodules"
+  environment = ["nodejs", "browser"]
+  style_guide = "standard"
+
+[[analyzers]]
+name = "python"
+enabled = true
+
+  [analyzers.meta]
+  runtime_version = "3.x.x"
+  max_line_length = 120
+
+[[analyzers]]
+name = "rust"
+enabled = true
+
+  [analyzers.meta]
+  msrv = "1.80.0"
+
+[[analyzers]]
+name = "shell"
+enabled = true
+
+  [analyzers.meta]
+  dialect = "bash"
+
+[[analyzers]]
+name = "docker"
+enabled = true
+
+[[analyzers]]
+name = "secrets"
+enabled = true
+
+[[analyzers]]
+name = "sql"
+enabled = true
