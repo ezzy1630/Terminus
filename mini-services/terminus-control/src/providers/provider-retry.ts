@@ -222,6 +222,7 @@ export class RetryAbortedError extends Error {
  * Backoff sleep that settles early when the turn is cancelled. A plain
  * `setTimeout` here strands an interrupted turn for the full delay.
  */
+// skipcq: JS-0067
 export function abortableSleep(ms: number, signal?: AbortSignal | null | undefined): Promise<void> {
   if (signal?.aborted === true) return Promise.resolve();
   return new Promise<void>((resolve) => {
@@ -238,6 +239,7 @@ export function abortableSleep(ms: number, signal?: AbortSignal | null | undefin
   });
 }
 
+// skipcq: JS-0067
 export async function withProviderRetry<T>(
   operation: () => Promise<T>,
   options: RetryOptions = {},

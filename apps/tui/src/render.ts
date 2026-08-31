@@ -70,6 +70,7 @@ export function computeLayout(
   };
 }
 
+// skipcq: JS-0067
 export function stripAnsi(value: string): string {
   // skipcq: JS-0004
   return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
