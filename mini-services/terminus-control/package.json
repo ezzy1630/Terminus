@@ -44,7 +44,7 @@
     "@terminus/rollout": "workspace:*",
     "@terminus/cron": "workspace:*",
     "@terminus/lsp": "workspace:*",
-    "@prisma/client": "^6.11.1",
+    "@prisma/client": "^7.10.0",
     "zod": "^4.0.2",
     "z-ai-web-dev-sdk": "^0.0.18"
   }
