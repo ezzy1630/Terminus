@@ -345,6 +345,8 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap
       - run: just eval-smoke
 
   # ---------- Live evaluation (dispatch-only; R8) ----------
