@@ -116,8 +116,7 @@ class TaskPackage:
 
 def load_task_package(
     task_dir: Path | str | None = None,
-    *,
-    dir: Path | str | None = None,  # skipcq: PYL-W0622
+    **kwargs: Any,
 ) -> TaskPackage:
     """Load a task package from ``task_dir`` (or legacy ``dir``).
 
@@ -130,7 +129,7 @@ def load_task_package(
         TaskPackageError: if directory does not exist or required files are
             missing.
     """
-    target = task_dir if task_dir is not None else dir
+    target = task_dir if task_dir is not None else kwargs.get("dir")
     if target is None:
         raise TypeError("load_task_package() missing required argument: 'task_dir'")
     d = Path(target)
