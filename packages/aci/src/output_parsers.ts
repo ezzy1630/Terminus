@@ -65,6 +65,19 @@ export function parseCompilerDiagnostics(rawOutput: string): readonly Diagnostic
   return diags;
 }
 
+const NULL_PATTERN = /(undefined|null|None)/;
+const ASSERTION_PATTERN = /(assert|expect)/;
+
+function getRootCauseHint(errorMessage: string): string | undefined {
+  if (NULL_PATTERN.test(errorMessage)) {
+    return "Null/undefined dereference detected. Verify state initialization before property dereferencing.";
+  }
+  if (ASSERTION_PATTERN.test(errorMessage)) {
+    return "Assertion failure. Compare expected vs actual values.";
+  }
+  return undefined;
+}
+
 export function parseTestFailures(rawOutput: string): FailureAnalysis {
   const lines = rawOutput.split("\n");
   let testName = "unknown_test";
@@ -73,7 +86,6 @@ export function parseTestFailures(rawOutput: string): FailureAnalysis {
   const frames: StackFrame[] = [];
 
   for (const line of lines) {
-
     // Pytest failure header: "FAILED tests/test_auth.py::test_login - AssertionError: assert False"
     const pytestMatch = line.match(/^FAILED\s+([^:]+)::([^\s]+)\s+-\s+(.+)$/);
     if (pytestMatch) {
@@ -104,18 +116,11 @@ export function parseTestFailures(rawOutput: string): FailureAnalysis {
     }
   }
 
-  let rootCauseHint: string | undefined;
-  if (errorMessage.includes("undefined") || errorMessage.includes("null") || errorMessage.includes("None")) {
-    rootCauseHint = "Null/undefined dereference detected. Verify state initialization before property dereferencing.";
-  } else if (errorMessage.includes("assert") || errorMessage.includes("expect")) {
-    rootCauseHint = "Assertion failure. Compare expected vs actual values.";
-  }
-
   return {
     testName,
     path: primaryPath,
     errorMessage,
     stackTrace: frames,
-    rootCauseHint,
+    rootCauseHint: getRootCauseHint(errorMessage),
   };
 }
