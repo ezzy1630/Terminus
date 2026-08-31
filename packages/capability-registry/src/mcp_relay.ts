@@ -89,24 +89,25 @@ export function sanitizeMcpEnvironment(
   return cleanEnv;
 }
 
+const LOCAL_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+
+function isPrivateIpv4Octets(p0: number, p1: number): boolean {
+  if (p0 === 10 || p0 === 127) return true;
+  if (p0 === 192 && p1 === 168) return true;
+  if (p0 === 169 && p1 === 254) return true;
+  if (p0 === 172 && p1 >= 16 && p1 <= 31) return true;
+  return false;
+}
+
 export function isPrivateIp(ip: string): boolean {
   const cleaned = ip.replace(/^::ffff:/, "");
-  if (cleaned === "127.0.0.1" || cleaned === "::1" || cleaned === "localhost") return true;
+  if (LOCAL_HOSTS.has(cleaned)) return true;
 
-  const parts = cleaned.split(".").map((p) => parseInt(p, 10));
-  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p))) return false;
+  const parts = cleaned.split(".").map(Number);
+  const isInvalid = parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255);
+  if (isInvalid) return false;
 
-  const p0 = parts[0];
-  const p1 = parts[1];
-  if (p0 === undefined || p1 === undefined) return false;
-
-  return (
-    p0 === 127 ||
-    p0 === 10 ||
-    (p0 === 172 && p1 >= 16 && p1 <= 31) ||
-    (p0 === 192 && p1 === 168) ||
-    (p0 === 169 && p1 === 254)
-  );
+  return isPrivateIpv4Octets(parts[0]!, parts[1]!);
 }
 
 export interface McpHttpPort {

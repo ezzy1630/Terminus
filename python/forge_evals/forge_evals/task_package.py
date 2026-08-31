@@ -114,6 +114,47 @@ class TaskPackage:
         }
 
 
+def _validate_package_dir(task_dir: Path | str | None, kwargs: dict[str, Any]) -> Path:
+    target = task_dir if task_dir is not None else kwargs.get("dir")
+    if target is None:
+        raise TypeError("load_task_package() missing required argument: 'task_dir'")
+    d = Path(target)
+    if not d.exists():
+        raise TaskPackageError(f"task package directory does not exist: {d}")
+    if not d.is_dir():
+        raise TaskPackageError(f"task package path is not a directory: {d}")
+    return d
+
+
+def _parse_task_config(raw_task: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, str]]:
+    budget = raw_task.get("budget", {}) or {}
+    if not isinstance(budget, dict):
+        raise TaskPackageError(f"task.yaml 'budget' must be a mapping, got {type(budget)}")
+    allowed_network = raw_task.get("allowed_network", []) or []
+    if not isinstance(allowed_network, list):
+        raise TaskPackageError(
+            f"task.yaml 'allowed_network' must be a list, got {type(allowed_network)}"
+        )
+    secrets = raw_task.get("secrets", {}) or {}
+    if not isinstance(secrets, dict):
+        raise TaskPackageError(f"task.yaml 'secrets' must be a mapping, got {type(secrets)}")
+    return (
+        dict(budget),
+        [str(x) for x in allowed_network],
+        {str(k): str(v) for k, v in secrets.items()},
+    )
+
+
+def _ensure_task_dirs(d: Path) -> tuple[Path, Path]:
+    grader_dir = d / "grader"
+    if not grader_dir.exists():
+        grader_dir.mkdir(parents=True, exist_ok=True)
+    hidden_dir = d / "hidden"
+    if not hidden_dir.exists():
+        hidden_dir.mkdir(parents=True, exist_ok=True)
+    return grader_dir, hidden_dir
+
+
 def load_task_package(
     task_dir: Path | str | None = None,
     **kwargs: Any,
@@ -129,14 +170,7 @@ def load_task_package(
         TaskPackageError: if directory does not exist or required files are
             missing.
     """
-    target = task_dir if task_dir is not None else kwargs.get("dir")
-    if target is None:
-        raise TypeError("load_task_package() missing required argument: 'task_dir'")
-    d = Path(target)
-    if not d.exists():
-        raise TaskPackageError(f"task package directory does not exist: {d}")
-    if not d.is_dir():
-        raise TaskPackageError(f"task package path is not a directory: {d}")
+    d = _validate_package_dir(task_dir, kwargs)
 
     task_yaml_path = d / "task.yaml"
     if not task_yaml_path.exists():
@@ -148,47 +182,17 @@ def load_task_package(
         raise TaskPackageError(f"required file missing: {prompt_path}")
     prompt = prompt_path.read_text(encoding="utf-8")
 
-    # suite and task default to the parent dir name and the dir name,
-    # respectively, but can be overridden in task.yaml.
     suite = str(raw_task.get("suite") or d.parent.name)
     task = str(raw_task.get("task") or d.name)
     source_commit = str(raw_task.get("source_commit", "") or "")
     image_digest = str(raw_task.get("image_digest", "") or "")
     timeout = int(raw_task.get("timeout", 1800) or 1800)
-    budget = raw_task.get("budget", {}) or {}
-    if not isinstance(budget, dict):
-        raise TaskPackageError(f"task.yaml 'budget' must be a mapping, got {type(budget)}")
-    allowed_network = raw_task.get("allowed_network", []) or []
-    if not isinstance(allowed_network, list):
-        raise TaskPackageError(
-            f"task.yaml 'allowed_network' must be a list, got {type(allowed_network)}"
-        )
-    allowed_network = [str(x) for x in allowed_network]
-    secrets = raw_task.get("secrets", {}) or {}
-    if not isinstance(secrets, dict):
-        raise TaskPackageError(f"task.yaml 'secrets' must be a mapping, got {type(secrets)}")
-    secrets = {str(k): str(v) for k, v in secrets.items()}
+    budget, allowed_network, secrets = _parse_task_config(raw_task)
     grader_version = str(raw_task.get("grader_version", "0.1.0") or "0.1.0")
 
-    environment_lock = _read_text(d / "environment.lock")
-    setup_script = _read_text(d / "setup.sh")
-
-    grader_dir = d / "grader"
-    if not grader_dir.exists():
-        # Some task packages keep the grader at the top level; create an
-        # empty grader/ for callers that expect it.
-        grader_dir.mkdir(parents=True, exist_ok=True)
-    hidden_dir = d / "hidden"
-    if not hidden_dir.exists():
-        hidden_dir.mkdir(parents=True, exist_ok=True)
-
-    expected_properties = _load_yaml(d / "expected-properties.yaml") or {}
-    if not isinstance(expected_properties, dict):
-        expected_properties = {}
-    policy = _load_yaml(d / "policy.yaml") or {}
-    if not isinstance(policy, dict):
-        policy = {}
-    readme = _read_text(d / "README.md")
+    grader_dir, hidden_dir = _ensure_task_dirs(d)
+    expected_props = _load_yaml(d / "expected-properties.yaml") or {}
+    policy_cfg = _load_yaml(d / "policy.yaml") or {}
 
     return TaskPackage(
         dir=d,
@@ -197,18 +201,18 @@ def load_task_package(
         source_commit=source_commit,
         image_digest=image_digest,
         timeout=timeout,
-        budget=dict(budget),
-        allowed_network=list(allowed_network),
+        budget=budget,
+        allowed_network=allowed_network,
         secrets=secrets,
         grader_version=grader_version,
         prompt=prompt,
-        environment_lock=environment_lock,
-        setup_script=setup_script,
+        environment_lock=_read_text(d / "environment.lock"),
+        setup_script=_read_text(d / "setup.sh"),
         grader_dir=grader_dir,
         hidden_dir=hidden_dir,
-        expected_properties=dict(expected_properties),
-        policy=dict(policy),
-        readme=readme,
+        expected_properties=dict(expected_props) if isinstance(expected_props, dict) else {},
+        policy=dict(policy_cfg) if isinstance(policy_cfg, dict) else {},
+        readme=_read_text(d / "README.md"),
         raw_task=dict(raw_task),
     )
 
