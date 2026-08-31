@@ -4,9 +4,9 @@ Date: 2026-08-30
 
 Research cutoff: 2026-08-30
 
-Repository observed: `/private/tmp/terminus-pareto-integration.7PE45z/worktree`, integration revision `ac1af9fb07744e7f7ca6347d8ddb658f008a6de4`; latest exact live-runtime evidence revision `e934aeab42e74ca0bcf631f9968a85b3272fb57e`
+Repository observed: `/private/tmp/terminus-pareto-integration.7PE45z/worktree`, exact exercised code revision `8a045eb4edb9996993586f398b7713dbbb41ef72`
 
-Evidence state: the integration head contains the current `main` runtime/desktop work and retains the complete histories of `codex/harness-efficiency-20260830`, `codex/security-harness-research-20260830`, and `codex/long-horizon-context-engine-20260830`; all three named branch tips are ancestors of the observed revision. The source tree was clean before this report update. This is local integration and runtime evidence, not a pushed, signed, packaged, released, or independently reproduced candidate.
+Evidence state: the integration head contains the current `main` runtime/desktop work and retains the complete histories of `codex/harness-efficiency-20260830`, `codex/security-harness-research-20260830`, and `codex/long-horizon-context-engine-20260830`; all three named branch tips are ancestors of the observed revision. The exact live runtime and restart below were exercised at `8a045eb4`; the rendered desktop inspection remains bound to `030df02b`. The final report-only commit will be ahead of the exercised code, but changes no executable behavior. This is local integration and runtime evidence, not a pushed, signed, packaged, released, or independently reproduced candidate.
 
 ## Direct answer
 
@@ -14,7 +14,7 @@ Terminus is not proven to be the best coding harness or globally Pareto-leading.
 
 Its strongest differentiators are already real code: a Rust effect boundary, immutable context manifests, task and scope contracts, content-addressed artifacts, durable semantic events, cache accounting, typed verification, and evidence-gated completion. Competitors are generally stronger today on one or more complete product paths: Codex on the integrated macOS task surface and efficient model-native loop; Claude Code on a disciplined tool loop, sandbox usability, and long-horizon practices; Devin on reproducible cloud environments and browser-backed verification; Pi on minimalism and inspectable branchable sessions; Hermes on exact session retrieval and browser ACI; Prime Agent on programmatic orchestration and recoverable persistent execution.
 
-The integration now closes one narrow live-provider path through an exact source-built kernel: deterministic workspace activation, real model inference, kernel-mediated reads/write/exec, an exact file edit, successful verification, committed completion evidence, truthful turn-scoped evidence projection, and restart read-back all succeeded at revision `e934aeab`. That is meaningful operational evidence. It is one synthetic local task with one free model, not comparative quality, cost, latency, cancellation, packaged-app, or production evidence.
+The integration now closes one narrow live-provider path through an exact source-built kernel: deterministic workspace activation, real model inference, kernel-mediated reads/write/exec, an exact file edit, successful verification, committed completion evidence, truthful turn-scoped evidence projection, and restart read-back succeeded at revision `8a045eb4`. The source desktop was separately rendered and inspected at ancestor `030df02b`. That is meaningful operational evidence. It is one synthetic local task with one free model, not comparative quality, cost, latency, cancellation, signed/package, or production evidence.
 
 The highest-impact strategy is therefore not to add every competitor feature. It is to keep closing and measuring the complete path:
 
@@ -226,12 +226,11 @@ Observed:
 - `mini-services/terminus-control/src/agent/coding-turn-engine.ts` provides the bounded provider/tool loop.
 - Current budgets are model-aware; the prior 1,024-token response cap, 32K universal context clamp, 24-step ceiling, and 60-second universal command limit are no longer current-head facts.
 - Failed command output, deep file paging, stable context order, task contracts, and adaptive tool activation have current implementations and focused tests.
-- At exact kernel build digest `e934aeab42e74ca0bcf631f9968a85b3272fb57e`, live task `ab0f2981-40e3-4ca3-9049-1642a319e589` and turn `c7e4a3d3-dcf1-4f16-9e17-01fafa49eea1` traversed provider, tool, kernel, verification, completion, persistence, and restart boundaries successfully.
+- At exact kernel build digest `8a045eb4edb9996993586f398b7713dbbb41ef72`, live task `39a1cc03-09ab-467c-af43-db2974feb0e8` and turn `595e9604-0558-4c86-b772-eb2a84e00208` traversed provider, tool, kernel, verification, completion, persistence, and restart boundaries successfully. The task and turn are `COMPLETED`; the task phase is `COMPLETE`.
 
 Open:
 
 - No signed or packaged macOS run at this revision proves the same live loop through the rendered desktop. Cancellation, ambiguous provider submission, paid-model billing, and host-restart behavior also remain open.
-- The live task is bound to `e934aeab`; the current `ac1af9fb` integration head still needs an exact live replay after its activation-schema invariant and generated-inventory refresh.
 - The control service remains a very large composition root. Correct modules exist, but many product claims still depend on one file and one process.
 
 ### Context, compaction, memory, and cache
@@ -247,6 +246,7 @@ Observed:
 - Progressive capability discovery can defer the long-tail tool surface. An opt-in, in-memory observation contract now records tokenizer-supplied compact-catalog cost, initial active/deferred full-schema cost, discovery attempts, activation selection error, caller-supplied activation latency, active-set identity, and final active-schema cost without changing model-visible outcomes or the default path.
 - Adaptive compaction is an experiment, not the default. The default remains the exact fixed-byte control assignment: a 384,000-byte loader/trigger, 96,000-byte retained tail, and 400,000-character summary chunks. `TERMINUS_EXPERIMENTAL_ADAPTIVE_COMPACTION=1` enables the versioned adaptive assignment; invalid values fail, and unavailable budgets or degraded tokenizer calibration fall back to the exact control behavior. Requested and effective assignments are recorded, while obligation anchors, source lineage, atomic tool-call/result retention, and retry suppression remain enforced.
 - ADR-0055 remains proposed. Its implementation and measurements are candidate evidence, not an adopted default-policy decision.
+- Independent review found that the fixed-byte episode loader could fetch and decode one older artifact after newer unique content had already exhausted the window. `1ce003dc` now stops before that out-of-window read, with a regression test that observes artifact access.
 
 Open:
 
@@ -264,6 +264,8 @@ Observed:
 - Tool-call corrections are returned to the model as durable error results rather than ending the turn.
 - Recall discovery SQL is confined to the approved task-runtime repository boundary rather than the agent layer.
 - Before workspace activation, the model now sees a capability schema whose only valid action is `activate_workspace`; catalog search/list actions become valid only after activation. A prior exact live attempt used the broader initial schema, searched an empty catalog, and refused the task because it inferred that workspace tools did not exist. The staged schema and guard make that invalid transition unrepresentable while preserving the model's direct-answer choice.
+- Independent review found that one provider response could activate the workspace and then have another call checked against schemas widened after the response was generated. `973ba1a` snapshots the exact schemas sent for each attempt and validates every returned call against that same-attempt declaration; expanded schemas become valid only on the next attempt.
+- Final independent review found that successful capability settlement and its activation snapshot were split commits: a crash could preserve the successful tool result and episodes without the transition replay needs. `8a045eb4` uses `emitAtomicBatch` so the tool result, episodes, and capability transition event commit or roll back together. Rollback and replay tests cover failed settlement and exact post-action recovery.
 - Settled canonical tool-result envelopes are unwrapped consistently for patches, command output, and command state. The successful live verification command consequently reached the next provider request as `last_command.exitCode: 0` rather than `null`.
 
 Open:
@@ -280,7 +282,7 @@ Observed:
 - Provider usage, cached input, cache writes, reasoning, tool schema tokens, and computed cost reach durable records.
 - A strict Artificial Analysis Coding Agent Index v1.4 contract now rejects incomplete matrices, wrong model identities, missing receipts, unresolved image digests, duplicate attempts, missing independent verification, and absent reward-hacking review.
 - Current compaction summarization uses an empty breakpoint set. Anthropic therefore emits no explicit cache-control marker for that one-shot request, matching the intended policy.
-- The exact live task used five provider attempts with 25,900 input tokens, 14,528 cached input tokens, 597 output tokens, and zero computed cost under the provider's free-model contract. It activated the workspace once, then settled two reads, one write, and one verification exec successfully.
+- Persisted metrics for the exact live task report five steps, 25,584 input tokens, 16,000 cached input tokens, 375 output tokens, and zero computed cost under the provider's free-model contract.
 
 Open:
 
@@ -310,8 +312,9 @@ Observed:
 - Verification is a typed invalidating DAG. Completion proposals do not become completion until evidence admission succeeds.
 - Timeouts and environment identity were repaired after the 2026-08-29 audit; the kernel instance identifier no longer poisons stable environment identity.
 - The AA campaign requires independent verification and terminal-bench reward-hacking review.
-- The exact live edit produced verification plan `7b9b2792-f06b-406f-b86f-e3a0acfca312`, a successful verification result, a dirty revision bound to workspace bytes, and committed completion record `completion:ab0f2981-40e3-4ca3-9049-1642a319e589`. The file contained the requested value and the workspace's `bun verify.ts` exited zero.
+- The exact live edit produced verification plan `2df47d0b-6dde-4125-8a30-7f21c1d85b9d`, a passing verification result, a dirty revision bound to workspace bytes, and committed completion record `completion:39a1cc03-09ab-467c-af43-db2974feb0e8`. The file bytes were exactly `status=FIXED\n`, and the workspace's `bun verify.ts` exited zero.
 - Evidence bundles exposed on task reads are now explicitly labeled `scope: "turn"`, include `turn_id`, and use `turn_outcome` and `bundle_state` aliases. Legacy wire fields remain for v1 compatibility but no longer imply that a completed turn bundle by itself admitted task completion.
+- Independent review found that a turn bundle could include stale verification-result IDs from other plans on the same task. `973ba1a` binds evidence lookup to the turn's selected verification plan and records no verification IDs when that turn has no plan.
 
 Open:
 
@@ -340,7 +343,8 @@ Observed:
 
 - SQLite events, content-addressed artifacts, checkpoints, provider attempts, tool calls, evidence bundles, lease fencing, and SSE cursors create a substantial recovery substrate.
 - Cache, provider, tool, verification, and task telemetry types exist.
-- After the exact live task completed, the source stack was restarted against the same database. Recovery completed, the writer lease fencing token advanced, and the task, turn, completion record, tool settlements, and turn-scoped evidence remained readable and terminal.
+- Independent review found that a restarted turn reconstructed neither lazy workspace activation nor optional capability activation. `973ba1a` recovers both only from committed turn-scoped activation/deactivation events, ignores malformed payloads, and drops capability IDs the current binary no longer admits.
+- After the exact live task completed, immediate restart attempts failed closed while the prior writer lease remained valid. After lease expiry, restart recovery acquired a new fenced writer lease, replayed six tasks, and read back the exact terminal task, turn, matching committed turn-scoped evidence, dirty revision binding, and kernel digest `8a045eb4edb9996993586f398b7713dbbb41ef72`.
 
 Open:
 
@@ -353,16 +357,16 @@ Observed:
 
 - The TUI is the primary full-screen runtime surface. The Electron desktop is a projection of the control plane rather than a separate agent loop.
 - Integrated desktop source includes the focused active-workflow changes for task presentation, interventions, progress, follow-ups, provider accounts, and active-thread UX.
-- A committed source stack in this integration ancestry launched a release-mode kernel, migrated a fresh isolated database through migration 30, reached control-plane health, opened Electron, and rendered the empty task surface. The production renderer build also passed after transforming 2,365 modules.
-- The rendered empty state is visually quiet and coherent: task rail, project/activity choice, central task composer, project picker, model/effort identity, settings, and connection state fit in one window without dashboard chrome.
+- The exact `030df02b` desktop source launched with isolated user data against the exercised control plane. Onboarding rendered, **Skip setup** worked, and the main composer rendered.
+- The completed live task rendered in the desktop with **Done**, **Work completed**, **1/1 checks passed**, grouped activity, and the verification response. This is rendered read-back of the same durable task, not a separately inferred UI success.
 - The renderer storage-denial mocks now install a deterministic browser-shaped `Storage` implementation instead of depending on Node's process-global `localStorage`. The complete desktop suite passes 890 tests with 11 intentionally skipped, and the Electron production build passes.
 
 Open:
 
-- That visual pass covers only the ready empty state; a current-integration rendered pass plus populated, loading, error, approval, repair, interruption, and recovery states remain uninspected.
+- Loading, error, approval, repair, interruption, recovery, steer, and cancellation states remain uninspected in the exact desktop.
 - Computer use, context, effects, evidence, agents, terminal custody, and cache/cost identity are not yet one quiet mission-control experience.
-- The captured macOS accessibility tree exposed the window and application menus but not the React controls visible in the renderer. Keyboard and assistive-technology reachability therefore remain unproven.
-- The source launch logged that CSP `frame-ancestors` is ignored when delivered through a meta tag. The live API path exercised the discovered provider, but the provider was not yet exercised through the rendered desktop.
+- System Events accessibility inspection exposed only window chrome, not the visible React controls. Keyboard and assistive-technology reachability therefore remain unproven.
+- The completed provider task was read back through the desktop, but task initiation and tool interaction from the renderer were not exercised. The source launch also logged that CSP `frame-ancestors` is ignored when delivered through a meta tag.
 
 ### CI and evals
 
@@ -371,14 +375,14 @@ Observed:
 - CI covers type/lint/unit, E2E, security, fault/fuzz/soak, release, platform, and sandbox-evidence paths.
 - Runtime-backed fixture evaluation now exercises the provider/control/kernel tool loop.
 - The strict AA campaign code and its focused tests pass locally.
-- On the combined source tree, `just check`, `just standalone-check`, `just e2e`, `just security`, `just codegen-check`, and all three `just eval-smoke` fixture cohorts pass. The complete desktop suite and Electron production build also pass. Focused tests cover deterministic activation, canonical exec-observation decoding, explicit turn-scoped evidence projection, policy gating, compaction assignment, recall, and provider/cache accounting.
+- At exact exercised code head `8a045eb4`, `just check`, `just standalone-check`, `just e2e`, `just security`, `just codegen-check`, and all three `just eval-smoke` fixture cohorts passed. The focused review-fix suite passed 122/122, covering fixed-window reads, per-attempt schema declarations, plan-scoped evidence IDs, activation recovery, atomic capability settlement, rollback, and replay. The complete desktop suite and Electron production build passed at ancestor `030df02b`; the exact live task exercises the later integrated workspace, verification, completion, and restart path.
 
 Open:
 
 - Fixture-only green is not live-provider or release evidence.
 - Live cohorts are dispatch-gated and require credentials, runner images, provider receipts, and a clean exact revision.
 - `maturity.yaml` correctly declares that no subsystem is production.
-- `just codegen-check` first identified honest generated inventory drift after the integrated tests changed. `just codegen` refreshed the inventory in `ac1af9fb`, and the current `just codegen-check` passes.
+- `just codegen-check` first identified honest generated inventory drift after the earlier integrated tests changed; `just codegen` refreshed that inventory in `ac1af9fb`, and the final exact-head deterministic check at `8a045eb4` passes without drift.
 
 ## Design decisions to challenge
 
@@ -431,16 +435,17 @@ Acceptance still open:
 
 ### Gate 1: exact everyday coding loop — partial local proof, highest priority
 
-Observed at `e934aeab`:
+Observed in the exact `8a045eb4` runtime and `030df02b` desktop inspection:
 
 1. The three research branches and current main runtime/desktop work are integrated in reviewable history.
-2. A real minimal-profile provider task used deterministic activation, reads, an exact write, exec verification, admitted completion, turn-scoped evidence, and process restart recovery.
+2. A real minimal-profile provider task used deterministic activation, reads, an exact write, exec verification, admitted completion, turn-scoped evidence, and fail-closed process restart recovery.
 3. Source, runtime build digest, provider/model/profile, context manifests, attempts, tool calls, workspace revision, environment digest, verification plan, and completion record were retained.
+4. Exact `030df02b` source desktop onboarding, setup skip, composer, and the completed task/evidence surface rendered against the same control plane.
 
 Still open:
 
 1. Exercise a deliberate failing command, repair, deep paged read, cancellation, ambiguous submission, SSE rewind, and host interruption in one candidate-bound task.
-2. Build and launch the exact signed/packaged macOS artifact and repeat the task from the rendered app.
+2. Build and launch the exact signed/packaged macOS artifact, then initiate, steer, cancel, and repeat the task from the rendered app.
 3. Run the adaptive profile only as an experimental cohort against the fixed control; do not infer adaptive quality from the minimal-profile live run.
 
 Acceptance:
@@ -566,13 +571,15 @@ The integration retains the three named research histories and combines four rev
 - **Harness efficiency:** exact prompt-cache plan forwarding, cold-write accounting, dirty-workspace revision binding, complete path batching, optional unavailable probes, typed terminal policy denials, and runtime-backed eval settlement.
 - **Security harness:** signed capability binding for broad policy, exact whole-workspace scope, constrained sandbox environment forwarding, deterministic Linux wrapper proof, and a fail-closed `workspace-development-isolated` promotion boundary. Native standalone execution remains on the curated default.
 - **Long-horizon context:** model-budget-aware obligation anchoring, atomic summary/tail fitting, source lineage, retry suppression, requested/effective assignment telemetry, and an explicit experimental gate that preserves the fixed-byte default and degraded fallback.
-- **Combined-loop hardening:** deterministic pre-workspace activation (`b77c170d`), canonical exec-observation decoding (`0aec7442`), honest turn-scoped evidence projection (`e934aeab`), deterministic renderer storage mocks (`982ed348`), an explicit activation-schema invariant (`94fa2c8d`), and refreshed generated test inventory (`ac1af9fb`).
+- **Combined-loop hardening:** deterministic pre-workspace activation (`b77c170d`), canonical exec-observation decoding (`0aec7442`), honest turn-scoped evidence projection (`e934aeab`), deterministic renderer storage mocks (`982ed348`), an explicit activation-schema invariant (`94fa2c8d`), refreshed generated test inventory (`ac1af9fb`), fixed-window artifact access (`1ce003dc`), turn-bound evidence/schema/activation recovery (`973ba1a`), and atomic capability result/episode/transition settlement (`8a045eb4`).
 
 The earlier Gate 2 recall tranche also remains present: task/thread-scoped FTS5 recall, authoritative artifact hydration, bounded fallback, exact compaction-source browse/read, telemetry, migration/recovery coverage, exhaustive read-only permission labels, and opt-in non-model-visible capability-disclosure observations.
 
 No tranche promotes adaptive compaction, semantic memory, routing, delegation, broad native execution, or computer use. The first live attempt after exec-observation repair exposed a real initial-capability failure: the model could search/list before activation, found no workspace tools, and refused. The staged activation contract fixed that mechanism; the subsequent exact task succeeded. This is stronger evidence than a fixture, but it is still a single-task repair observation and not a general promotion result.
 
-The highest-priority next action is to repeat the exact provider-to-evidence loop through the signed/packaged macOS product, including cancellation, interruption, repair, populated/error UI, and accessibility. In parallel, the next Gate 2 action is a paired minimal-versus-adaptive cohort with identical model, task, environment, authority, and budget. Neither adaptive context policy nor cache/routing policy should be promoted from the current evidence.
+After the final atomic-settlement repair, independent review found no remaining priority-zero, priority-one, or priority-two issue in the reviewed integration slice. That is a bounded code-review result, not proof that no defect exists elsewhere in the harness.
+
+The highest-priority next action is to repeat the provider-to-evidence loop from the signed/packaged macOS product, including UI initiation, cancellation, interruption, repair, approval/error states, and accessibility. In parallel, the next Gate 2 action is a paired minimal-versus-adaptive cohort with identical model, task, environment, authority, and budget. Neither adaptive context policy nor cache/routing policy should be promoted from the current evidence.
 
 ## Claim and evidence gaps
 
@@ -602,13 +609,14 @@ The highest-priority next action is to repeat the exact provider-to-evidence loo
 - Focused AA campaign and strict scoring tests: 14 passed.
 - Focused recall, compaction, migration, recall-tool, and profile tests: 126 passed.
 - Focused capability-disclosure tests: 10 passed, 0 failed, 42 assertions; independent re-review found no remaining priority-one or priority-two issue.
-- Combined-tree validation: `just check`, `just standalone-check`, `just e2e`, `just security`, and the post-refresh `just codegen-check` passed. Focused provider core/OpenAI/Anthropic tests passed 73/73; focused control/context/provider-account/recovery tests passed 145/145; Rust provider-account tests passed 7/7.
+- At exact exercised code head `8a045eb4`, combined-tree validation passed `just check`, `just standalone-check`, `just e2e`, `just security`, and `just codegen-check`. Focused provider core/OpenAI/Anthropic tests passed 73/73; focused control/context/provider-account/recovery tests passed 145/145; Rust provider-account tests passed 7/7.
 - The three `just eval-smoke` fixture cohorts passed: minimal used 5 attempts/4 settlements, adaptive used 4/3, and adaptive-plus-inspect used 5/4. These results are fixture-only, not live-provider evidence.
-- Focused post-integration regressions passed, including 12 world-state tests plus deterministic activation and evidence-wire tests. Targeted lint for those changes passed.
-- `just codegen-check` identified integrated test-inventory drift; `just codegen` refreshed it in `ac1af9fb`, and the current `just codegen-check` passes.
-- Exact desktop tests passed 890 with 11 skipped and zero failures; the Electron production build passed. The isolated source stack reached kernel/control health and rendered the empty Electron task surface. No signed/package artifact or provider turn through the rendered desktop was exercised.
-- Exact live task `ab0f2981-40e3-4ca3-9049-1642a319e589`, turn `c7e4a3d3-dcf1-4f16-9e17-01fafa49eea1`, ran on kernel build digest `e934aeab42e74ca0bcf631f9968a85b3272fb57e`. One activation and four workspace tools settled across five provider attempts; usage was 25,900 input, 14,528 cached input, and 597 output tokens. The requested edit was present, `bun verify.ts` exited zero, world state reported exit code zero, plan `7b9b2792-f06b-406f-b86f-e3a0acfca312` admitted, completion was committed, and restart read-back preserved the terminal records with a new writer fencing lease.
+- Focused post-integration regressions passed, including 12 world-state tests plus deterministic activation and evidence-wire tests. The final review-fix suite passed 122/122 and covers every independently found issue described above, including atomic rollback and replay.
+- `just codegen-check` identified earlier integrated test-inventory drift; `just codegen` refreshed it in `ac1af9fb`, and the final exact-head deterministic check passes.
+- Exact desktop tests passed 890 with 11 skipped and zero failures; the Electron production build passed. Exact `030df02b` source launched with isolated user data, rendered onboarding, accepted **Skip setup**, rendered the main composer, and displayed the completed task with **Done**, **Work completed**, **1/1 checks passed**, grouped activity, and the verification response. This was not a signed/package artifact.
+- Exact live task `39a1cc03-09ab-467c-af43-db2974feb0e8`, turn `595e9604-0558-4c86-b772-eb2a84e00208`, ran on kernel build digest `8a045eb4edb9996993586f398b7713dbbb41ef72`. Task and turn reached `COMPLETED`, task phase reached `COMPLETE`, file bytes were exactly `status=FIXED\n`, and `bun verify.ts` exited zero. Metrics recorded five steps, 25,584 input tokens, 16,000 cached input tokens, 375 output tokens, and zero computed cost. Plan `2df47d0b-6dde-4125-8a30-7f21c1d85b9d` passed, completion `completion:39a1cc03-09ab-467c-af43-db2974feb0e8` committed, and the evidence bundle was `scope: "turn"`, matched the turn, carried the dirty revision binding, and was `COMMITTED`.
+- Immediate restart attempts failed closed until the previous writer lease expired. Recovery then acquired a new fenced lease, replayed six tasks, and read back the same terminal task, turn, evidence, dirty revision, and exact kernel digest.
 - Evidence returned by the task surface is explicitly turn-scoped. Task completion is separately established by the committed completion record and verification plan; a completed turn bundle alone is not task-completion evidence.
 - All three named research branch tips were verified as ancestors of the integration head.
 - Competitive claims above were checked against current first-party sources as of the research cutoff.
-- Exact `ac1af9fb` live replay, comparative live cohorts, paid-provider receipts, signed/packaged macOS, full AA campaign, current-head release, isolated broad execution, real Linux `bwrap` runtime evidence, governed computer use, populated/error/recovery desktop states, and complete accessibility evidence remain open.
+- Comparative live cohorts, paid-provider receipts, signed/packaged macOS, UI-initiated provider execution, full AA campaign, current-head release, isolated broad execution, real Linux `bwrap` runtime evidence, governed computer use, desktop loading/error/approval/repair/interruption/recovery states, and complete accessibility evidence remain open. The report-only commit following `8a045eb4` is not a new exercised-code revision.
