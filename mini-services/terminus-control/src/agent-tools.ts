@@ -3368,12 +3368,12 @@ function collectProcess(
     let subscription: { readonly unsubscribe: () => void } | null = null;
     let processId: string | null = null;
     let cancelRequested = false;
-    let onAbort: () => void = () => {};
+    let onAbort: (() => void) | null = null;
     const finish = (callback: () => void): void => {
       if (settled) return;
       settled = true;
       subscription?.unsubscribe();
-      signal?.removeEventListener("abort", onAbort);
+      if (onAbort !== null) signal?.removeEventListener("abort", onAbort);
       callback();
     };
     onAbort = (): void => {

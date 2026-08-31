@@ -34,7 +34,6 @@ exclude_patterns = [
   "Terminus — Research/**",
   "evals/**",
   "**/generated/**",
-  "mini-services/terminus-kernel/src/generated/**",
   "packages/terminus-kernel-client/src/generated/**"
 ]
 
@@ -44,7 +43,7 @@ enabled = true
 
   [analyzers.meta]
   dialect = "typescript"
-  module_system = "esmodules"
+  module_system = "es-modules"
   environment = ["nodejs", "browser"]
   style_guide = "standard"
 

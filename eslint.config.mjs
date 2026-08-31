@@ -89,7 +89,6 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "vendor/**",
     ".terminus-data/**",
     "packages/terminus-kernel-client/src/generated/**",
-    "mini-services/terminus-kernel/src/generated/**",
     "schemas/generated/**",
     "docs/generated/**",
   ]

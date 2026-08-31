@@ -83,15 +83,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let grpc_socket = std::env::var("TERMINUS_KERNEL_GRPC_SOCKET")
         .ok()
         .filter(|value| !value.is_empty());
-    let require_uds = std::env::var("TERMINUS_KERNEL_REQUIRE_UDS")
-        .is_ok_and(|value| value == "1");
-    let require_mtls = std::env::var("TERMINUS_KERNEL_MTLS")
-        .is_ok_and(|value| value == "1");
+    let require_uds = std::env::var("TERMINUS_KERNEL_REQUIRE_UDS").is_ok_and(|value| value == "1");
+    let require_mtls = std::env::var("TERMINUS_KERNEL_MTLS").is_ok_and(|value| value == "1");
 
     let allow_http_bootstrap = std::env::var("TERMINUS_KERNEL_HTTP_BOOTSTRAP")
         .is_ok_and(|value| value == "1")
-        && std::env::var("TERMINUS_DEV")
-            .is_ok_and(|value| value == "1");
+        && std::env::var("TERMINUS_DEV").is_ok_and(|value| value == "1");
     if !require_uds && !require_mtls && !allow_http_bootstrap {
         return Err(
             "secure kernel startup requires TERMINUS_KERNEL_REQUIRE_UDS=1 or TERMINUS_KERNEL_MTLS=1; HTTP bootstrap is development-only"
