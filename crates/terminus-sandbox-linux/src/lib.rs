@@ -278,6 +278,16 @@ impl LinuxSandboxBackend {
             op.push_argv(&mut argv);
         }
 
+        // Toolchains installed outside the fixed runtime trees (for example,
+        // Mise under a runner home) are otherwise absent from the minimal
+        // guest. Expose only the requested executable, never its parent.
+        let command_program = Path::new(&command.program);
+        if command_program.is_absolute() && command_program.is_file() {
+            argv.push("--ro-bind".to_string());
+            argv.push(command.program.clone());
+            argv.push(command.program.clone());
+        }
+
         // Pseudo-filesystems so basic tools work.
         argv.push("--proc".to_string());
         argv.push("/proc".to_string());
@@ -1023,6 +1033,31 @@ mod tests {
             root_remount < command,
             "root must be read-only before payload: {argv:?}"
         );
+    }
+
+    #[test]
+    fn build_bwrap_argv_binds_only_an_absolute_command_before_root_freeze() {
+        let executable = std::env::current_exe().expect("current test executable");
+        let executable = executable.to_string_lossy().to_string();
+        let command = simple_command(&executable);
+        let argv = LinuxSandboxBackend::build_bwrap_argv(&command, &restrictive_profile());
+        let executable_bind = argv
+            .windows(3)
+            .position(|args| {
+                args[0] == "--ro-bind" && args[1] == executable && args[2] == executable
+            })
+            .expect("absolute command bind");
+        let root_freeze = argv
+            .windows(2)
+            .position(|args| args[0] == "--remount-ro" && args[1] == "/")
+            .expect("root freeze");
+        assert!(executable_bind < root_freeze);
+
+        let relative =
+            LinuxSandboxBackend::build_bwrap_argv(&simple_command("git"), &restrictive_profile());
+        assert!(!relative
+            .windows(3)
+            .any(|args| args[0] == "--ro-bind" && args[1] == "git"));
     }
 
     #[test]
