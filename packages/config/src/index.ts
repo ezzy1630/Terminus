@@ -547,18 +547,20 @@ function defineConfigProperty(target: Record<string, unknown>, key: string, valu
  */
 const WEAKEN_TRANSITIONS = new Set(["deny->allow", "deny->optional", "required->optional"]);
 
+function isWeakenedNumber(prev: unknown, next: unknown): boolean {
+  return typeof prev === "number" && typeof next === "number" && next < prev;
+}
+
+function isWeakenedArray(prev: unknown, next: unknown): boolean {
+  return Array.isArray(prev) && Array.isArray(next) && next.length < prev.length;
+}
+
 // skipcq: JS-0067
 function isWeakened(prev: unknown, next: unknown): boolean {
   if (typeof prev === "string" && typeof next === "string") {
     return WEAKEN_TRANSITIONS.has(`${prev}->${next}`);
   }
-  if (typeof prev === "number" && typeof next === "number") {
-    return next < prev;
-  }
-  if (Array.isArray(prev) && Array.isArray(next)) {
-    return next.length < prev.length;
-  }
-  return false;
+  return isWeakenedNumber(prev, next) || isWeakenedArray(prev, next);
 }
 
 function structuredCloneSafe<T>(v: T): T {

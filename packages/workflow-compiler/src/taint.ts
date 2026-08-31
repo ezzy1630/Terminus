@@ -37,6 +37,24 @@ function findInitialTaintSources(nodes: readonly NodeDraft[]): Set<string> {
   return sources;
 }
 
+function isNodeSanitized(node: NodeDraft | undefined): boolean {
+  return node?.kind === "verifier" || Boolean(node?.taintPolicy?.sanitizeWith);
+}
+
+function expandTaintedNeighbors(
+  currentId: string,
+  tainted: Set<string>,
+  adj: Map<string, string[]>,
+  queue: string[],
+): void {
+  for (const neighborId of adj.get(currentId) ?? []) {
+    if (!tainted.has(neighborId)) {
+      tainted.add(neighborId);
+      queue.push(neighborId);
+    }
+  }
+}
+
 // skipcq: JS-0067
 function propagateTaint(
   tainted: Set<string>,
@@ -46,16 +64,8 @@ function propagateTaint(
   const queue = Array.from(tainted);
   while (queue.length > 0) {
     const currentId = queue.shift()!;
-    const currentNode = nodeMap.get(currentId);
-    if (currentNode?.kind === "verifier" || currentNode?.taintPolicy?.sanitizeWith) {
-      continue;
-    }
-    for (const neighborId of adj.get(currentId) ?? []) {
-      if (!tainted.has(neighborId)) {
-        tainted.add(neighborId);
-        queue.push(neighborId);
-      }
-    }
+    if (isNodeSanitized(nodeMap.get(currentId))) continue;
+    expandTaintedNeighbors(currentId, tainted, adj, queue);
   }
 }
 
@@ -66,13 +76,16 @@ function isNodeSensitiveSink(node: NodeDraft): boolean {
   return node.requiredCapabilities?.includes("secrets") === true;
 }
 
+function isUnsanitizedSink(node: NodeDraft): boolean {
+  return isNodeSensitiveSink(node) && !node.taintPolicy?.allowTaintedInputs && !node.taintPolicy?.sanitizeWith;
+}
+
 // skipcq: JS-0067
 function findTaintViolations(taintedNodes: Set<string>, nodeMap: Map<string, NodeDraft>): string[] {
   const violations: string[] = [];
   for (const taintedId of taintedNodes) {
     const node = nodeMap.get(taintedId);
-    if (!node) continue;
-    if (isNodeSensitiveSink(node) && !node.taintPolicy?.allowTaintedInputs && !node.taintPolicy?.sanitizeWith) {
+    if (node && isUnsanitizedSink(node)) {
       violations.push(
         `Node "${node.id}" (${node.kind}) is a sensitive sink receiving unsanitized tainted data from an untrusted source.`,
       );

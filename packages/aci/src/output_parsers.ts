@@ -99,37 +99,45 @@ function parseStackLine(line: string, frameIndex: number): StackFrame | null {
   };
 }
 
+function parseFailureLine(
+  line: string,
+  frames: StackFrame[],
+  current: { primaryPath: string; testName: string; errorMessage: string },
+): void {
+  const pytest = parsePytestLine(line);
+  if (pytest) {
+    current.primaryPath = pytest.primaryPath;
+    current.testName = pytest.testName;
+    current.errorMessage = pytest.errorMessage;
+    return;
+  }
+  const jestMatch = line.match(/^FAIL\s+([^\s]+)/);
+  if (jestMatch) {
+    current.primaryPath = jestMatch[1]!;
+    return;
+  }
+  const frame = parseStackLine(line, frames.length);
+  if (frame) {
+    if (current.primaryPath === "unknown_file") current.primaryPath = frame.path;
+    frames.push(frame);
+  }
+}
+
 // skipcq: JS-0067
 export function parseTestFailures(rawOutput: string): FailureAnalysis {
   const lines = rawOutput.split("\n");
-  let testName = "unknown_test";
-  let errorMessage = "Test execution failed";
-  let primaryPath = "unknown_file";
+  const current = { testName: "unknown_test", errorMessage: "Test execution failed", primaryPath: "unknown_file" };
   const frames: StackFrame[] = [];
 
   for (const line of lines) {
-    const pytest = parsePytestLine(line);
-    if (pytest) {
-      primaryPath = pytest.primaryPath;
-      testName = pytest.testName;
-      errorMessage = pytest.errorMessage;
-    }
-    const jestMatch = line.match(/^FAIL\s+([^\s]+)/);
-    if (jestMatch) {
-      primaryPath = jestMatch[1]!;
-    }
-    const frame = parseStackLine(line, frames.length);
-    if (frame) {
-      if (primaryPath === "unknown_file") primaryPath = frame.path;
-      frames.push(frame);
-    }
+    parseFailureLine(line, frames, current);
   }
 
   return {
-    testName,
-    path: primaryPath,
-    errorMessage,
+    testName: current.testName,
+    path: current.primaryPath,
+    errorMessage: current.errorMessage,
     stackTrace: frames,
-    rootCauseHint: getRootCauseHint(errorMessage),
+    rootCauseHint: getRootCauseHint(current.errorMessage),
   };
 }

@@ -44,6 +44,10 @@ function key(name: string, text = "", options: Partial<Omit<KeyInput, "kind" | "
 }
 
 const MOUSE_BUTTONS: readonly ("left" | "middle" | "right" | "none")[] = ["left", "middle", "right", "none"];
+const SCROLL_ACTIONS: Record<number, MouseInput["action"]> = {
+  64: "scroll_up",
+  65: "scroll_down",
+};
 
 // skipcq: JS-0067
 export function decodeMouse(sequence: string): MouseInput | null {
@@ -52,10 +56,10 @@ export function decodeMouse(sequence: string): MouseInput | null {
   const code = Number(match[1]);
   const x = Number(match[2]);
   const y = Number(match[3]);
-  if (code === 64) return { kind: "mouse", action: "scroll_up", button: "none", x, y };
-  if (code === 65) return { kind: "mouse", action: "scroll_down", button: "none", x, y };
+  const scroll = SCROLL_ACTIONS[code];
+  if (scroll) return { kind: "mouse", action: scroll, button: "none", x, y };
   const button = MOUSE_BUTTONS[code & 3] ?? "none";
-  const action = (code & 32) !== 0 ? "move" : match[4] === "M" ? "down" : "up";
+  const action = (code & 32) !== 0 ? "move" : (match[4] === "M" ? "down" : "up");
   return { kind: "mouse", action, button, x, y };
 }
 

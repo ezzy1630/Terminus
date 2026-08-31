@@ -34,7 +34,8 @@ exclude_patterns = [
   "Terminus — Research/**",
   "evals/**",
   "**/generated/**",
-  "packages/terminus-kernel-client/src/generated/**"
+  "packages/terminus-kernel-client/src/generated/**",
+  "scripts/**"
 ]
 
 [[analyzers]]
