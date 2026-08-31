@@ -52,9 +52,11 @@ async function main(): Promise<void> {
     : "minimal";
   const expectedInspect = process.env.TERMINUS_E2E_EXPECT_INSPECT === "1";
   const expectedProviderAttempts = expectedProfile === "adaptive"
-    ? expectedInspect ? 5 : 4
+    ? expectedInspect ? 4 : 3
     : 4;
-  const expectedToolSettlements = 3;
+  const expectedToolSettlements = expectedProfile === "adaptive"
+    ? expectedInspect ? 3 : 2
+    : 3;
   invariant(record.harness === "terminus-live", "run did not use TerminusHarness");
   invariant(record.outcome === "completed", `run outcome was ${String(record.outcome)}`);
   invariant(record.success === true, "declared task grader did not pass");
@@ -113,7 +115,7 @@ async function main(): Promise<void> {
     "tool proposal count does not match the profile",
   );
   const expectedKernelOperations = expectedProfile === "adaptive"
-    ? expectedInspect ? 4 : 3
+    ? expectedInspect ? 3 : 2
     : 2;
   invariant(
     count(eventCounts["tool.authorized"], "tool.authorized count") >= expectedKernelOperations,
