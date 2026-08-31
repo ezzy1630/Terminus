@@ -4942,12 +4942,10 @@ mod tests {
         let mut narrow_development =
             task_capability_request(bootstrap.broker_capability_token.clone(), "control-broker");
         narrow_development.policy_profile_ids = vec!["workspace-development".to_string()];
-        let denied = PolicyServiceRpc::mint_task_capability(
-            &service,
-            Request::new(narrow_development),
-        )
-        .await
-        .expect_err("workspace development must require explicit whole-workspace scope");
+        let denied =
+            PolicyServiceRpc::mint_task_capability(&service, Request::new(narrow_development))
+                .await
+                .expect_err("workspace development must require explicit whole-workspace scope");
         assert_eq!(denied.code(), tonic::Code::InvalidArgument);
 
         let mut excessive_ttl =
