@@ -24,6 +24,7 @@ pub fn payload_wrapper(
     bwrap_args: &[String],
     limits: ResourceLimits,
     network: NetworkAccess,
+    cgroup_root: &Path,
 ) -> Option<(PathBuf, Vec<String>)> {
     let executable = std::env::current_exe().ok()?;
     let separator = bwrap_args.iter().position(|arg| arg == "--")?;
@@ -71,6 +72,7 @@ pub fn payload_wrapper(
     let mut launcher_args = vec![
         LAUNCHER_ARG.to_string(),
         bwrap_path.to_string_lossy().to_string(),
+        cgroup_root.to_string_lossy().to_string(),
     ];
     launcher_args.extend(payload_args);
     Some((executable, launcher_args))
@@ -81,13 +83,21 @@ pub fn run_launcher(args: &[String]) -> Result<i32, SandboxError> {
     let bwrap = args.get(1).ok_or_else(|| {
         SandboxError::Misconfigured("sandbox launcher missing bwrap path".to_string())
     })?;
-    let bwrap_args = args.get(2..).ok_or_else(|| {
+    let cgroup_root = args.get(2).map(Path::new).ok_or_else(|| {
+        SandboxError::Misconfigured("sandbox launcher missing delegated cgroup root".to_string())
+    })?;
+    if !cgroup_root.is_absolute() || cgroup_root == Path::new("/sys/fs/cgroup") {
+        return Err(SandboxError::Misconfigured(
+            "sandbox launcher received an invalid delegated cgroup root".to_string(),
+        ));
+    }
+    let bwrap_args = args.get(3..).ok_or_else(|| {
         SandboxError::Misconfigured("sandbox launcher missing bwrap arguments".to_string())
     })?;
     // Create and join the cgroup before Bubblewrap constructs its read-only
     // mount namespace. The bwrap child and final payload inherit this lease,
     // while the payload itself never gains cgroup write authority.
-    let _cgroup = CgroupGuard::create(payload_limits(bwrap_args)?)?;
+    let _cgroup = CgroupGuard::create(cgroup_root, payload_limits(bwrap_args)?)?;
     let status = std::process::Command::new(bwrap)
         .args(bwrap_args)
         .status()
@@ -485,8 +495,7 @@ struct CgroupGuard {
 
 #[cfg(target_os = "linux")]
 impl CgroupGuard {
-    fn create(limits: ResourceLimits) -> Result<Self, SandboxError> {
-        let root = cgroup_root();
+    fn create(root: &Path, limits: ResourceLimits) -> Result<Self, SandboxError> {
         if !root.join("cgroup.controllers").is_file() {
             return Err(SandboxError::Unsupported(
                 "cgroup v2 controller inventory is unavailable".to_string(),
@@ -537,11 +546,6 @@ impl Drop for CgroupGuard {
         );
         let _ = std::fs::remove_dir(&self.path);
     }
-}
-
-#[cfg(target_os = "linux")]
-fn cgroup_root() -> PathBuf {
-    delegated_cgroup_root().unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup"))
 }
 
 #[cfg(target_os = "linux")]
@@ -690,6 +694,7 @@ mod tests {
             &["--unshare-all".to_string(), "--".to_string()],
             ResourceLimits::default(),
             NetworkAccess::Deny,
+            Path::new("/sys/fs/cgroup/terminus-test"),
         );
         assert!(wrapped.is_some());
         let Some((_, argv)) = wrapped else {
@@ -731,6 +736,7 @@ mod tests {
             ],
             ResourceLimits::default(),
             NetworkAccess::Deny,
+            Path::new("/sys/fs/cgroup/terminus-test"),
         )
         .expect("payload wrapper");
         let argv = wrapped.1;

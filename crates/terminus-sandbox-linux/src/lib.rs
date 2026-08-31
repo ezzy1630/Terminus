@@ -358,7 +358,14 @@ impl LinuxSandboxBackend {
         let layout = HostLayout::probe();
         let argv =
             Self::build_bwrap_argv_full(command, profile, &layout, shared_empty_root(), broker_dir);
-        enforcement::payload_wrapper(bwrap_path, &argv, profile.resources, profile.network)
+        let cgroup_root = enforcement::delegated_cgroup_root()?;
+        enforcement::payload_wrapper(
+            bwrap_path,
+            &argv,
+            profile.resources,
+            profile.network,
+            &cgroup_root,
+        )
     }
 
     /// Spawn `command` inside a bwrap sandbox configured by `profile`.
