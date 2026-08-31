@@ -108,13 +108,13 @@ async function boundedCleanup(operation: Promise<unknown>): Promise<boolean> {
   return completed;
 }
 
-async function readReplayEvents(
+const readReplayEvents = async (
   cursor: string,
   filterTaskId: string,
   expectedCount: number,
   triggerLiveEvent: (signal: AbortSignal) => Promise<unknown>,
   cursorTransport: "query" | "header" = "query",
-): Promise<readonly SseEvent[]> {
+): Promise<readonly SseEvent[]> => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
@@ -223,7 +223,7 @@ async function readReplayEvents(
     clearTimeout(timeout);
     controller.abort();
   }
-}
+};
 
 function v2Contract(input: {
   readonly version: number;

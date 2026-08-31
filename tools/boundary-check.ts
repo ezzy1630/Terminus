@@ -274,32 +274,44 @@ const SQL_ALLOWED_FILES = new Set([
   "packages/task-runtime/src/sqlite-repository.ts",
 ]);
 
-function isSqlAllowedPath(p: string): boolean {
+// Path shapes that may legitimately contain raw SQL text: Rust storage crates
+// own the SQLite layer, tests construct fixtures, and vendored/build outputs
+// are not first-party sources. Enumerated as flat tables so the predicate
+// stays a single boolean reduction.
+const SQL_RUST_SUFFIXES: readonly string[] = [".rs"];
+const SQL_TEST_SUFFIXES: readonly string[] = [
+  ".test.ts",
+  ".spec.ts",
+  ".test.tsx",
+  ".spec.tsx",
+  "_test.py",
+  ".test.py",
+];
+const SQL_IGNORED_SEGMENTS: readonly string[] = [
+  "/.venv/",
+  "/venv/",
+  "/__pycache__/",
+  "/site-packages/",
+  "/node_modules/",
+  "/dist/",
+  "/.next/",
+  "/build/",
+  "/target/",
+];
+
+const isSqlAllowedPath = (p: string): boolean => {
   const rel = relative(ROOT, p);
   // Rust crates (e.g. terminus-artifacts) implement the SQLite storage layer via
   // `rusqlite`, which requires SQL strings — there is no Prisma for Rust. R5
   // governs the TypeScript control plane (no raw SQL outside Prisma); Rust
   // storage crates are the legitimate low-level layer, so .rs files are exempt.
   return (
-    rel.endsWith(".rs") ||
     SQL_ALLOWED_FILES.has(rel) ||
-    rel.endsWith(".test.ts") ||
-    rel.endsWith(".spec.ts") ||
-    rel.endsWith(".test.tsx") ||
-    rel.endsWith(".spec.tsx") ||
-    rel.endsWith("_test.py") ||
-    rel.endsWith(".test.py") ||
-    rel.includes("/.venv/") ||
-    rel.includes("/venv/") ||
-    rel.includes("/__pycache__/") ||
-    rel.includes("/site-packages/") ||
-    rel.includes("/node_modules/") ||
-    rel.includes("/dist/") ||
-    rel.includes("/.next/") ||
-    rel.includes("/build/") ||
-    rel.includes("/target/")
+    SQL_RUST_SUFFIXES.some((suffix) => rel.endsWith(suffix)) ||
+    SQL_TEST_SUFFIXES.some((suffix) => rel.endsWith(suffix)) ||
+    SQL_IGNORED_SEGMENTS.some((segment) => rel.includes(segment))
   );
-}
+};
 
 function checkNoRawSqlOutsideRepositories(): void {
   // Walk every source file in the repo and look for SQL patterns inside

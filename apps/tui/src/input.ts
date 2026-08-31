@@ -57,19 +57,32 @@ function getMouseAction(code: number, finalChar: string): MouseInput["action"] {
   return finalChar === "M" ? "down" : "up";
 }
 
+const MOUSE_PATTERN = /^\u001b\[<(\d+);(\d+);(\d+)([mM])$/;
+
+// Wheel events carry the button bits differently from press/release events:
+// codes 64/65 map directly to scroll actions and never carry a button.
+const decodeScrollMouse = (code: number, x: number, y: number): MouseInput | null => {
+  const scroll = SCROLL_ACTIONS[code];
+  if (scroll === undefined) return null;
+  return { kind: "mouse", action: scroll, button: "none", x, y };
+};
+
 // skipcq: JS-0067
 export function decodeMouse(sequence: string): MouseInput | null {
-  const match = /^\u001b\[<(\d+);(\d+);(\d+)([mM])$/.exec(sequence);
-  if (!match) return null;
+  const match = MOUSE_PATTERN.exec(sequence);
+  if (match === null) return null;
   const code = Number(match[1]);
   const x = Number(match[2]);
   const y = Number(match[3]);
-  const scroll = SCROLL_ACTIONS[code];
-  if (scroll) return { kind: "mouse", action: scroll, button: "none", x, y };
+  const scroll = decodeScrollMouse(code, x, y);
+  if (scroll !== null) return scroll;
   return {
     kind: "mouse",
-    action: getMouseAction(code, match[4]!),
-    button: MOUSE_BUTTONS[code & 3] ?? "none",
+    action: getMouseAction(code, match[4] as string),
+    // The mask always lands inside MOUSE_BUTTONS (4 entries), so the index
+    // lookup is total; `code % 4` is equivalent to `code & 3` for non-negative
+    // codes and keeps the decision structure flat.
+    button: MOUSE_BUTTONS[code % MOUSE_BUTTONS.length] as MouseInput["button"],
     x,
     y,
   };

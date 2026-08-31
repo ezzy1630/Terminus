@@ -170,10 +170,10 @@ function childRunning(child: ChildProcess): boolean {
   return child.exitCode === null && child.signalCode === null;
 }
 
-async function waitForExit(
+const waitForExit = async (
   child: ChildProcess,
   timeoutMs: number,
-): Promise<boolean> {
+): Promise<boolean> => {
   if (!childRunning(child)) return true;
   return await new Promise<boolean>((resolveWait) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -187,7 +187,7 @@ async function waitForExit(
     }, timeoutMs);
     child.once("exit", onExit);
   });
-}
+};
 
 function signalIfRunning(pid: number, signal: NodeJS.Signals): void {
   try {

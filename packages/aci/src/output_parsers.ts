@@ -5,6 +5,11 @@
  * - Compiler / linter error diagnostics parsing (rustc, tsc, gcc, clang, eslint)
  * - Test framework output parsing (jest, vitest, pytest, cargo test)
  * - Stack trace frame extraction and root cause hint generation
+ *
+ * Parsers in this module run on uncontrolled command output. Their regexes
+ * must stay linear-time: adjacent quantified groups must never accept
+ * overlapping character sets (e.g. `\s+` followed by a class that admits
+ * whitespace), or adversarial input forces polynomial backtracking.
  */
 import type { Diagnostic } from "./index.js";
 import type { FailureAnalysis, StackFrame } from "./inspect.js";
@@ -79,24 +84,81 @@ function getRootCauseHint(errorMessage: string): string | undefined {
   return undefined;
 }
 
+// Pytest failure header: "FAILED tests/test_auth.py::test_login - AssertionError: assert False".
+// `[^:\s]+` cannot overlap the preceding `\s+`, and the message is taken as
+// the remainder of the line, so the match is linear in the input length.
+const PYTEST_FAILURE_PATTERN = /^FAILED\s+([^:\s]+)::([^\s]+)\s+-\s+/;
+
 // skipcq: JS-0067
 function parsePytestLine(line: string): { primaryPath: string; testName: string; errorMessage: string } | null {
-  const match = line.match(/^FAILED\s+([^:]+)::([^\s]+)\s+-\s+(.+)$/);
-  if (!match) return null;
-  return { primaryPath: match[1]!, testName: match[2]!, errorMessage: match[3]! };
+  const match = PYTEST_FAILURE_PATTERN.exec(line);
+  if (match === null) return null;
+  const errorMessage = line.slice(match[0].length);
+  if (errorMessage.length === 0) return null;
+  return {
+    primaryPath: match[1]!,
+    testName: match[2]!,
+    errorMessage,
+  };
 }
+
+const isWhitespace = (ch: string): boolean => " \t\r\n\f\v".includes(ch);
+const isStackNameChar = (ch: string): boolean => /[A-Za-z0-9_$.<>]/.test(ch);
+const isDigit = (ch: string): boolean => ch >= "0" && ch <= "9";
+
+// Reads a run of ASCII digits starting at `from`. Returns the index just past
+// the run, or -1 when the run is empty.
+const readDigits = (line: string, from: number): number => {
+  let i = from;
+  while (i < line.length && isDigit(line[i]!)) i++;
+  return i > from ? i : -1;
+};
+
+// Parses one V8-style stack frame starting at the `at` occurrence:
+// "at <name> (<path>:<line>:<column>)". Each segment is bounded by a literal
+// delimiter, so scanning never walks the whole line per candidate.
+const parseStackFrameAt = (line: string, at: number, frameIndex: number): StackFrame | null => {
+  let i = at + 2;
+  if (i >= line.length || !isWhitespace(line[i]!)) return null;
+  while (i < line.length && isWhitespace(line[i]!)) i++;
+
+  const nameStart = i;
+  if (i >= line.length || !isStackNameChar(line[i]!)) return null;
+  while (i < line.length && isStackNameChar(line[i]!)) i++;
+  const functionName = line.slice(nameStart, i);
+
+  if (i >= line.length || !isWhitespace(line[i]!)) return null;
+  while (i < line.length && isWhitespace(line[i]!)) i++;
+  if (line[i] !== "(") return null;
+
+  const pathStart = i + 1;
+  const pathColon = line.indexOf(":", pathStart);
+  if (pathColon < 0 || pathColon === pathStart) return null;
+  const path = line.slice(pathStart, pathColon);
+
+  const lineEnd = readDigits(line, pathColon + 1);
+  if (lineEnd < 0 || line[lineEnd] !== ":") return null;
+  const columnEnd = readDigits(line, lineEnd + 1);
+  if (columnEnd < 0 || line[columnEnd] !== ")") return null;
+
+  return {
+    frameIndex,
+    functionName,
+    path,
+    line: Number.parseInt(line.slice(pathColon + 1, lineEnd), 10),
+    column: Number.parseInt(line.slice(lineEnd + 1, columnEnd), 10),
+  };
+};
 
 // skipcq: JS-0067
 function parseStackLine(line: string, frameIndex: number): StackFrame | null {
-  const match = line.match(/at\s+([A-Za-z0-9_$.<>]+)\s+\(([^:]+):(\d+):(\d+)\)/);
-  if (!match) return null;
-  return {
-    frameIndex,
-    functionName: match[1]!,
-    path: match[2]!,
-    line: parseInt(match[3]!, 10),
-    column: parseInt(match[4]!, 10),
-  };
+  let at = line.indexOf("at");
+  while (at >= 0) {
+    const frame = parseStackFrameAt(line, at, frameIndex);
+    if (frame !== null) return frame;
+    at = line.indexOf("at", at + 1);
+  }
+  return null;
 }
 
 // skipcq: JS-0067
@@ -105,17 +167,17 @@ function parseFailureLine(
   frames: StackFrame[],
   current: { primaryPath: string; testName: string; errorMessage: string },
 ): void {
+  // Every pattern is checked on every line: a failure-marker line can also
+  // carry an inline stack frame, and dropping it would lose traceback data.
   const pytest = parsePytestLine(line);
   if (pytest) {
     current.primaryPath = pytest.primaryPath;
     current.testName = pytest.testName;
     current.errorMessage = pytest.errorMessage;
-    return;
   }
   const jestMatch = line.match(/^FAIL\s+([^\s]+)/);
   if (jestMatch) {
     current.primaryPath = jestMatch[1]!;
-    return;
   }
   const frame = parseStackLine(line, frames.length);
   if (frame) {

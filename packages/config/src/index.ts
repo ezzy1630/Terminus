@@ -545,7 +545,7 @@ function defineConfigProperty(target: Record<string, unknown>, key: string, valu
  *  - a strictly smaller numeric value (for limits),
  *  - a shorter array (for deny-lists).
  */
-// skipcq: JS-0067
+// Deny->allow, deny->optional, and required->optional all relax a constraint.
 const WEAKEN_TRANSITIONS = new Set(["deny->allow", "deny->optional", "required->optional"]);
 
 // skipcq: JS-0067

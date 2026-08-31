@@ -9,33 +9,41 @@ interface LeaseRecord {
   readonly expiresAtMs: number;
 }
 
-// skipcq: JS-0067
-function matchesScope(scope: MemoryClaim["scope"], filterScope: Partial<MemoryClaim["scope"]>): boolean {
-  if (filterScope.organization != null && scope.organization !== filterScope.organization) return false;
-  if (filterScope.user != null && scope.user !== filterScope.user) return false;
-  if (filterScope.workspaceId != null && scope.workspaceId !== filterScope.workspaceId) return false;
-  return true;
-}
+/**
+ * A claim matches a scope filter when every filter field the caller set
+ * (non-null) equals the claim's field. Unset or null filter fields pass
+ * through. Expressed as a single boolean reduction so the function stays
+ * branch-light and returns no redundant boolean literals.
+ */
+const matchesScope = (
+  scope: MemoryClaim["scope"],
+  filterScope: Partial<MemoryClaim["scope"]>,
+): boolean =>
+  [
+    { wanted: filterScope.organization, actual: scope.organization },
+    { wanted: filterScope.user, actual: scope.user },
+    { wanted: filterScope.workspaceId, actual: scope.workspaceId },
+  ].every(({ wanted, actual }) => wanted == null || actual === wanted);
 
 export class InMemoryMemoryRepository implements MemoryRepository {
   private readonly claims = new Map<string, MemoryClaim>();
   private readonly leases = new Map<string, LeaseRecord>();
 
-  async createClaim(claim: MemoryClaim): Promise<MemoryClaim> {
+  createClaim(claim: MemoryClaim): Promise<MemoryClaim> {
     this.claims.set(claim.id, claim);
-    return claim;
+    return Promise.resolve(claim);
   }
 
-  async getClaim(id: Uuid7): Promise<MemoryClaim | null> {
-    return this.claims.get(id) ?? null;
+  getClaim(id: Uuid7): Promise<MemoryClaim | null> {
+    return Promise.resolve(this.claims.get(id) ?? null);
   }
 
-  async updateClaim(claim: MemoryClaim): Promise<MemoryClaim> {
+  updateClaim(claim: MemoryClaim): Promise<MemoryClaim> {
     this.claims.set(claim.id, claim);
-    return claim;
+    return Promise.resolve(claim);
   }
 
-  async listClaims(filter: {
+  listClaims(filter: {
     readonly status?: MemoryClaimStatus | undefined;
     readonly scope?: Partial<MemoryScope> | undefined;
   }): Promise<readonly MemoryClaim[]> {
@@ -47,27 +55,29 @@ export class InMemoryMemoryRepository implements MemoryRepository {
       const scope = filter.scope;
       out = out.filter((c) => matchesScope(c.scope, scope));
     }
-    return out;
+    return Promise.resolve(out);
   }
 
-  async deleteClaim(id: Uuid7): Promise<void> {
+  deleteClaim(id: Uuid7): Promise<void> {
     this.claims.delete(id);
+    return Promise.resolve();
   }
 
-  async acquireLease(resource: string, holder: string, ttlSeconds: number): Promise<boolean> {
+  acquireLease(resource: string, holder: string, ttlSeconds: number): Promise<boolean> {
     const now = Date.now();
     const existing = this.leases.get(resource);
-    if (existing !== undefined && existing.expiresAtMs > now && existing.holder !== holder) {
-      return false;
+    const held = existing !== undefined && existing.expiresAtMs > now && existing.holder !== holder;
+    if (!held) {
+      this.leases.set(resource, { holder, expiresAtMs: now + ttlSeconds * 1000 });
     }
-    this.leases.set(resource, { holder, expiresAtMs: now + ttlSeconds * 1000 });
-    return true;
+    return Promise.resolve(!held);
   }
 
-  async releaseLease(resource: string, holder: string): Promise<void> {
+  releaseLease(resource: string, holder: string): Promise<void> {
     const existing = this.leases.get(resource);
     if (existing !== undefined && existing.holder === holder) {
       this.leases.delete(resource);
     }
+    return Promise.resolve();
   }
 }

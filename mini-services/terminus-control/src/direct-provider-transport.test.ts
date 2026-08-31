@@ -652,6 +652,7 @@ describe("caller teardown reads as cancellation, not a provider fault", () => {
   test("aborting mid-stream unsubscribes the gRPC call", async () => {
     const controller = new AbortController();
     let unsubscribed = false;
+    let producerError: unknown = undefined;
     const connectors = makeConnectorService({
       Execute: async () => { throw new Error("buffered Execute must not be used"); },
       ExecuteStream: () => new Observable<ConnectorChunk>((subscriber) => {
@@ -664,9 +665,11 @@ describe("caller teardown reads as cancellation, not a provider fault", () => {
             if (stopped) return;
             subscriber.next({ bytes: encode(`data: ${index}\n\n`) });
           }
-        // skipcq: JS-0321
-        })().catch((err: unknown) => {
-          if (err) return;
+        })().catch((error: unknown) => {
+          // The producer stops before publishing to a torn-down stream, so a
+          // rejection here is unexpected; capturing it lets the assertions
+          // below fail the test instead of swallowing the error silently.
+          producerError = error;
         });
         return () => { stopped = true; unsubscribed = true; };
       }),
@@ -683,6 +686,7 @@ describe("caller teardown reads as cancellation, not a provider fault", () => {
       } catch (error: unknown) { return error; }
     })();
     expect(failure).toBeInstanceOf(ConnectorCancelledError);
+    expect(producerError).toBeUndefined();
     // Dropping the subscription is what tells the kernel to abort upstream.
     expect(unsubscribed).toBe(true);
     expect(classifyLoopError(failure).kind).toBe("cancelled");
