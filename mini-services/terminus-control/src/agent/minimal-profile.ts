@@ -93,6 +93,26 @@ export function workspaceActivationMode(mode: TerminusProfileMode): WorkspaceAct
   return mode === "adaptive" ? "eager" : "lazy";
 }
 
+/** Recover lazy workspace activation only from its committed turn event. */
+export function hasCommittedWorkspaceActivation(payloads: readonly string[]): boolean {
+  for (const payloadJson of payloads) {
+    try {
+      const payload: unknown = JSON.parse(payloadJson);
+      if (
+        payload !== null
+        && typeof payload === "object"
+        && !Array.isArray(payload)
+        && (payload as Readonly<Record<string, unknown>>).capability_id === "workspace"
+      ) {
+        return true;
+      }
+    } catch {
+      // Malformed historical events cannot grant activation.
+    }
+  }
+  return false;
+}
+
 export const terminusMinimalProfileSchema = z.object({
   profileId: z.literal(TERMINUS_MINIMAL_PROFILE_ID),
   version: z.literal(TERMINUS_MINIMAL_PROFILE_VERSION),

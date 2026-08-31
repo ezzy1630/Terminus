@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { turnEvidenceBundleWire } from "./evidence-bundle-wire.js";
+import {
+  turnEvidenceBundleWire,
+  turnEvidenceVerificationResultIds,
+} from "./evidence-bundle-wire.js";
 
 describe("task evidence bundle wire projection", () => {
   test("labels the latest bundle as turn-scoped without breaking v1 field names", () => {
@@ -25,5 +28,20 @@ describe("task evidence bundle wire projection", () => {
       base_workspace_revision: "base",
       final_workspace_revision: "final",
     });
+  });
+
+  test("loads verifier results only for the turn's selected plan", async () => {
+    const requestedPlans: string[] = [];
+    const loadForPlan = async (planId: string) => {
+      requestedPlans.push(planId);
+      return [{ id: `${planId}:result` }];
+    };
+
+    expect(await turnEvidenceVerificationResultIds(null, loadForPlan)).toEqual([]);
+    expect(requestedPlans).toEqual([]);
+    expect(await turnEvidenceVerificationResultIds("plan-current", loadForPlan)).toEqual([
+      "plan-current:result",
+    ]);
+    expect(requestedPlans).toEqual(["plan-current"]);
   });
 });

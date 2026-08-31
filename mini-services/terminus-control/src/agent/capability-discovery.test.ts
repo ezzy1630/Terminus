@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { computeContentHash } from "@terminus/context-ir";
 import type { CapabilityCard } from "@terminus/aci";
-import { CapabilityDiscoverySession } from "./capability-discovery.js";
+import {
+  CapabilityDiscoverySession,
+  recoverCommittedActiveCapabilityIds,
+} from "./capability-discovery.js";
 
 function card(input: {
   readonly id: string;
@@ -101,6 +104,19 @@ describe("CapabilityDiscoverySession", () => {
     const deactivated = session.execute({ action: "deactivate", capability_id: "standalone.web_fetch" });
     expect(deactivated.ok).toBe(true);
     expect(session.activeCapabilityIds()).toEqual([]);
+  });
+
+  test("recovers the latest committed active set and drops stale capability ids", () => {
+    expect(recoverCommittedActiveCapabilityIds(
+      ["tool.database"],
+      [
+        "not-json",
+        JSON.stringify({ active_capabilities: ["tool.database", "standalone.web_fetch"] }),
+        JSON.stringify({ capability_id: "workspace" }),
+        JSON.stringify({ active_capabilities: ["standalone.web_fetch", "retired.tool"] }),
+      ],
+      cards.map((entry) => entry.id),
+    )).toEqual(["standalone.web_fetch"]);
   });
 
   test("rejects duplicate and invalid admitted cards instead of resolving ambiguously", () => {

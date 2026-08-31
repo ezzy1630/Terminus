@@ -187,6 +187,7 @@ import {
   providerToolResultTranscript,
   resolveMaxToolCycles,
   capabilityActionRequiresActivatedWorkspace,
+  standaloneToolCallIsDeclared,
   mayChangeWorkspace,
   resolveShellModeEnabled,
   replayIsBlockedBy,
@@ -404,7 +405,10 @@ import {
   type CodexAppServerTurnInput,
 } from "./codex-app-server.js";
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
-import { CapabilityDiscoverySession } from "./agent/capability-discovery.js";
+import {
+  CapabilityDiscoverySession,
+  recoverCommittedActiveCapabilityIds,
+} from "./agent/capability-discovery.js";
 import {
   buildWorkingMemoryContextSection,
   renderCheckpointSummary,
@@ -429,13 +433,17 @@ import {
 import {
   buildEvidenceIdentity,
   createTerminusExecutionProfile,
+  hasCommittedWorkspaceActivation,
   resolveTerminusProfileMode,
   workspaceActivationMode,
   TERMINUS_MINIMAL_TOOL_IDS,
   type EvidenceTerminalOutcome,
   type TerminusExecutionProfile,
 } from "./agent/minimal-profile.js";
-import { turnEvidenceBundleWire } from "./agent/evidence-bundle-wire.js";
+import {
+  turnEvidenceBundleWire,
+  turnEvidenceVerificationResultIds,
+} from "./agent/evidence-bundle-wire.js";
 import {
   classifyLoopError,
   type LoopErrorEnvelope,
@@ -16954,6 +16962,7 @@ async function agentLoop(turnId: string): Promise<void> {
       readonly finalWorkspaceRevision?: string | undefined;
       readonly proofBundleHash?: string | null | undefined;
       readonly admissionState?: "PREPARED" | "COMMITTED" | "QUARANTINED" | undefined;
+      readonly verificationPlanId?: string | undefined;
     },
   ) => Promise<void> = async () => {};
   try {
@@ -17195,10 +17204,11 @@ async function agentLoop(turnId: string): Promise<void> {
         readonly finalWorkspaceRevision?: string | undefined;
         readonly proofBundleHash?: string | null | undefined;
         readonly admissionState?: "PREPARED" | "COMMITTED" | "QUARANTINED" | undefined;
+        readonly verificationPlanId?: string | undefined;
       } = {},
     ): Promise<void> => {
       if (turnProfile === null) return;
-      const [attempts, toolCalls, verificationResults] = await Promise.all([
+      const [attempts, toolCalls, verificationResultIds] = await Promise.all([
         db.providerAttempt.findMany({
           where: { turnId },
           orderBy: { attemptNumber: "asc" },
@@ -17214,11 +17224,14 @@ async function agentLoop(turnId: string): Promise<void> {
           orderBy: { proposedAt: "asc" },
           select: { id: true },
         }),
-        db.verificationResult.findMany({
-          where: { plan: { taskId: task.id } },
-          orderBy: { startedAt: "asc" },
-          select: { id: true },
-        }),
+        turnEvidenceVerificationResultIds(
+          options.verificationPlanId ?? null,
+          (verificationPlanId) => db.verificationResult.findMany({
+            where: { planId: verificationPlanId },
+            orderBy: { startedAt: "asc" },
+            select: { id: true },
+          }),
+        ),
       ]);
       await persistEvidenceBundle({
         taskId: task.id,
@@ -17236,7 +17249,7 @@ async function agentLoop(turnId: string): Promise<void> {
           .map((attempt) => artifactUriHash(attempt.responseArtifact))
           .filter((hash): hash is string => hash !== null),
         toolCallIds: toolCalls.map((toolCall) => toolCall.id),
-        verificationResultIds: verificationResults.map((result) => result.id),
+        verificationResultIds,
         proofBundleHash: options.proofBundleHash ?? null,
         terminalOutcome,
         admissionState: options.admissionState,
@@ -17532,15 +17545,39 @@ async function agentLoop(turnId: string): Promise<void> {
         .map((value) => value.trim())
         .filter((value) => value.length > 0),
     )];
-    const capabilitySession = new CapabilityDiscoverySession(
-      STANDALONE_TOOL_CAPABILITY_CARDS,
-      requestedToolCapabilities,
-    );
     const harnessProfileMode = resolveTerminusProfileMode(process.env.TERMINUS_HARNESS_PROFILE);
     const requestedCompactionMode = resolveAdaptiveCompactionMode(
       process.env.TERMINUS_EXPERIMENTAL_ADAPTIVE_COMPACTION,
     );
     const activationMode = workspaceActivationMode(harnessProfileMode);
+    const committedActivationEvents = toolsEnabledForTurn
+      ? await db.semanticEvent.findMany({
+          where: {
+            eventType: { in: ["capability.activated", "capability.deactivated"] },
+            aggregateType: "turn",
+            aggregateId: turnId,
+          },
+          orderBy: [
+            { aggregateSequence: "asc" },
+            { eventId: "asc" },
+          ],
+          select: { payloadJson: true },
+        })
+      : [];
+    const committedActivationPayloads = committedActivationEvents.map((event) => event.payloadJson);
+    const recoveredToolCapabilities = recoverCommittedActiveCapabilityIds(
+      requestedToolCapabilities,
+      committedActivationPayloads,
+      STANDALONE_TOOL_CAPABILITY_CARDS.map((card) => card.id),
+    );
+    const capabilitySession = new CapabilityDiscoverySession(
+      STANDALONE_TOOL_CAPABILITY_CARDS,
+      recoveredToolCapabilities,
+    );
+    let workspaceActivated = toolsEnabledForTurn && (
+      activationMode === "eager"
+      || hasCommittedWorkspaceActivation(committedActivationPayloads)
+    );
     const selectWorkspaceToolSchemas = () => selectStandaloneToolSchemas({
       toolsEnabled: toolsEnabledForTurn,
       activatedCapabilities: capabilitySession.activeCapabilityIds(),
@@ -17555,12 +17592,11 @@ async function agentLoop(turnId: string): Promise<void> {
       adaptiveToolsEnabled: harnessProfileMode === "adaptive",
     });
     const workspaceToolSchemas = selectWorkspaceToolSchemas();
-    const initialToolSchemas = activationMode === "eager"
+    const initialToolSchemas = workspaceActivated
       ? workspaceToolSchemas
       : selectInitialStandaloneToolSchemas(toolsEnabledForTurn);
-    let workspaceActivated = activationMode === "eager" && toolsEnabledForTurn;
     let activeToolSchemas = initialToolSchemas;
-    let declaredToolIds = new Set<string>(activeToolSchemas.map((schema) => schema.id));
+    const declaredToolSchemasByAttempt = new Map<string, readonly ProviderToolSchema[]>();
     const activatedToolCapabilities = capabilitySession.activeCapabilityIds();
     const selectedProfile = createTerminusExecutionProfile({
       mode: harnessProfileMode,
@@ -17820,7 +17856,6 @@ async function agentLoop(turnId: string): Promise<void> {
     let previousCacheEpoch: CacheEpochDebugSnapshot | null = null;
     const compileProviderContext = async () => {
       activeToolSchemas = selectActiveToolSchemas();
-      declaredToolIds = new Set(activeToolSchemas.map((schema) => schema.id));
       // Optional schemas consume context only after activation. The profile
       // records the bounded union, while each attempt budgets the exact wire
       // declaration. This is the token-saving point of progressive disclosure.
@@ -19481,6 +19516,7 @@ async function agentLoop(turnId: string): Promise<void> {
         };
       },
       beginAttempt: async ({ attemptId, attemptNumber, compiled }) => {
+        declaredToolSchemasByAttempt.set(attemptId, compiled.rendered.request.toolSchemas);
         manifestIdByAttempt.set(attemptId, compiled.contextManifestId as Uuid7);
         predictedCacheByAttempt.set(attemptId, compiled.rendered.predictedCachedTokens);
         const identity = deriveProviderAttemptIdentity({
@@ -19731,6 +19767,11 @@ async function agentLoop(turnId: string): Promise<void> {
         if (!toolsEnabledForTurn) {
           throw new ToolPolicyDeniedError("Provider emitted a tool call while standalone tools were disabled");
         }
+        const declaredToolSchemas = declaredToolSchemasByAttempt.get(attemptId);
+        if (declaredToolSchemas === undefined) {
+          throw new Error(`provider attempt ${attemptId} has no declared tool-schema snapshot`);
+        }
+        const declaredToolIds = declaredToolSchemas.map((schema) => schema.id);
         // A call the model got wrong is settled as an error result it can
         // read, not thrown out of the turn (see InvalidToolCallError). Only
         // the verdict is reached here; the settlement path persists it.
@@ -19744,13 +19785,15 @@ async function agentLoop(turnId: string): Promise<void> {
         }
         if (
           parsedCall !== null
-          && !workspaceActivated
-          && capabilityActionRequiresActivatedWorkspace(parsedCall)
+          && !standaloneToolCallIsDeclared(parsedCall, declaredToolSchemas)
         ) {
+          const requiresWorkspaceActivation = capabilityActionRequiresActivatedWorkspace(parsedCall);
           rejection = new InvalidToolCallError({
             toolName: call.toolName,
             providerCallId: call.toolCallId,
-            modelMessage: "Workspace capability discovery is unavailable before activation. Call capability with {\"action\":\"activate_workspace\"}.",
+            modelMessage: requiresWorkspaceActivation
+              ? "Workspace capability discovery is unavailable in this provider attempt. Call capability with {\"action\":\"activate_workspace\"}; the expanded schema is declared on the next attempt."
+              : `'${parsedCall.toolId}' is not available in this provider attempt. Available tools: ${declaredToolIds.join(", ")}.`,
           });
           parsedCall = null;
         }
@@ -19759,16 +19802,6 @@ async function agentLoop(turnId: string): Promise<void> {
           // is not evidence of a mutation, but it distinguishes a blocked
           // coding attempt from a legitimate read-only/question turn.
           turnAttemptedWorkspaceMutation = true;
-        }
-        if (parsedCall !== null && !declaredToolIds.has(parsedCall.toolId)) {
-          // A real tool that is not offered this turn (web_fetch before it is
-          // activated). Also the model's to fix: say what it may call instead.
-          rejection = new InvalidToolCallError({
-            toolName: call.toolName,
-            providerCallId: call.toolCallId,
-            modelMessage: `'${parsedCall.toolId}' is not available in this turn. Available tools: ${[...declaredToolIds].join(", ")}.`,
-          });
-          parsedCall = null;
         }
         if (!toolSettlementEnteredFor.has(attemptId)) {
           toolSettlementEnteredFor.add(attemptId);
@@ -20603,6 +20636,7 @@ async function agentLoop(turnId: string): Promise<void> {
           await persistEvidenceForCurrentTurn("COMPLETED", {
             finalWorkspaceRevision: sourceRevision,
             proofBundleHash: skipEvidence.hash,
+            verificationPlanId: plan.id,
           });
           await verificationCoordinator.settleWithoutRunnableChecks(task.id, turnId, {
             reason: "no_runnable_checks",
@@ -20740,7 +20774,10 @@ async function agentLoop(turnId: string): Promise<void> {
             });
             await persistTurnBudgetLedger(turnId, activeEngine.budget.ledger, turnContextBudgetJson);
           }
-          await persistEvidenceForCurrentTurn("FAILED_VERIFICATION", { finalWorkspaceRevision: sourceRevision });
+          await persistEvidenceForCurrentTurn("FAILED_VERIFICATION", {
+            finalWorkspaceRevision: sourceRevision,
+            verificationPlanId: plan.id,
+          });
           await failVerificationTurn({
             blocked: evaluation.blocked,
             repair_stop_reason:
@@ -20767,6 +20804,7 @@ async function agentLoop(turnId: string): Promise<void> {
           finalWorkspaceRevision: sourceRevision,
           proofBundleHash: finalCheckpoint.hash,
           admissionState: "PREPARED",
+          verificationPlanId: plan.id,
         });
         const completionRecordId = `completion:${task.id}`;
         try {

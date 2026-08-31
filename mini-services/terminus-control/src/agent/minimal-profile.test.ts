@@ -9,6 +9,7 @@ import {
   createTerminusAdaptiveProfile,
   createTerminusExecutionProfile,
   createTerminusMinimalProfile,
+  hasCommittedWorkspaceActivation,
   resolveTerminusProfileMode,
   workspaceActivationMode,
   terminusAdaptiveProfileSchema,
@@ -116,6 +117,17 @@ describe("terminus-minimal profile", () => {
 
     const adaptive = createTerminusAdaptiveProfile({ providerId: "local", modelKey: "local/test" });
     expect(() => validateTerminusExecutionProfile({ ...adaptive, subagentsEnabled: false })).toThrow();
+  });
+
+  test("recovers lazy workspace activation only from the committed workspace event", () => {
+    expect(hasCommittedWorkspaceActivation([
+      JSON.stringify({ capability_id: "standalone.web_fetch" }),
+      JSON.stringify({ capability_id: "workspace", provider_call_id: "activate-1" }),
+    ])).toBe(true);
+    expect(hasCommittedWorkspaceActivation([
+      "not-json",
+      JSON.stringify({ capability_id: "standalone.web_fetch" }),
+    ])).toBe(false);
   });
 
   test("evidence identity is order-independent for references and sensitive to outcome", () => {

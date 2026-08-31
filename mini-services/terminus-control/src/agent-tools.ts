@@ -1184,6 +1184,29 @@ export function capabilityActionRequiresActivatedWorkspace(call: ParsedStandalon
   return call.toolId === "capability" && call.arguments.action !== "activate_workspace";
 }
 
+/**
+ * Validate a normalized call against the exact schemas sent for its provider
+ * attempt. Canonical Zod parsing validates each complete tool contract; the
+ * capability action enum is the one declaration narrowed between attempts.
+ */
+export function standaloneToolCallIsDeclared(
+  call: ParsedStandaloneToolCall,
+  declaredSchemas: readonly ProviderToolSchema[],
+): boolean {
+  const declared = declaredSchemas.find((schema) => schema.id === call.toolId);
+  if (declared === undefined) return false;
+  if (call.toolId !== "capability") return true;
+
+  const properties = declared.inputSchema.properties;
+  if (properties === null || typeof properties !== "object" || Array.isArray(properties)) return false;
+  const action = (properties as Readonly<Record<string, unknown>>).action;
+  if (action === null || typeof action !== "object" || Array.isArray(action)) return false;
+  const allowed = (action as Readonly<Record<string, unknown>>).enum;
+  return Array.isArray(allowed)
+    && allowed.every((value): value is string => typeof value === "string")
+    && allowed.includes(call.arguments.action);
+}
+
 /** Keep the control surface plus only the optional schemas activated so far. */
 export function selectDiscoveredStandaloneToolSchemas(input: {
   readonly toolsEnabled: boolean;

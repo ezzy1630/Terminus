@@ -9,6 +9,15 @@ export interface TurnEvidenceBundleWireInput {
   readonly finalWorkspaceRevision: string;
 }
 
+/** Load only the verifier results bound to this turn's selected plan. */
+export async function turnEvidenceVerificationResultIds(
+  verificationPlanId: string | null,
+  loadForPlan: (verificationPlanId: string) => Promise<readonly { readonly id: string }[]>,
+): Promise<readonly string[]> {
+  if (verificationPlanId === null) return [];
+  return (await loadForPlan(verificationPlanId)).map((result) => result.id);
+}
+
 /**
  * Project the latest turn evidence on a task without implying that the task's
  * completion gate admitted it. The legacy names remain for v1 clients; the

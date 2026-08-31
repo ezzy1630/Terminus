@@ -100,6 +100,34 @@ export type CapabilityDiscoveryOutcome =
   | { readonly ok: false; readonly message: string };
 
 /**
+ * Restore the latest exact active-set snapshot emitted after activation or
+ * deactivation. Unknown historical capabilities are dropped rather than
+ * being granted by a newer binary; malformed events cannot change state.
+ */
+export function recoverCommittedActiveCapabilityIds(
+  initiallyActive: readonly string[],
+  payloads: readonly string[],
+  admittedCapabilityIds: readonly string[],
+): readonly string[] {
+  const admitted = new Set(admittedCapabilityIds);
+  let active = [...new Set(initiallyActive)];
+  for (const payloadJson of payloads) {
+    try {
+      const payload: unknown = JSON.parse(payloadJson);
+      if (payload === null || typeof payload !== "object" || Array.isArray(payload)) continue;
+      const snapshot = (payload as Readonly<Record<string, unknown>>).active_capabilities;
+      if (!Array.isArray(snapshot) || !snapshot.every((value): value is string => typeof value === "string")) {
+        continue;
+      }
+      active = [...new Set(snapshot.filter((capabilityId) => admitted.has(capabilityId)))];
+    } catch {
+      // Malformed historical events cannot grant capabilities.
+    }
+  }
+  return active.sort();
+}
+
+/**
  * Per-turn progressive-disclosure state.
  *
  * Cards are admitted by the caller; this object never discovers ambient

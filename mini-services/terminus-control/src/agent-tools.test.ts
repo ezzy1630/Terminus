@@ -8,6 +8,7 @@ import {
   STANDALONE_ADAPTIVE_TOOL_IDS,
   STANDALONE_WORKSPACE_ACTIVATION_TOOL_SCHEMA,
   capabilityActionRequiresActivatedWorkspace,
+  standaloneToolCallIsDeclared,
   selectInitialStandaloneToolSchemas,
   selectStandaloneToolSchemas,
   EXEC_OUTPUT_MAX_BYTES,
@@ -201,6 +202,10 @@ describe("standalone provider tools", () => {
 
     expect(capabilityActionRequiresActivatedWorkspace(activateWorkspace)).toBe(false);
     expect(capabilityActionRequiresActivatedWorkspace(searchCapabilities)).toBe(true);
+    const initialSchemas = selectInitialStandaloneToolSchemas(true);
+    expect(standaloneToolCallIsDeclared(activateWorkspace, initialSchemas)).toBe(true);
+    expect(standaloneToolCallIsDeclared(searchCapabilities, initialSchemas)).toBe(false);
+    expect(standaloneToolCallIsDeclared(searchCapabilities, STANDALONE_TOOL_SCHEMAS)).toBe(true);
   });
 
   // Observed from big-pickle: every exec call arrived as a bare argv array,
