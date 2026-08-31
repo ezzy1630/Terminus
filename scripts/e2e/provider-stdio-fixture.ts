@@ -104,10 +104,10 @@ const buildPatchSettled = hasToolResultContaining(request.body, [
   "src/main.py",
   "new_sha256",
 ]);
-// A successful command may have empty or artifact-backed output. This task
-// has exactly one exec step, so its typed exit code is the stable marker.
-const buildExecSettled = hasToolResultContaining(request.body, [
-  "exit_code",
+const buildVerificationReadSettled = hasToolResultContaining(request.body, [
+  "src/main.py",
+  "import sys",
+  "file_sha256",
 ]);
 const emitDone = (): void => {
   console.log(JSON.stringify({
@@ -220,15 +220,15 @@ if __name__ == "__main__":
   process.exit(0);
 }
 
-if (isBuildFailureTask && !buildExecSettled) {
+if (isBuildFailureTask && !buildVerificationReadSettled) {
   console.log(JSON.stringify({
     kind: "tool_call",
     tool_call: {
-      tool_call_id: "fixture-build-exec",
-      tool_name: "exec",
+      tool_call_id: "fixture-build-verify",
+      tool_name: "read",
       arguments: {
-        cmd: 'git status --short -- "src/main.py"',
-        workdir: ".",
+        path: "src/main.py",
+        render: "raw",
       },
     },
   }));
