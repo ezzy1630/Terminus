@@ -85,6 +85,76 @@ class PromotionGateResult:
 
 
 @dataclass(frozen=True)
+class ReliabilityEvidence:
+    """Reliability rates for the baseline and candidate arms.
+
+    Promotion requires more than a higher average score: a candidate that is
+    more false-completion-prone, more stuck, more verification-block-happy,
+    or worse at cache-prefix survival is rejected even when its mean score
+    improved. Every rate is a fraction in [0, 1] or ``None`` (not measured —
+    the gate stays silent rather than guessing).
+    """
+
+    false_completion_baseline: float | None = None
+    false_completion_candidate: float | None = None
+    stuck_state_baseline: float | None = None
+    stuck_state_candidate: float | None = None
+    verification_false_block_baseline: float | None = None
+    verification_false_block_candidate: float | None = None
+    cache_prefix_survival_baseline: float | None = None
+    cache_prefix_survival_candidate: float | None = None
+    # Margins tolerate small-sample noise; any candidate-side increase above
+    # the margin (decrease for cache survival) fails the gate.
+    false_completion_margin: float = 0.02
+    stuck_state_margin: float = 0.02
+    verification_false_block_margin: float = 0.02
+    cache_prefix_survival_margin: float = 0.05
+
+    def breaches(self) -> list[str]:
+        """Names of the reliability checks the candidate fails."""
+        breached: list[str] = []
+        for name, base, cand, margin, direction in (
+            (
+                "false_completion",
+                self.false_completion_baseline,
+                self.false_completion_candidate,
+                self.false_completion_margin,
+                "increase",
+            ),
+            (
+                "stuck_state",
+                self.stuck_state_baseline,
+                self.stuck_state_candidate,
+                self.stuck_state_margin,
+                "increase",
+            ),
+            (
+                "verification_false_block",
+                self.verification_false_block_baseline,
+                self.verification_false_block_candidate,
+                self.verification_false_block_margin,
+                "increase",
+            ),
+            (
+                "cache_prefix_survival",
+                self.cache_prefix_survival_baseline,
+                self.cache_prefix_survival_candidate,
+                self.cache_prefix_survival_margin,
+                "decrease",
+            ),
+        ):
+            if base is None or cand is None:
+                continue
+            delta = cand - base
+            if delta > margin if direction == "increase" else delta < -margin:
+                breached.append(
+                    f"{name}: {base:.4f} -> {cand:.4f} (delta {delta:+.4f}, "
+                    f"allowed {direction} margin {margin})"
+                )
+        return breached
+
+
+@dataclass(frozen=True)
 class Evaluation:
     """Aggregated evidence presented to the promotion gate.
 
@@ -136,12 +206,45 @@ class Evaluation:
     maintainability_within_budget: bool = True
     divergence_within_budget: bool = True
 
+    # Reliability (causal tier 3) — None means not measured and the gate
+    # stays silent; present evidence gates the decision.
+    reliability: ReliabilityEvidence | None = None
+
     # Hard security/reliability need override (SPEC §41.12).
     satisfies_hard_security_need: bool = False
     satisfies_hard_reliability_need: bool = False
 
 
 # ──────────────────────────── gate evaluation ─────────────────────────────
+
+
+def _gate_reliability(ev: Evaluation) -> GateVerdict:
+    """Gate 7 — reliability rates must not regress (causal tier 3).
+
+    False-completion rate, stuck-state rate, verification false-block rate,
+    and cache-prefix survival between turns are promotion inputs, not
+    diagnostics: a candidate that regresses any of them beyond its margin is
+    rejected regardless of its mean primary-metric improvement.
+    """
+    if ev.reliability is None:
+        return GateVerdict(
+            name="reliability",
+            status=GateStatus.NOT_APPLICABLE,
+            detail="No reliability evidence supplied; the gate did not run.",
+        )
+    breaches = ev.reliability.breaches()
+    if breaches:
+        return GateVerdict(
+            name="reliability",
+            status=GateStatus.FAIL,
+            detail="Reliability regression beyond margin: " + "; ".join(breaches),
+            evidence={"breached": ",".join(b.split(":")[0] for b in breaches)},
+        )
+    return GateVerdict(
+        name="reliability",
+        status=GateStatus.PASS,
+        detail="All supplied reliability rates are within their margins.",
+    )
 
 
 def _gate_pareto(ev: Evaluation) -> GateVerdict:
@@ -346,6 +449,7 @@ GATE_NAMES = (
     "security_guardrails",
     "operations",
     "maintainability",
+    "reliability",
 )
 
 
@@ -371,6 +475,7 @@ def evaluate_promotion(ev: Evaluation) -> PromotionGateResult:
         _gate_security(ev),
         _gate_operations(ev),
         _gate_maintainability(ev),
+        _gate_reliability(ev),
     ]
 
     blocking = [g.name for g in gates if g.status is GateStatus.BLOCKED]
@@ -441,6 +546,7 @@ def evaluate_paired_promotion(
     divergence_within_budget: bool = False,
     satisfies_hard_security_need: bool = False,
     satisfies_hard_reliability_need: bool = False,
+    reliability: ReliabilityEvidence | None = None,
     require_live: bool = True,
     require_independent_verification: bool = True,
     require_holdout: bool = True,
@@ -519,5 +625,6 @@ def evaluate_paired_promotion(
         divergence_within_budget=divergence_within_budget,
         satisfies_hard_security_need=satisfies_hard_security_need,
         satisfies_hard_reliability_need=satisfies_hard_reliability_need,
+        reliability=reliability,
     )
     return evaluate_promotion(evaluation)

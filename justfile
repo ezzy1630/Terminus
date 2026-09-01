@@ -214,8 +214,21 @@ e2e: test-reference-loop
 # permutations (replay seeds printed, failing event logs retained), and
 # executor crash/restart replay at every persisted transition. Internal tests
 # use a virtual clock: no setTimeout, Date.now, sleeps, or wall-clock polling.
+#
+# The conformance test also MEASURES the causal tier-1 properties (stuck-state
+# rate, duplicate absorption, recovery/cancellation/deadline correctness,
+# single terminal outcome, idempotency after redelivery, reconstruction) over
+# the seeded schedules — see conformance.ts and docs/architecture/
+# evaluation-lab.md.
 test-reference-loop:
     bun test mini-services/terminus-control/src/agent/turn-lifecycle/
+
+# Retained lifecycle-conformance evidence: a larger seeded sweep with the
+# versioned report written to evals/results/lifecycle/ (gitignored evidence
+# directory). Same engine as the mandatory PR gate; sized for nightly sweeps.
+lifecycle-conformance seeds="50000":
+    TERMINUS_LIFECYCLE_CONFORMANCE_SEEDS={{seeds}} TERMINUS_LIFECYCLE_CONFORMANCE_OUT=evals/results/lifecycle \
+      bun test mini-services/terminus-control/src/agent/turn-lifecycle/conformance.test.ts
 
 # Fast fixture coverage for eval schemas, aggregation, and graders. These
 # scripted records are never runtime or release evidence.
@@ -244,6 +257,66 @@ eval-runtime-adaptive-inspect-smoke:
 
 # Per-PR smoke gate: retain fast fixture coverage and require a real runtime path.
 eval-smoke: eval-fixture-smoke eval-runtime-smoke eval-runtime-adaptive-smoke eval-runtime-adaptive-inspect-smoke
+
+# Tier 2 canary, fixture mode: the five archetype tasks run through both
+# comparison arms of the canary orchestrator offline. Proves pairing,
+# identity enforcement, trajectory diffs, and the report artifact. The
+# resulting report is fixture-only evidence and says so.
+canary-fixture:
+    cd python && uv run terminus-eval canary --fixture-mode \
+      --baseline-commit 0000000000000000000000000000000000000000 \
+      --candidate-commit "working-tree" \
+      --output-dir evals/results/canary-fixture
+
+# Tier 2 canary, live: the five archetype tasks run against two control
+# planes (baseline revision and candidate revision) under identical model,
+# effort, task, environment, seed, and budget. Requires:
+#   TERMINUS_BASELINE_URL / TERMINUS_BASELINE_TOKEN  — baseline control plane
+#   TERMINUS_CANDIDATE_URL / TERMINUS_CANDIDATE_TOKEN — candidate control plane
+# and fails closed when either is absent. Usage:
+#   just canary-live <baseline-sha> <candidate-sha>
+canary-live baseline commit="working-tree":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${TERMINUS_BASELINE_URL:?TERMINUS_BASELINE_URL is required (baseline control plane)}"
+    : "${TERMINUS_CANDIDATE_URL:?TERMINUS_CANDIDATE_URL is required (candidate control plane)}"
+    cd python && uv run terminus-eval canary \
+      --baseline-commit "{{baseline}}" --candidate-commit "{{commit}}" \
+      --output-dir evals/results/canary-live
+
+# Tier 3: causal comparison over a scheduled held-out cohort. Both inputs
+# are directories of immutable run records (runs.jsonl or *.json), one per
+# arm, from the SAME model-fixed cohort. Partition enforcement (blocked
+# cells fail closed; holdout cells must be stamped) is part of the report.
+# Usage:
+#   just cohort-compare evals/results/cohort/nightly-baseline evals/results/cohort/nightly-candidate
+cohort-compare baseline candidate:
+    cd python && uv run terminus-eval cohort-compare \
+      --baseline "{{baseline}}" --candidate "{{candidate}}" \
+      --output evals/results/cohort/latest
+
+# Scheduled live cohort run (one arm). Requires a live control plane and
+# provider credentials; fails closed without them. The produced runs dir is
+# one input of `just cohort-compare`. SEEDS should be >= 5 so bootstrap
+# intervals are meaningful (the local exit gate enforces 5+ per cell).
+eval-nightly-cohort seeds="5":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${TERMINUS_CONTROL_URL:?TERMINUS_CONTROL_URL is required for a live cohort run}"
+    : "${TERMINUS_LIVE_MODEL:?TERMINUS_LIVE_MODEL is required (pinned model snapshot)}"
+    : "${TERMINUS_LIVE_PROVIDER:?TERMINUS_LIVE_PROVIDER is required}"
+    cd python
+    for task_dir in forge_evals/evals/tasks/{build-failure,cross-file-feature,dependency-upgrade,unfamiliar-repository,migration,test-generation}/*; do
+      test -d "$task_dir" || continue
+      suite="${task_dir#forge_evals/evals/tasks/}"
+      task="${suite#*/}"
+      uv run terminus-eval run \
+        --suite "${suite%%/*}" --task "$task" --task-dir "$task_dir" \
+        --harness terminus-live --provider "$TERMINUS_LIVE_PROVIDER" --model "$TERMINUS_LIVE_MODEL" \
+        ${TERMINUS_LIVE_EFFORT:+--effort "$TERMINUS_LIVE_EFFORT"} \
+        --seeds {{seeds}} \
+        --output-dir "evals/results/cohort/${TERMINUS_ARM:-candidate}"
+    done
 
 # Very small continuously-runnable canary for the canonical turn lifecycle:
 # the deterministic reference-loop suite plus one graded task through the

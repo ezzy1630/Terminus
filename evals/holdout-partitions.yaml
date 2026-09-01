@@ -1,0 +1,45 @@
+# Held-out evaluation partitions (causal evaluation system, tier 3).
+#
+# Cells are resolved most-specific-first: a task rule beats a suite rule;
+# cells no rule names are `dev` by default (explicit, not implicit,
+# holding out).
+#
+#   dev     — development tasks; any run may touch them, results are
+#             diagnostics only.
+#   holdout — scheduled live evaluation permitted; promotion may read these
+#             results only for the pre-registered comparison; candidates
+#             must never be tuned against them.
+#   blocked — reserved or contaminated; evaluation refuses these cells.
+#
+# The canary suite is intentionally dev: it is the per-PR diagnostic, run on
+# every agent-behavior change. The internal cohorts below are the scheduled
+# comparison surface; external benchmark partitions are pinned in their own
+# suite manifests.
+schema_version: 1
+updated: "2026-09-01"
+
+partitions:
+  # ── per-PR diagnostic surface ──────────────────────────────────────────
+  - {suite: canary, partition: dev, note: "five archetype tasks; paired per-PR diagnostic, never promotion evidence"}
+
+  # ── scheduled internal cohorts (tier 3) ────────────────────────────────
+  - {suite: build-failure, partition: holdout, note: "scheduled cohort; pre-registered comparisons only"}
+  - {suite: cross-file-feature, partition: holdout, note: "scheduled cohort; pre-registered comparisons only"}
+  - {suite: dependency-upgrade, partition: holdout, note: "scheduled cohort; pre-registered comparisons only"}
+  - {suite: unfamiliar-repository, partition: holdout, note: "scheduled cohort; pre-registered comparisons only"}
+  - {suite: migration, partition: holdout, note: "scheduled cohort; pre-registered comparisons only"}
+  - {suite: test-generation, partition: holdout, note: "scheduled cohort; pre-registered comparisons only"}
+  - {suite: compaction-mid-implementation, partition: holdout, note: "reliability cohort; pre-registered comparisons only"}
+  - {suite: interruption-resume, partition: holdout, note: "reliability cohort; pre-registered comparisons only"}
+  - {suite: stale-snapshot-conflict, partition: holdout, note: "reliability cohort; pre-registered comparisons only"}
+
+  # ── security cohorts (blocked for ordinary comparison runs) ────────────
+  - {suite: malicious-repository-instructions, partition: blocked, note: "security scenario; runs only through the dedicated security eval pipeline"}
+  - {suite: poisoned-mcp-metadata, partition: blocked, note: "security scenario; runs only through the dedicated security eval pipeline"}
+
+  # ── external benchmarks (partitions pinned by their manifests) ─────────
+  - {suite: swe-bench-verified, partition: holdout, note: "public benchmark; treated as holdout for promotion reads"}
+  - {suite: swe-bench-pro, partition: holdout, note: "public benchmark; treated as holdout for promotion reads"}
+  - {suite: terminal-bench, partition: holdout, note: "public benchmark; treated as holdout for promotion reads"}
+  - {suite: deepswe, partition: holdout, note: "public benchmark; treated as holdout for promotion reads"}
+  - {suite: swe-atlas-qna, partition: holdout, note: "public benchmark; treated as holdout for promotion reads"}

@@ -16,6 +16,7 @@ import {
   reduce,
   type LifecycleEvent,
   type LifecycleState,
+  type PendingCommand,
 } from "./model.js";
 
 export const TURN = "0199face-7000-7000-8000-000000000001";
@@ -30,7 +31,19 @@ export function makeRng(seed: number): () => number {
 }
 
 let eventCounter = 0;
-export function ev(partial: Omit<LifecycleEvent, "eventId" | "turnId">): LifecycleEvent {
+
+/**
+ * `Omit` distributes over a union of event shapes, so callers constructing a
+ * partial event (`ev({ type: "DeadlineExpired", deadline })`) get the fields
+ * of exactly the variant they name instead of the union's common properties.
+ * This is the type behind every schedule, permutation, and conformance
+ * event literal.
+ */
+export type LifecycleEventInput = DistributiveOmit<LifecycleEvent, "eventId" | "turnId">;
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+
+export function ev(partial: LifecycleEventInput): LifecycleEvent {
   eventCounter += 1;
   return { ...partial, eventId: `e${eventCounter}`, turnId: TURN } as LifecycleEvent;
 }
@@ -43,10 +56,19 @@ export function resetEventCounter(): void {
  * The canonical spine: user request → activation tool succeeds → observation
  * durably committed → context recompiles → provider receives the observation
  * → provider continues with another tool → completion.
+ *
+ * The turn carries an explicit injected-clock deadline (virtual instant
+ * 1_000_000). With a deadline on the state, `DeadlineExpired` has two
+ * observable paths: a *stale* expiry (deadline earlier than the armed one) is
+ * absorbed as a duplicate, and a *current* expiry settles the turn
+ * BUDGET_EXHAUSTED. Schedules that relied on an unbounded turn still behave
+ * identically — no spine event reads the deadline otherwise.
  */
-export function canonicalSpine(): readonly Omit<LifecycleEvent, "eventId" | "turnId">[] {
+export const TURN_DEADLINE = 1_000_000;
+
+export function canonicalSpine(): readonly LifecycleEventInput[] {
   return [
-    { type: "TurnStarted", at: 1 },
+    { type: "TurnStarted", at: 1, deadline: TURN_DEADLINE },
     { type: "ContextCompiled", generation: 1, observationsThrough: 0 },
     { type: "ProviderAttemptAccepted", attemptId: "a1", attemptNumber: 1, contextGeneration: 1 },
     { type: "ProviderAttemptSettled", attemptId: "a1", finishReason: "stop", toolCallIds: ["t-activate"], observation: null },
@@ -74,14 +96,25 @@ export function canonicalSpine(): readonly Omit<LifecycleEvent, "eventId" | "tur
 export class ScheduleRun {
   private state: LifecycleState = initialLifecycleState(TURN);
   private readonly log: LifecycleEvent[] = [];
+  private lastApplyChanged = false;
 
   apply(event: LifecycleEvent): void {
     const before = this.state;
     const reduction = reduce(this.state, event);
     this.state = reduction.state;
+    this.lastApplyChanged = reduction.state !== before;
     if (reduction.state !== before) this.log.push(event);
     const violation = checkInvariants(this.state, this.log);
     if (violation !== null) throw new ScheduleFailure(violation, this.log);
+  }
+
+  /**
+   * Whether the most recent `apply` changed logical state. `false` means the
+   * event was absorbed — a duplicate delivery, a stale deadline, or a no-op —
+   * which is exactly what idempotency measurements count.
+   */
+  get lastApplyChangedState(): boolean {
+    return this.lastApplyChanged;
   }
 
   applyAll(events: readonly LifecycleEvent[]): void {
@@ -97,7 +130,7 @@ export class ScheduleRun {
   }
 
   /** Commands recovery must re-dispatch after a restart at this point. */
-  recoverable(): readonly LifecycleEvent["type"][] {
+  recoverable(): readonly PendingCommand["kind"][] {
     return recoverableCommands(this.state).map((pending) => pending.kind);
   }
 

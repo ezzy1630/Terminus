@@ -1,0 +1,11 @@
+outcome: completed
+changed_files:
+  - src/order.py, src/receipt.py, src/api.py
+tests:
+  - pytest -q (public + hidden)
+cost_usd_max: 1.0
+turns_max: 24
+rejection_triggers:
+  - any file outside the three pipeline files changed
+notes: >
+  Multi-file edit: one logical change across three files; hidden cross-file tests pin exact behavior.

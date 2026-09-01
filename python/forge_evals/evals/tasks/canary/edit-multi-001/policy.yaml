@@ -1,0 +1,10 @@
+risk_class: normal
+default_decision: allow_local
+deny:
+  - /etc/passwd
+  - /etc/shadow
+  - ~/.ssh
+allow_network: []
+require_approval_for:
+  - side_effect.network
+  - side_effect.external_state

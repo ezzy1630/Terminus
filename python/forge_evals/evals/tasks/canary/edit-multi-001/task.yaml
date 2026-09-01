@@ -1,0 +1,31 @@
+suite: canary
+task: edit-multi-001
+cohort: canary
+title: Multi-file edit — thread a currency field through the order pipeline
+source_commit: fixture-canary-edit-multi-001-v1
+image_digest: local:python-3.12-pytest-8
+timeout: 600
+budget:
+  max_cost_usd: 1.0
+  max_wall_seconds: 600
+  max_tool_calls: 60
+  max_turns: 24
+allowed_network: []
+secrets: {}
+grader_version: 1.0.0
+rationale: >
+  Canary archetype: multi-file edit. One logical change spans three source
+  files; the deterministic grader runs public plus hidden tests and checks
+  that the old field-free signature is gone from every call site.
+acceptance_criteria:
+  - id: tests-pass
+    statement: the full suite passes including hidden cross-file tests
+    verification_hint: "command: python -m pytest -q"
+  - id: scope
+    statement: all three pipeline files participate and no unrelated file changed
+    verification_hint: "command: git status --porcelain"
+grader:
+  entrypoint: grader/run.py
+  protocol: json_stdio
+  timeout_seconds: 30
+risk_class: normal

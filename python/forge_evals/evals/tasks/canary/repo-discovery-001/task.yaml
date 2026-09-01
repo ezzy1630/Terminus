@@ -1,0 +1,33 @@
+suite: canary
+task: repo-discovery-001
+cohort: canary
+title: Repository discovery with incomplete initial context
+source_commit: fixture-canary-repo-discovery-001-v1
+image_digest: local:python-3.12-pytest-8
+timeout: 600
+budget:
+  max_cost_usd: 1.0
+  max_wall_seconds: 600
+  max_tool_calls: 60
+  max_turns: 24
+allowed_network: []
+secrets: {}
+grader_version: 1.0.0
+rationale: >
+  Canary archetype: repository discovery. The prompt names a symptom, not a
+  location; the repository has multiple plausible packages and the relevant
+  code is not reachable from the prompt. The agent must explore and report
+  structured facts. The grader checks exact ground-truth fields and enforces
+  read-only behavior. Initial context deliberately omits any file map.
+acceptance_criteria:
+  - id: discovery-facts
+    statement: DISCOVERY.json reports the module, entry symbol, retry count, and root cause
+    verification_hint: "file: DISCOVERY.json"
+  - id: read-only
+    statement: no tracked file is modified
+    verification_hint: "command: git status --porcelain"
+grader:
+  entrypoint: grader/run.py
+  protocol: json_stdio
+  timeout_seconds: 30
+risk_class: normal

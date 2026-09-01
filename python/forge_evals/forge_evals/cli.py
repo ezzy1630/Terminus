@@ -102,6 +102,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command", required=False)
     _add_run_cmd(sub)
+    _add_canary_cmd(sub)
+    _add_cohort_compare_cmd(sub)
     _add_compare_cmd(sub)
     _add_aggregate_cmd(sub)
     _add_dashboard_cmd(sub)
@@ -1168,6 +1170,294 @@ def _write_record(record: RunRecord, output_dir: Path, fmt: str, *, suffix: str 
             fh.write(record.to_jsonl_line() + "\n")
 
 
+# ──────────────────────────── canary (tier 2) ─────────────────────────────
+
+
+def _add_canary_cmd(sub: argparse._SubParsersAction[Any]) -> None:
+    """Add the paired baseline-vs-candidate canary command (causal tier 2)."""
+    p = sub.add_parser(
+        "canary",
+        help=(
+            "Paired baseline/candidate canary over five deterministic "
+            "archetype tasks. Live mode needs two control planes; "
+            "--fixture-mode exercises the comparison machinery offline."
+        ),
+    )
+    p.add_argument("--baseline-commit", default="git:HEAD", help="Exact baseline harness revision.")
+    p.add_argument(
+        "--candidate-commit", default="working-tree", help="Exact candidate harness revision."
+    )
+    p.add_argument("--seed", type=int, default=42, help="Seed shared by both arms.")
+    p.add_argument(
+        "--fixture-mode",
+        action="store_true",
+        help="Offline comparison of two deterministic fixture arms; never live evidence.",
+    )
+    p.add_argument("--provider", default="fake", help="Provider id for both arms.")
+    p.add_argument("--model", default="fake-1", help="Model id for both arms.")
+    p.add_argument(
+        "--effort",
+        choices=["low", "medium", "high", "xhigh", "max"],
+        default=None,
+        help="Reasoning effort, pinned identically on both arms.",
+    )
+    p.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Per-turn tool-call ceiling, identical on both arms.",
+    )
+    p.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="Per-turn token ceiling, identical on both arms.",
+    )
+    p.add_argument(
+        "--output-dir",
+        default="evals/results/canary",
+        help="Directory for the report and both arms' run records.",
+    )
+
+
+def _canary_live_pair_runner(
+    args: argparse.Namespace,
+    output_dir: Path,
+) -> Any:
+    """Bind the canary pair runner to two live control planes.
+
+    Baseline arm: ``TERMINUS_BASELINE_URL`` (+ ``TERMINUS_BASELINE_TOKEN``).
+    Candidate arm: ``TERMINUS_CANDIDATE_URL`` (+ ``TERMINUS_CANDIDATE_TOKEN``).
+    Each arm runs in its own materialized scratch workspace so the two arms
+    cannot observe or disturb each other.
+    """
+    from dataclasses import replace as dc_replace
+
+    from .runners.harness_runner import Budgets, ModelCapabilitySnapshot, RunRequest
+    from .runners.live_runner import (
+        LiveRunError,
+        materialize_task_workspace,
+        run_live_task,
+        workspace_diff,
+    )
+    from .runners.terminus_harness import TerminusHarness, TerminusHarnessConfig
+
+    baseline_url = os.environ.get("TERMINUS_BASELINE_URL")
+    candidate_url = os.environ.get("TERMINUS_CANDIDATE_URL")
+    if not baseline_url or not candidate_url:
+        raise LiveRunError(
+            "live canary requires TERMINUS_BASELINE_URL and TERMINUS_CANDIDATE_URL "
+            "(one control plane per harness revision); refusing to fabricate an arm"
+        )
+
+    harnesses = {
+        "baseline": TerminusHarness(
+            TerminusHarnessConfig(
+                base_url=baseline_url.rstrip("/"),
+                token=os.environ.get("TERMINUS_BASELINE_TOKEN"),
+            )
+        ),
+        "candidate": TerminusHarness(
+            TerminusHarnessConfig(
+                base_url=candidate_url.rstrip("/"),
+                token=os.environ.get("TERMINUS_CANDIDATE_TOKEN"),
+            )
+        ),
+    }
+    snapshot = ModelCapabilitySnapshot(
+        provider=args.provider,
+        model=args.model,
+        api_version=os.environ.get("TERMINUS_LIVE_API_VERSION", "2026-08"),
+        context_window=200_000,
+        max_output_tokens=8_192,
+        supports_tool_calls=True,
+        supports_streaming=True,
+        supports_cache=True,
+    )
+    budgets = Budgets()
+    if args.max_steps is not None:
+        budgets = dc_replace(budgets, max_tool_calls=int(args.max_steps))
+    if args.max_tokens is not None:
+        budgets = dc_replace(budgets, max_total_tokens=int(args.max_tokens))
+
+    def run_pair(spec: Any, seed: int) -> tuple[RunRecord, RunRecord]:
+        records: list[RunRecord] = []
+        for arm, harness in harnesses.items():
+            harness_commit = args.baseline_commit if arm == "baseline" else args.candidate_commit
+            request = RunRequest(
+                suite="canary",
+                task=spec.task_id,
+                task_dir=spec.package_dir,
+                harness_id="terminus-live",
+                harness_commit=harness_commit,
+                model_snapshot=snapshot,
+                random_seed=seed,
+                budgets=budgets,
+                reasoning_effort=args.effort,
+            )
+            workspace = output_dir / "workspaces" / arm / spec.task_id / str(seed)
+            materialized = materialize_task_workspace(spec.package_dir, workspace)
+            run_request = dc_replace(
+                request,
+                task_dir=materialized.workspace,
+                task_package_dir=spec.package_dir,
+            )
+            from .runners import TrajectoryRecorder
+
+            recorder = TrajectoryRecorder(run_id=f"canary-{arm}-{spec.task_id}-{seed}")
+            result, patch_payload = run_live_task(harness, run_request, recorder)
+            if not patch_payload.get("diff") and materialized.base_commit:
+                local = workspace_diff(materialized.workspace, materialized.base_commit)
+                if local:
+                    patch_payload = {**patch_payload, "diff": local, "diff_source": "local_git"}
+            record = build_live_run_record(
+                harness_result=result,
+                request=run_request,
+                patch_payload=patch_payload,
+                seed=seed,
+                task_package_dir=spec.package_dir,
+                workspace=materialized.workspace,
+                workspace_base_commit=materialized.base_commit,
+                grader_assets_dir=materialized.grader_assets_dir,
+                trajectory=recorder.to_dicts(),
+            )
+            record.artifacts.append({"kind": "task_workspace", **materialized.to_dict()})
+            records.append(record)
+        return records[0], records[1]
+
+    return run_pair
+
+
+def _canary_fixture_pair_runner(args: argparse.Namespace) -> Any:
+    """Offline pair runner over deterministic fixture records.
+
+    Proves the canary machinery (pairing, identity enforcement, diffs,
+    report) end to end without a provider. The records are fixture-only
+    evidence and say so.
+    """
+
+    from .evidence import EvidenceClass
+    from .runners.harness_runner import (
+        Budgets,
+        ModelCapabilitySnapshot,
+        RunRequest,
+        make_default_cost,
+    )
+    from .runners.harness_runner import build_evaluation_identity as _build_identity
+
+    snapshot = ModelCapabilitySnapshot(
+        provider=args.provider,
+        model=args.model,
+        api_version="v1",
+        context_window=128_000,
+        max_output_tokens=8_192,
+        supports_tool_calls=True,
+        supports_streaming=True,
+        supports_cache=True,
+        pricing={"input": 3.0, "output": 15.0},
+    )
+
+    def run_pair(spec: Any, seed: int) -> tuple[RunRecord, RunRecord]:
+        records: list[RunRecord] = []
+        for _arm, harness_commit in (
+            ("baseline", args.baseline_commit),
+            ("candidate", args.candidate_commit),
+        ):
+            request = RunRequest(
+                suite="canary",
+                task=spec.task_id,
+                task_dir=spec.package_dir,
+                harness_id="terminus-minimal",
+                harness_commit=harness_commit,
+                model_snapshot=snapshot,
+                random_seed=seed,
+                budgets=Budgets(),
+                reasoning_effort=args.effort,
+            )
+            record = RunRecord.new(
+                suite=request.suite,
+                task=request.task,
+                harness=request.harness_id,
+                harness_commit=request.harness_commit,
+                environment_digest="fixture:canary-env",
+                random_seed=request.random_seed,
+                model_capability_snapshot=snapshot.to_dict(),
+                budgets=request.budgets.to_dict(),
+                evaluation_identity=_build_identity(
+                    request, environment_digest="fixture:canary-env"
+                ),
+                evidence_class=EvidenceClass.FIXTURE_ONLY,
+            )
+            record.notes = "fixture canary arm; never live or release evidence"
+            record.cost = make_default_cost(
+                {"input_tokens": 1_000, "output_tokens": 500},
+                {"input": 3.0, "output": 15.0},
+            )
+            record.tokens_input_fresh = 1_000
+            record.tokens_output = 500
+            record.steps = 4
+            records.append(record)
+        return records[0], records[1]
+
+    return run_pair
+
+
+def _cmd_canary(args: argparse.Namespace) -> int:
+    """Execute the paired canary comparison."""
+    from .canary import CANARY_TASKS, run_canary
+
+    output_dir = Path(args.output_dir)
+    if args.fixture_mode:
+        pair_runner = _canary_fixture_pair_runner(args)
+    else:
+        try:
+            pair_runner = _canary_live_pair_runner(args, output_dir)
+        except Exception as error:
+            print(f"canary unavailable: {error}", file=sys.stderr)
+            return 2
+
+    report = run_canary(
+        pair_runner,
+        baseline_commit=args.baseline_commit,
+        candidate_commit=args.candidate_commit,
+        seed=args.seed,
+        output_dir=output_dir,
+        tasks=CANARY_TASKS,
+    )
+
+    # Persist both arms' raw records next to the report so the comparison is
+    # auditable cell by cell.
+    baseline_records: list[RunRecord] = []
+    candidate_records: list[RunRecord] = []
+    for row in report.tasks:
+        baseline_records.append(row["baseline"]["record"])
+        candidate_records.append(row["candidate"]["record"])
+    (output_dir / "baseline").mkdir(parents=True, exist_ok=True)
+    (output_dir / "candidate").mkdir(parents=True, exist_ok=True)
+    for record in baseline_records:
+        _write_record(record, output_dir / "baseline", "jsonl")
+    for record in candidate_records:
+        _write_record(record, output_dir / "candidate", "jsonl")
+
+    print(json.dumps(report.aggregate, indent=2, sort_keys=True))
+    if not report.eligible:
+        print(
+            f"CANARY: INELIGIBLE — {report.ineligible_reason or '; '.join(report.identity_issues)}",
+            file=sys.stderr,
+        )
+        # Fixture arms are structurally ineligible (their identities carry
+        # missing-field markers): the fixture run proves the machinery, not
+        # promotion eligibility, so it does not fail on expected ineligibility.
+        return 0 if args.fixture_mode else 1
+    print(
+        f"CANARY: baseline resolved {report.aggregate['baseline_resolved']}/"
+        f"{report.aggregate['tasks']}, candidate resolved "
+        f"{report.aggregate['candidate_resolved']}/{report.aggregate['tasks']}"
+    )
+    print(f"report: {output_dir / 'canary-report.json'}")
+    return 0
+
+
 def _safe_record_filename_component(run_id: str) -> str:
     """Return a collision-resistant filename component for an opaque run id."""
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,180}", run_id):
@@ -1310,6 +1600,73 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     return 0  # Exit 0; the gate verdict is in the JSON.
 
 
+def _add_cohort_compare_cmd(sub: argparse._SubParsersAction[Any]) -> None:
+    """Add the scheduled cohort comparison command (causal tier 3)."""
+    p = sub.add_parser(
+        "cohort-compare",
+        help="Baseline-vs-candidate causal comparison over a scheduled held-out cohort.",
+    )
+    p.add_argument("--baseline", required=True, help="Baseline runs dir/JSONL/Parquet.")
+    p.add_argument("--candidate", required=True, help="Candidate runs dir/JSONL/Parquet.")
+    p.add_argument(
+        "--output",
+        default="evals/results/cohort",
+        help="Directory for cohort-comparison.json and the markdown summary.",
+    )
+    p.add_argument(
+        "--confidence",
+        type=float,
+        default=0.95,
+        help="Confidence level for bootstrap intervals.",
+    )
+    p.add_argument(
+        "--partition-registry",
+        default=None,
+        help="Explicit holdout partition registry path (default: evals/holdout-partitions.yaml).",
+    )
+
+
+def _cmd_cohort_compare(args: argparse.Namespace) -> int:
+    """Execute the causal cohort comparison."""
+    from .cohort_compare import compare_cohort_runs
+    from .holdout import load_partition_registry
+
+    baseline = _load_runs(args.baseline)
+    candidate = _load_runs(args.candidate)
+    if baseline.n == 0:
+        print(f"error: no baseline run records in {args.baseline}", file=sys.stderr)
+        return 2
+    if candidate.n == 0:
+        print(f"error: no candidate run records in {args.candidate}", file=sys.stderr)
+        return 2
+    registry = load_partition_registry(args.partition_registry)
+    comparison = compare_cohort_runs(
+        baseline.records,
+        candidate.records,
+        registry=registry,
+        output_dir=args.output,
+        confidence=args.confidence,
+    )
+    print("\n".join(comparison.summary_lines()))
+    if not comparison.eligible:
+        print(
+            "COHORT COMPARISON: NOT ELIGIBLE — " + "; ".join(comparison.issues),
+            file=sys.stderr,
+        )
+        return 1
+    failed_gates = [
+        name for name, gate in comparison.reliability_gates.items() if gate["status"] == "fail"
+    ]
+    if failed_gates:
+        print(
+            f"COHORT COMPARISON: RELIABILITY GATES FAILED — {', '.join(failed_gates)}",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"report: {args.output}/cohort-comparison.json")
+    return 0
+
+
 def _load_evaluation(path: str) -> Evaluation:
     """Load an :class:`Evaluation` from a JSON file."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -1413,6 +1770,8 @@ def _dispatch(args: argparse.Namespace) -> int:
     """Dispatch to the right subcommand handler."""
     handlers = {
         "run": _cmd_run,
+        "canary": _cmd_canary,
+        "cohort-compare": _cmd_cohort_compare,
         "compare": _cmd_compare,
         "bench-check": _cmd_bench_check,
         "aa-coding-index": _cmd_aa_coding_index,
