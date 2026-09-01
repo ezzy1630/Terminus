@@ -603,8 +603,8 @@ export class FakeKernel {
   async ingest(bytes: Uint8Array, metadata: Record<string, unknown> = {}): Promise<ContentHash> {
     // Simple FNV-1a hash; not real sha256. Used only for tests.
     let h1 = 0x811c9dc5;
-    for (let i = 0; i < bytes.length; i++) {
-      h1 = Math.imul(h1 ^ bytes[i]!, 0x01000193) >>> 0;
+    for (const byte of bytes) {
+      h1 = Math.imul(h1 ^ byte, 0x01000193) >>> 0;
     }
     const hex = h1.toString(16).padStart(8, "0").repeat(8);
     const hash = asContentHash(`sha256:${hex}`);

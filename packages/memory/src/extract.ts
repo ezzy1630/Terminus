@@ -281,12 +281,12 @@ export function queueItemToClaim(
 
 function isExtractable(task: Task): boolean {
   // Sufficiently complete: COMPLETE phase, or COMPLETED/FAILED_VERIFICATION with a contract.
-  if (task.phase === "COMPLETE") return true;
-  if (task.status === "COMPLETED") return true;
-  // Explicit user-driven extraction may still run after failed verification
-  // when evidence exists — but never during early phases.
-  if (task.phase === "REVIEW" || task.phase === "VERIFY") return true;
-  return false;
+  return (
+    task.phase === "COMPLETE" ||
+    task.status === "COMPLETED" ||
+    task.phase === "REVIEW" ||
+    task.phase === "VERIFY"
+  );
 }
 
 function resolveScope(input: ExtractionInput): MemoryScope {

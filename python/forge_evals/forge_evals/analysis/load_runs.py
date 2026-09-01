@@ -47,7 +47,7 @@ class RunCatalog:
     """
 
     records: list[RunRecord] = field(default_factory=list)
-    df: pl.DataFrame = field(default_factory=lambda: pl.DataFrame())
+    df: pl.DataFrame = field(default_factory=pl.DataFrame)
 
     @property
     def n(self) -> int:

@@ -105,6 +105,7 @@ export interface EngineDependencies {
     readonly call: ProviderToolCallChunk;
     readonly attemptNumber: number;
     readonly attemptId: string;
+    // skipcq: JS-0333
   }) => Promise<EngineToolSettlement | void>;
   /** Move the durable turn back to context compilation after all calls settle. */
   readonly afterToolsSettled?: () => Promise<void>;

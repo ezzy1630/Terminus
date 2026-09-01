@@ -1141,7 +1141,7 @@ class TerminusHarness:
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = response.read(max_bytes + 1)
                 media_type = response.headers.get("content-type", "application/octet-stream")
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as error:
+        except (urllib.error.URLError, TimeoutError) as error:
             issue = f"{purpose} could not be fetched for review: {error}"
             return {**dict(artifact), "status": "fetch_failed", "size_bytes": 0}, issue
         if len(payload) > max_bytes:

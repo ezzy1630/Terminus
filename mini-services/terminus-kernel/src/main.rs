@@ -35,6 +35,13 @@ use crate::state::{AppState, EXITED_PROCESS_RETENTION, PROCESS_JANITOR_INTERVAL}
 /// override keeps deterministic local harnesses isolated from other runs.
 const DEFAULT_PORT: u16 = 3040;
 
+const ENV_GRPC_SOCKET: &str = "TERMINUS_KERNEL_GRPC_SOCKET";
+const ENV_REQUIRE_UDS: &str = "TERMINUS_KERNEL_REQUIRE_UDS";
+const ENV_MTLS: &str = "TERMINUS_KERNEL_MTLS";
+const ENV_HTTP_BOOTSTRAP: &str = "TERMINUS_KERNEL_HTTP_BOOTSTRAP";
+const ENV_DEV: &str = "TERMINUS_DEV";
+const ENV_MTLS_ADDR: &str = "TERMINUS_KERNEL_MTLS_ADDR";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(target_os = "linux")]
@@ -80,22 +87,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = build_router(state.clone());
     let desktop_parent_pid = desktop_parent_pid_from_env()?;
 
-    let grpc_socket = std::env::var("TERMINUS_KERNEL_GRPC_SOCKET")
+    let grpc_socket = std::env::var(ENV_GRPC_SOCKET)
         .ok()
         .filter(|value| !value.is_empty());
-    let require_uds = std::env::var("TERMINUS_KERNEL_REQUIRE_UDS")
-        .map(|value| value == "1")
-        .unwrap_or(false);
-    let require_mtls = std::env::var("TERMINUS_KERNEL_MTLS")
-        .map(|value| value == "1")
-        .unwrap_or(false);
+    let require_uds = std::env::var(ENV_REQUIRE_UDS).is_ok_and(|value| value == "1");
+    let require_mtls = std::env::var(ENV_MTLS).is_ok_and(|value| value == "1");
 
-    let allow_http_bootstrap = std::env::var("TERMINUS_KERNEL_HTTP_BOOTSTRAP")
-        .map(|value| value == "1")
-        .unwrap_or(false)
-        && std::env::var("TERMINUS_DEV")
-            .map(|value| value == "1")
-            .unwrap_or(false);
+    let allow_http_bootstrap = std::env::var(ENV_HTTP_BOOTSTRAP).is_ok_and(|value| value == "1")
+        && std::env::var(ENV_DEV).is_ok_and(|value| value == "1");
     if !require_uds && !require_mtls && !allow_http_bootstrap {
         return Err(
             "secure kernel startup requires TERMINUS_KERNEL_REQUIRE_UDS=1 or TERMINUS_KERNEL_MTLS=1; HTTP bootstrap is development-only"
@@ -105,8 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     if require_mtls {
         let material = mtls::mtls_material_from_env()?;
-        let addr = std::env::var("TERMINUS_KERNEL_MTLS_ADDR")
-            .unwrap_or_else(|_| "127.0.0.1:7443".to_string());
+        let addr = std::env::var(ENV_MTLS_ADDR).unwrap_or_else(|_| "127.0.0.1:7443".to_string());
         let bind_addr: std::net::SocketAddr = addr
             .parse()
             .map_err(|e| format!("invalid TERMINUS_KERNEL_MTLS_ADDR: {e}"))?;

@@ -9,86 +9,112 @@
  */
 import type { NodeDraft, EdgeDraft, TaintFlowAnalysis } from "./types.js";
 
-const SENSITIVE_EFFECT_CLASSES = [
+// skipcq: JS-0067
+const SENSITIVE_EFFECT_CLASSES = new Set([
   "reversible_external",
   "compensable_external",
   "irreversible",
   "unknown",
-];
+]);
 
+// skipcq: JS-0067
+const UNTRUSTED_PATTERNS = ["untrusted", "web_fetch", "external_pull", "user_input"];
+
+// skipcq: JS-0067
+function isNodeUntrustedSource(n: NodeDraft): boolean {
+  const text = `${n.title ?? ""} ${n.description ?? ""} ${n.id}`.toLowerCase();
+  const hasUntrustedInput = n.trustInputs?.some((t) => {
+    const lvl = t.minTrustLevel.toLowerCase();
+    return lvl.includes("untrusted") || lvl.includes("web") || lvl.includes("repo");
+  });
+  return Boolean(hasUntrustedInput || UNTRUSTED_PATTERNS.some((p) => text.includes(p)));
+}
+
+// skipcq: JS-0067
+function findInitialTaintSources(nodes: readonly NodeDraft[]): Set<string> {
+  const sources = new Set<string>();
+  for (const n of nodes) {
+    if (isNodeUntrustedSource(n)) sources.add(n.id);
+  }
+  return sources;
+}
+
+// skipcq: JS-0067
+function isNodeSanitized(node: NodeDraft | undefined): boolean {
+  return node?.kind === "verifier" || Boolean(node?.taintPolicy?.sanitizeWith);
+}
+
+// skipcq: JS-0067
+function expandTaintedNeighbors(
+  currentId: string,
+  tainted: Set<string>,
+  adj: Map<string, string[]>,
+  queue: string[],
+): void {
+  for (const neighborId of adj.get(currentId) ?? []) {
+    if (!tainted.has(neighborId)) {
+      tainted.add(neighborId);
+      queue.push(neighborId);
+    }
+  }
+}
+
+// skipcq: JS-0067
+function propagateTaint(
+  tainted: Set<string>,
+  nodeMap: Map<string, NodeDraft>,
+  adj: Map<string, string[]>,
+): void {
+  const queue = Array.from(tainted);
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
+    if (isNodeSanitized(nodeMap.get(currentId))) continue;
+    expandTaintedNeighbors(currentId, tainted, adj, queue);
+  }
+}
+
+// skipcq: JS-0067
+function isNodeSensitiveSink(node: NodeDraft): boolean {
+  if (node.kind === "effect" || node.kind === "connector") return true;
+  if (typeof node.effectClass === "string" && SENSITIVE_EFFECT_CLASSES.has(node.effectClass)) return true;
+  return node.requiredCapabilities?.includes("secrets") === true;
+}
+
+// skipcq: JS-0067
+function isUnsanitizedSink(node: NodeDraft): boolean {
+  return isNodeSensitiveSink(node) && !node.taintPolicy?.allowTaintedInputs && !node.taintPolicy?.sanitizeWith;
+}
+
+// skipcq: JS-0067
+function findTaintViolations(taintedNodes: Set<string>, nodeMap: Map<string, NodeDraft>): string[] {
+  const violations: string[] = [];
+  for (const taintedId of taintedNodes) {
+    const node = nodeMap.get(taintedId);
+    if (node && isUnsanitizedSink(node)) {
+      violations.push(
+        `Node "${node.id}" (${node.kind}) is a sensitive sink receiving unsanitized tainted data from an untrusted source.`,
+      );
+    }
+  }
+  return violations;
+}
+
+// skipcq: JS-0067
 export function analyzeTaintFlow(
   nodes: readonly NodeDraft[],
   edges: readonly EdgeDraft[],
 ): TaintFlowAnalysis {
-  const nodeMap = new Map<string, NodeDraft>();
-  for (const n of nodes) nodeMap.set(n.id, n);
-
-  const adj = new Map<string, string[]>();
-  for (const n of nodes) adj.set(n.id, []);
+  const nodeMap = new Map<string, NodeDraft>(nodes.map((n) => [n.id, n]));
+  const adj = new Map<string, string[]>(nodes.map((n) => [n.id, []]));
   for (const e of edges) {
     if (nodeMap.has(e.sourceNodeId) && nodeMap.has(e.targetNodeId)) {
       adj.get(e.sourceNodeId)!.push(e.targetNodeId);
     }
   }
 
-  // 1. Identify initial Taint Sources
-  const taintedNodes = new Set<string>();
-  for (const n of nodes) {
-    const text = `${n.title ?? ""} ${n.description ?? ""} ${n.id}`.toLowerCase();
-    const hasUntrustedInput = n.trustInputs?.some(
-      (t) =>
-        t.minTrustLevel.toLowerCase().includes("untrusted") ||
-        t.minTrustLevel.toLowerCase().includes("web") ||
-        t.minTrustLevel.toLowerCase().includes("repo"),
-    );
-    const mentionsUntrusted =
-      text.includes("untrusted") ||
-      text.includes("web_fetch") ||
-      text.includes("external_pull") ||
-      text.includes("user_input");
-
-    if (hasUntrustedInput || mentionsUntrusted) {
-      taintedNodes.add(n.id);
-    }
-  }
-
-  // 2. Propagate Taint forward through the graph unless sanitized by a verifier
-  const queue = Array.from(taintedNodes);
-  while (queue.length > 0) {
-    const currentId = queue.shift()!;
-    const currentNode = nodeMap.get(currentId);
-
-    // If current node is a verifier or explicitly sanitizes, it clears taint
-    if (currentNode?.kind === "verifier" || currentNode?.taintPolicy?.sanitizeWith) {
-      continue;
-    }
-
-    for (const neighborId of adj.get(currentId) ?? []) {
-      if (!taintedNodes.has(neighborId)) {
-        taintedNodes.add(neighborId);
-        queue.push(neighborId);
-      }
-    }
-  }
-
-  // 3. Check for Sensitive Sinks that receive Taint without sanitization
-  const violations: string[] = [];
-  for (const taintedId of taintedNodes) {
-    const node = nodeMap.get(taintedId);
-    if (!node) continue;
-
-    const isSensitiveSink =
-      node.kind === "effect" ||
-      node.kind === "connector" ||
-      (node.effectClass && SENSITIVE_EFFECT_CLASSES.includes(node.effectClass)) ||
-      (node.requiredCapabilities && node.requiredCapabilities.includes("secrets"));
-
-    if (isSensitiveSink && !node.taintPolicy?.allowTaintedInputs && !node.taintPolicy?.sanitizeWith) {
-      violations.push(
-        `Node "${node.id}" (${node.kind}) is a sensitive sink receiving unsanitized tainted data from an untrusted source.`,
-      );
-    }
-  }
+  const taintedNodes = findInitialTaintSources(nodes);
+  propagateTaint(taintedNodes, nodeMap, adj);
+  const violations = findTaintViolations(taintedNodes, nodeMap);
 
   return {
     safe: violations.length === 0,

@@ -89,23 +89,14 @@ export function sanitizeMcpEnvironment(
   return cleanEnv;
 }
 
+const PRIVATE_IP_PATTERN = /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)/;
+const LOCAL_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+
+// skipcq: JS-0067
 export function isPrivateIp(ip: string): boolean {
   const cleaned = ip.replace(/^::ffff:/, "");
-  if (cleaned === "127.0.0.1" || cleaned === "::1" || cleaned === "localhost") return true;
-
-  const parts = cleaned.split(".").map((p) => parseInt(p, 10));
-  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p))) return false;
-
-  const p0 = parts[0];
-  const p1 = parts[1];
-  if (p0 === undefined || p1 === undefined) return false;
-
-  if (p0 === 127) return true;
-  if (p0 === 10) return true;
-  if (p0 === 172 && p1 >= 16 && p1 <= 31) return true;
-  if (p0 === 192 && p1 === 168) return true;
-  if (p0 === 169 && p1 === 254) return true;
-  return false;
+  if (LOCAL_HOSTS.has(cleaned)) return true;
+  return PRIVATE_IP_PATTERN.test(cleaned);
 }
 
 export interface McpHttpPort {

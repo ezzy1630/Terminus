@@ -35,7 +35,6 @@ import { computeContentHash } from "@terminus/context-ir";
 import type { TokenCount } from "@terminus/domain";
 
 export { ReasoningReplayLedger };
-export { CodexTurnState, chatGptCodexRequestHeaders } from "./codex_turn_state.js";
 
 // ────────────────────────── OpenAI wire shapes ───────────────────────────────
 

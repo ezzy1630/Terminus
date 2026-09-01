@@ -101,27 +101,30 @@ const TARGETS: CodegenTarget[] = [
   },
 ];
 
-function getChangedFiles(): string[] {
+// Parses one `git status --porcelain` line ("XY path" or "XY orig -> dest")
+// into the tracked path, or null for blank lines.
+const parseStatusLine = (line: string): string | null => {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) return null;
+  const match = trimmed.match(/^[A-Z?]{1,2}\s+(?:.*?->\s+)?(.+)$/);
+  return match?.[1]?.trim() ?? null;
+};
+
+const getChangedFiles = (): string[] => {
   const diff = spawnSync("git", ["status", "--porcelain", "-uall"], {
     cwd: ROOT,
     encoding: "utf8",
   });
-  if (diff.status !== 0 || !diff.stdout) {
+  if (diff.status !== 0 || diff.stdout === null || diff.stdout.length === 0) {
     return [];
   }
-  const lines = diff.stdout.split("\n");
-  const files: string[] = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    // Format: 'XY path' or 'XY orig -> dest'
-    const match = trimmed.match(/^[A-Z?]{1,2}\s+(?:.*?->\s+)?(.+)$/);
-    if (match && match[1]) {
-      files.push(match[1].trim());
-    }
-  }
-  return files;
-}
+  return diff.stdout
+    .split("\n")
+    .flatMap((line) => {
+      const path = parseStatusLine(line);
+      return path === null ? [] : [path];
+    });
+};
 
 function runCommand(cmd: string[]): boolean {
   console.log(`[codegen-changed] running: ${cmd.join(" ")}`);

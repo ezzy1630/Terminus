@@ -2519,7 +2519,7 @@ function readRawBody(req: IncomingMessage): Promise<Buffer> {
 function jsonBody(req: IncomingMessage): Promise<unknown> {
   return readRawBody(req).then((buf) => {
     if (buf.length === 0) return {};
-    try { return JSON.parse(buf.toString("utf8")); } catch (e) { throw e; }
+    return JSON.parse(buf.toString("utf8"));
   });
 }
 

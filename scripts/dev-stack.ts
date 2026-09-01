@@ -130,6 +130,7 @@ async function waitForSocket(path: string): Promise<void> {
 }
 
 const children: ChildProcess[] = [];
+let shuttingDown = false;
 
 function spawnService(
   name: string,
@@ -157,8 +158,6 @@ function spawnService(
   children.push(child);
   return child;
 }
-
-let shuttingDown = false;
 
 async function shutdown(code: number): Promise<never> {
   shuttingDown = true;

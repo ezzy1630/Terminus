@@ -342,8 +342,7 @@ impl ApprovalStore {
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Compute a stable SHA-256 hex of the canonical operation tuple

@@ -194,8 +194,7 @@ const platforms: Record<string, PlatformEntry> = {};
 const linuxEvidence = loadLinuxEvidence();
 const expectedVersion = process.env.TERMINUS_RELEASE_VERSION;
 if (
-  linuxEvidence &&
-  linuxEvidence.commit &&
+  linuxEvidence?.commit &&
   (commit === "unknown" || linuxEvidence.commit === commit) &&
   (expectedVersion === undefined ||
     linuxEvidence.releaseVersion === expectedVersion)

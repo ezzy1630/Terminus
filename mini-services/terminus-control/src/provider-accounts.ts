@@ -156,6 +156,7 @@ function admittedProtocol(value: string): GatewayProtocol {
   return value === "responses" || value === "messages" ? value : "chat_completions";
 }
 
+// skipcq: JS-0067
 export function parseProviderAccountMetadata(json: string): ProviderAccountMetadata {
   let parsed: unknown;
   try {
@@ -173,6 +174,7 @@ export function parseProviderAccountMetadata(json: string): ProviderAccountMetad
       : {}),
     ...(typeof parsed.email === "string"
       && parsed.email.length <= 320
+      // skipcq: JS-0004
       && !/[\u0000-\u001f\u007f]/.test(parsed.email)
       ? { email: parsed.email }
       : {}),

@@ -194,10 +194,10 @@ pub async fn cors_layer(req: Request, next: Next) -> Response {
         .get(axum::http::header::ORIGIN)
         .and_then(|o| o.to_str().ok())
         .map(ToString::to_string);
+    const ENV_CORS_ORIGIN: &str = "TERMINUS_KERNEL_CORS_ORIGIN";
     let allowed_origin = origin_header.filter(|origin| {
-        std::env::var("TERMINUS_KERNEL_CORS_ORIGIN")
-            .map(|allow| !allow.is_empty() && allow.split(',').any(|a| a.trim() == *origin))
-            .unwrap_or(false)
+        std::env::var(ENV_CORS_ORIGIN)
+            .is_ok_and(|allow| !allow.is_empty() && allow.split(',').any(|a| a.trim() == *origin))
     });
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();

@@ -545,20 +545,25 @@ function defineConfigProperty(target: Record<string, unknown>, key: string, valu
  *  - a strictly smaller numeric value (for limits),
  *  - a shorter array (for deny-lists).
  */
+// Deny->allow, deny->optional, and required->optional all relax a constraint.
+const WEAKEN_TRANSITIONS = new Set(["deny->allow", "deny->optional", "required->optional"]);
+
+// skipcq: JS-0067
+function isWeakenedNumber(prev: unknown, next: unknown): boolean {
+  return typeof prev === "number" && typeof next === "number" && next < prev;
+}
+
+// skipcq: JS-0067
+function isWeakenedArray(prev: unknown, next: unknown): boolean {
+  return Array.isArray(prev) && Array.isArray(next) && next.length < prev.length;
+}
+
+// skipcq: JS-0067
 function isWeakened(prev: unknown, next: unknown): boolean {
-  if (prev === undefined || next === undefined) return false;
   if (typeof prev === "string" && typeof next === "string") {
-    if (prev === "deny" && (next === "allow" || next === "optional")) return true;
-    if (prev === "required" && next === "optional") return true;
-    return false;
+    return WEAKEN_TRANSITIONS.has(`${prev}->${next}`);
   }
-  if (typeof prev === "number" && typeof next === "number") {
-    return next < prev;
-  }
-  if (Array.isArray(prev) && Array.isArray(next)) {
-    return next.length < prev.length;
-  }
-  return false;
+  return isWeakenedNumber(prev, next) || isWeakenedArray(prev, next);
 }
 
 function structuredCloneSafe<T>(v: T): T {

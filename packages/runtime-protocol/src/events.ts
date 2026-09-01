@@ -773,7 +773,7 @@ export function isEventType<T extends EventType>(
 }
 
 /** Built-in actor for system-emitted events. */
-export function systemActor(id: string = "system"): SemanticEventActor {
+export function systemActor(id = "system"): SemanticEventActor {
   return { kind: "system", id };
 }
 

@@ -25,6 +25,7 @@ export interface A2ADelegationResponse {
   readonly reason: string | null;
 }
 
+// skipcq: JS-0327
 export class A2ABoundaryAdapter {
   /**
    * Converts an A2A delegation request into a canonical TaskContractV2.

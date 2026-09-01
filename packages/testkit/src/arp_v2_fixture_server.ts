@@ -311,11 +311,11 @@ export class ArpV2FixtureServer {
       startSeq = decoded.sequence;
     }
 
-    const filtered = this.events.filter((e) => {
-      if (e.aggregateSequence <= startSeq) return false;
-      if (taskId && payloadTaskId(e.payload) !== null && payloadTaskId(e.payload) !== taskId) return false;
-      return true;
-    });
+    const filtered = this.events.filter(
+      (e) =>
+        e.aggregateSequence > startSeq &&
+        (!taskId || payloadTaskId(e.payload) === null || payloadTaskId(e.payload) === taskId),
+    );
 
     const lastEvent = filtered[filtered.length - 1] ?? this.events[this.events.length - 1];
     const nextCursor = lastEvent

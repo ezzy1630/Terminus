@@ -108,13 +108,18 @@ async function boundedCleanup(operation: Promise<unknown>): Promise<boolean> {
   return completed;
 }
 
-async function readReplayEvents(
+// The SSE replay loop is one timing-sensitive block: the bounded-cleanup
+// fences and the live-mutation settle window only make sense together, and
+// splitting them would trade a measured wait for indirection. The complexity
+// is accepted here on purpose.
+// skipcq: JS-R1005
+const readReplayEvents = async (
   cursor: string,
   filterTaskId: string,
   expectedCount: number,
   triggerLiveEvent: (signal: AbortSignal) => Promise<unknown>,
   cursorTransport: "query" | "header" = "query",
-): Promise<readonly SseEvent[]> {
+): Promise<readonly SseEvent[]> => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
@@ -173,6 +178,7 @@ async function readReplayEvents(
       }
     };
     try {
+      // skipcq: JS-0092
       while (!reachedExpectedCount) {
         const next = await reader.read();
         if (next.done) break;
@@ -222,7 +228,7 @@ async function readReplayEvents(
     clearTimeout(timeout);
     controller.abort();
   }
-}
+};
 
 function v2Contract(input: {
   readonly version: number;

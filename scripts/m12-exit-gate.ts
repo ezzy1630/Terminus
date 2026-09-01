@@ -126,7 +126,7 @@ export function sourceIdentityCheck(
 
 function currentCommit(): string {
   const fromEnv = process.env.TERMINUS_RELEASE_COMMIT ?? process.env.GITHUB_SHA;
-  if (fromEnv && fromEnv.trim()) return fromEnv.trim();
+  if (fromEnv?.trim()) return fromEnv.trim();
   const result = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: ROOT });
   const fromGit = result.stdout.toString().trim();
   return fromGit || "unknown";

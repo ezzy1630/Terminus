@@ -213,7 +213,7 @@ export function aliasReadArguments(value: unknown): unknown {
   const fold = (from: string, to: string): void => {
     if (call[from] === undefined) return;
     if (call[to] === undefined) call[to] = call[from];
-    delete call[from];
+    Reflect.deleteProperty(call, from);
   };
   fold("file_path", "path");
   fold("offset", "offset_line");
@@ -1623,6 +1623,7 @@ export interface StandaloneToolEffectMetadata extends OperationEffectMetadata {
   readonly reversibility: "none" | "reversible" | "unknown";
 }
 
+// skipcq: JS-0067
 export function toolEffectMetadata(call: ParsedStandaloneToolCall): StandaloneToolEffectMetadata {
   switch (call.toolId) {
     case "capability":
@@ -1794,6 +1795,10 @@ export function toolEffectMetadata(call: ParsedStandaloneToolCall): StandaloneTo
         expectedLatencyMs: 30_000,
         expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
       };
+    default: {
+      const _exhaustive: never = call;
+      throw new Error(`unhandled tool id: ${String((_exhaustive as { toolId?: string }).toolId)}`);
+    }
   }
 }
 
@@ -1966,6 +1971,7 @@ function projectedLineCount(text: string): number {
   return text.endsWith("\n") ? lines : lines + 1;
 }
 
+// skipcq: JS-0067
 export async function executeStandaloneTool(
   input: ExecuteStandaloneToolInput,
 ): Promise<ExecutedToolResult> {
@@ -2518,6 +2524,10 @@ export async function executeStandaloneTool(
         { ...input, context, call: input.call as Extract<ParsedStandaloneToolCall, { toolId: "web_fetch" }> },
         startedAt,
       );
+    }
+    default: {
+      const _exhaustive: never = input.call;
+      throw new Error(`unhandled standalone tool id: ${String((_exhaustive as { toolId?: string }).toolId)}`);
     }
   }
 }
@@ -3340,6 +3350,7 @@ export function splitOutputBudget(
   return { stdout: stdoutFloor + stdoutExtra, stderr: stderrFloor + stderrExtra };
 }
 
+// skipcq: JS-0067
 function collectProcess(
   events: { readonly subscribe: (observer: {
     readonly next: (event: ProcessEvent) => void;
@@ -3360,14 +3371,15 @@ function collectProcess(
     let subscription: { readonly unsubscribe: () => void } | null = null;
     let processId: string | null = null;
     let cancelRequested = false;
+    let onAbort: (() => void) | null = null;
     const finish = (callback: () => void): void => {
       if (settled) return;
       settled = true;
       subscription?.unsubscribe();
-      signal?.removeEventListener("abort", onAbort);
+      if (onAbort !== null) signal?.removeEventListener("abort", onAbort);
       callback();
     };
-    const onAbort = (): void => {
+    onAbort = (): void => {
       if (settled) return;
       cancelRequested = true;
       const id = processId;

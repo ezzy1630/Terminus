@@ -3,6 +3,7 @@ interface NormalizedRecallText {
   readonly sourceIndexByCodeUnit: readonly number[];
 }
 
+// skipcq: JS-0004
 const ASCII_TEXT = /^[\x00-\x7f]*$/;
 
 function escapeRegex(value: string): string {

@@ -428,8 +428,7 @@ fn active_developer_dir() -> Option<&'static Path> {
                     .and_then(|ext| ext.to_str())
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
             })
-            .map(Path::to_path_buf)
-            .unwrap_or(raw);
+            .map_or_else(|| raw.clone(), Path::to_path_buf);
         Some(std::fs::canonicalize(&bundle).unwrap_or(bundle))
     })
     .as_deref()
@@ -715,9 +714,7 @@ fn generate_seatbelt_profile_with_temp_dir(
     // itself — an e2e fixture registers the data dir AS the workspace, and
     // denying it there would make the whole workspace unreachable.
     if let Some(data_dir) = kernel_state_dir() {
-        let contains_workspace = workspace_root
-            .map(|root| root.starts_with(&data_dir))
-            .unwrap_or(false);
+        let contains_workspace = workspace_root.is_some_and(|root| root.starts_with(&data_dir));
         if !contains_workspace {
             push_rule(
                 &mut sb,
@@ -1003,8 +1000,7 @@ fn which_sandbox_exec() -> Option<PathBuf> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .is_ok_and(|s| s.success());
         if ok {
             return Some(candidate);
         }

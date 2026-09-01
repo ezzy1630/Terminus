@@ -52,7 +52,14 @@ describe("R6 provider retry classification", () => {
 
   test("backoff grows exponentially with jitter inside half-to-full band", () => {
     let call = 0;
-    const delay = backoffDelayMs(3, { baseDelayMs: 100, maxDelayMs: 10_000, jitter: () => (call += 1, 0.5) });
+    const delay = backoffDelayMs(3, {
+      baseDelayMs: 100,
+      maxDelayMs: 10_000,
+      jitter: () => {
+        call += 1;
+        return 0.5;
+      },
+    });
     // attempt 3 → exponential 400ms; jitter 0.5 → midpoint 300ms.
     expect(delay).toBeGreaterThanOrEqual(200);
     expect(delay).toBeLessThanOrEqual(400);

@@ -15,6 +15,7 @@ export interface DecodedCursor {
   readonly eventId: Uuid7;
 }
 
+// skipcq: JS-0327
 export class CursorCodec {
   private static readonly PREFIX = "c2_";
 

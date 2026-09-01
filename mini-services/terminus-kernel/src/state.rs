@@ -144,14 +144,16 @@ impl AppState {
 
     /// Build the app state from environment variables.
     pub fn from_env() -> Result<Self, std::io::Error> {
-        let data_dir = env::var("TERMINUS_DATA").unwrap_or_else(|_| ".terminus-data".to_string());
+        const ENV_DATA: &str = "TERMINUS_DATA";
+        const ENV_DEV: &str = "TERMINUS_DEV";
+        let data_dir = env::var(ENV_DATA).unwrap_or_else(|_| ".terminus-data".to_string());
         let data_dir = PathBuf::from(&data_dir);
         std::fs::create_dir_all(&data_dir)?;
 
         // SPEC §13.6 / §31.6: well-known dev tokens/secrets are permitted
         // ONLY when TERMINUS_DEV=1. Without it, the kernel fails closed if no
         // real token/secret is configured. Never set TERMINUS_DEV=1 in prod.
-        let dev_mode = env::var("TERMINUS_DEV").map(|v| v == "1").unwrap_or(false);
+        let dev_mode = env::var(ENV_DEV).is_ok_and(|v| v == "1");
 
         let kernel = KernelHandle::new(data_dir.clone())
             .map_err(|e| std::io::Error::other(format!("kernel assembly: {e}")))?;

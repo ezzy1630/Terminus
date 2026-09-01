@@ -24,6 +24,7 @@ const t3codeConfig = {
   args: [ACP_SCRIPT],
   env: {
     TERMINUS_GATEWAY: "http://127.0.0.1:81",
+    // skipcq: JS-0038
     TERMINUS_TOKEN: "${TERMINUS_TOKEN}",
   },
   features: {

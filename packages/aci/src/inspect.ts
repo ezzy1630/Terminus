@@ -130,6 +130,21 @@ export interface InspectProvider {
 
 // ────────────────────────── Failure Parser Helper ─────────────────────────────
 
+const ERROR_LINE_PATTERN = /(FAIL|AssertionError|Error:)/;
+const NULL_DEREF_PATTERN = /(undefined|null)/;
+
+// skipcq: JS-0067
+function inferRootCauseHint(errorMessage: string): string | undefined {
+  if (NULL_DEREF_PATTERN.test(errorMessage)) {
+    return "Null/undefined dereference detected. Verify state initialization before access.";
+  }
+  if (errorMessage.includes("expected") && errorMessage.includes("received")) {
+    return "Assertion value mismatch. Inspect expected vs actual return values.";
+  }
+  return undefined;
+}
+
+// skipcq: JS-0067
 export function parseStackTrace(rawLog: string): FailureAnalysis {
   const lines = rawLog.split("\n");
   let testName = "unknown_test";
@@ -137,9 +152,8 @@ export function parseStackTrace(rawLog: string): FailureAnalysis {
   let path = "unknown_file";
   const frames: StackFrame[] = [];
 
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i]!;
-    if (l.includes("FAIL") || l.includes("AssertionError") || l.includes("Error:")) {
+  for (const l of lines) {
+    if (ERROR_LINE_PATTERN.test(l)) {
       errorMessage = l.trim();
     }
     // Parse stack frame lines like: "at functionName (path/file.ts:12:34)"
@@ -159,19 +173,12 @@ export function parseStackTrace(rawLog: string): FailureAnalysis {
     }
   }
 
-  let rootCauseHint: string | undefined;
-  if (errorMessage.includes("undefined") || errorMessage.includes("null")) {
-    rootCauseHint = "Null/undefined dereference detected. Verify state initialization before access.";
-  } else if (errorMessage.includes("expected") && errorMessage.includes("received")) {
-    rootCauseHint = "Assertion value mismatch. Inspect expected vs actual return values.";
-  }
-
   return {
     testName,
     path,
     errorMessage,
     stackTrace: frames,
-    rootCauseHint,
+    rootCauseHint: inferRootCauseHint(errorMessage),
   };
 }
 

@@ -540,6 +540,7 @@ function withAbortSignal<T>(
 }
 
 /** Minimal Observable→AsyncIterable bridge. */
+// skipcq: JS-0067
 export function observableToAsyncIterable<T>(
   source: import("rxjs").Observable<T>,
   signal?: AbortSignal | null,
@@ -603,6 +604,7 @@ export function observableToAsyncIterable<T>(
       }
       return {
         next: async (): Promise<IteratorResult<T>> => {
+          // skipcq: JS-0092
           while (!done && queue.length === 0) {
             await new Promise<void>((resolve) => {
               wake = resolve;

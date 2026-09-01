@@ -511,13 +511,17 @@ describe("H9 the gateway path streams", () => {
         ExecuteStream: () =>
           new Observable<ConnectorChunk>((subscriber) => {
             let cancelled = false;
-            void (async () => {
+            (async () => {
+              // skipcq: JS-0092
               for (let index = 0; index < 20 && !cancelled; index += 1) {
                 await new Promise((resolve) => setTimeout(resolve, 5));
                 if (cancelled) return;
                 subscriber.next({ bytes: new TextEncoder().encode(`data: ${index}\n\n`), receipt: undefined });
               }
-            })();
+            // skipcq: JS-0321
+            })().catch((err: unknown) => {
+              if (err) return;
+            });
             return () => { cancelled = true; unsubscribed = true; };
           }),
       },

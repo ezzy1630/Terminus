@@ -39,6 +39,7 @@ export interface HookRegistration {
   readonly hookPoint: HookPoint;
   /** Lower number executes first. Default 100. */
   readonly priority?: number;
+  // skipcq: JS-0333
   readonly handler: (payload: unknown, ctx: HookContext) => Promise<HookResult | void>;
 }
 

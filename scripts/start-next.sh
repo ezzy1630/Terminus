@@ -20,4 +20,4 @@ sleep 1
 ) &
 echo "next dev started, log: $LOG"
 sleep 3
-ps -ef | grep -E "next dev|next-server" | grep -v grep || true
+pgrep -fl "next dev|next-server" || true

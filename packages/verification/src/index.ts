@@ -40,7 +40,6 @@ import {
 } from "./run-binding.js";
 
 export {
-  PredicateType,
   ALL_PREDICATE_TYPES,
   predicateTypeToNodeKind,
   parseNodeSpec,
@@ -984,7 +983,6 @@ class ExprParser {
 export type {
   VerificationPlan,
   VerificationNode,
-  VerificationResult,
   VerificationResultStatus,
   CompletionRecord,
   ArtifactRef,

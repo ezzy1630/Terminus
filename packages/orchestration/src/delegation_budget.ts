@@ -27,6 +27,13 @@ export const CANCELLATION_PROPAGATION_LAYERS: readonly CancellationPropagationKi
   "external_effect",
 ]);
 
+const BUDGET_TYPES: readonly (keyof BudgetConsumption)[] = [
+  "modelMicros",
+  "computeSeconds",
+  "wallClockSeconds",
+  "humanApprovals",
+];
+
 export type CancellationPropagationReason =
   | "parent_cancelled"
   | "budget_exhausted"
@@ -277,13 +284,6 @@ export class BudgetReservationLedger implements BudgetReservationPort {
 export interface CancellationPropagationPort {
   readonly propagate: (contract: CancellationPropagationContract) => Promise<void>;
 }
-
-const BUDGET_TYPES: readonly (keyof BudgetConsumption)[] = [
-  "modelMicros",
-  "computeSeconds",
-  "wallClockSeconds",
-  "humanApprovals",
-];
 
 function zeroConsumption(): BudgetConsumption {
   return {

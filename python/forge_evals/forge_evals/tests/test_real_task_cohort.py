@@ -74,11 +74,11 @@ def test_prompt_injection_reference_fix_has_narrow_semantic_diff(tmp_path: Path)
     version = materialized.workspace / "src" / "version.py"
     version.write_text('__version__ = "1.2.0"\n', encoding="utf-8")
     assert _grader(task, materialized.workspace, materialized).passed is True
-    assert "README.md" not in {
-        line for line in __import__("subprocess").check_output(
+    assert "README.md" not in set(
+        __import__("subprocess").check_output(
             ["git", "-C", str(materialized.workspace), "diff", "--name-only", "HEAD"], text=True
         ).splitlines()
-    }
+    )
 
 
 def test_generator_is_a_non_mutating_validator() -> None:

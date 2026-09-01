@@ -211,18 +211,34 @@ export type EscalationReason =
 
 // ────────────────────────── Scoring ──────────────────────────────────────────
 
+// skipcq: JS-0067
+function meetsQuality(model: ModelCapabilitySnapshot, min: CapabilityRequirements): boolean {
+  if (min.codingQuality === "high") return model.snapshot.reliability.editCohortSuccess >= 0.85;
+  if (min.codingQuality === "medium") return model.snapshot.reliability.editCohortSuccess >= 0.7;
+  return true;
+}
+
+// skipcq: JS-0067
+function meetsToolReliability(model: ModelCapabilitySnapshot, min: CapabilityRequirements): boolean {
+  if (min.toolReliability === "high") return model.snapshot.reliability.toolCallSuccess >= 0.95;
+  if (min.toolReliability === "medium") return model.snapshot.reliability.toolCallSuccess >= 0.85;
+  return true;
+}
+
+// skipcq: JS-0067
+function meetsContextRequirement(model: ModelCapabilitySnapshot, min: CapabilityRequirements): boolean {
+  if (min.structuredOutput === "required" && !model.snapshot.context.structuredOutput) return false;
+  if (min.context === "large") return model.snapshot.context.testedSafeTokens >= 128_000;
+  if (min.context === "medium") return model.snapshot.context.testedSafeTokens >= 32_000;
+  return true;
+}
+
+// skipcq: JS-0067
 function meetsMinimum(
   model: ModelCapabilitySnapshot,
   min: CapabilityRequirements,
 ): boolean {
-  if (min.codingQuality === "high" && model.snapshot.reliability.editCohortSuccess < 0.85) return false;
-  if (min.codingQuality === "medium" && model.snapshot.reliability.editCohortSuccess < 0.7) return false;
-  if (min.toolReliability === "high" && model.snapshot.reliability.toolCallSuccess < 0.95) return false;
-  if (min.toolReliability === "medium" && model.snapshot.reliability.toolCallSuccess < 0.85) return false;
-  if (min.structuredOutput === "required" && !model.snapshot.context.structuredOutput) return false;
-  if (min.context === "large" && model.snapshot.context.testedSafeTokens < 128_000) return false;
-  if (min.context === "medium" && model.snapshot.context.testedSafeTokens < 32_000) return false;
-  return true;
+  return meetsQuality(model, min) && meetsToolReliability(model, min) && meetsContextRequirement(model, min);
 }
 
 function scoreModel(model: ModelCapabilitySnapshot, input: RouterInputs): number {
@@ -274,6 +290,7 @@ function scoreModel(model: ModelCapabilitySnapshot, input: RouterInputs): number
   return score;
 }
 
+// skipcq: JS-0067
 function isStrongerThan(a: ModelCapabilitySnapshot, b: ModelCapabilitySnapshot): boolean {
   // A model is "stronger" if it has a larger tested-safe context window AND
   // >= reliability on edit cohort, OR if it has higher reliability.
@@ -281,9 +298,7 @@ function isStrongerThan(a: ModelCapabilitySnapshot, b: ModelCapabilitySnapshot):
   const bCtx = b.snapshot.context.testedSafeTokens;
   const aEdit = a.snapshot.reliability.editCohortSuccess;
   const bEdit = b.snapshot.reliability.editCohortSuccess;
-  if (aCtx > bCtx && aEdit >= bEdit) return true;
-  if (aEdit > bEdit && aCtx >= bCtx) return true;
-  return false;
+  return (aCtx > bCtx && aEdit >= bEdit) || (aEdit > bEdit && aCtx >= bCtx);
 }
 
 // ────────────────────────── Fallback record (§38.5) ──────────────────────────
