@@ -634,6 +634,12 @@ import {
 } from "./agent/intent-only-recovery.js";
 import { prepareTurnForProviderContinuation } from "./agent/turn-continuation-state.js";
 import {
+  ACTIVE_TURN_STATES,
+  interpretRecoveryMarkerWrite,
+  planRecoveryAfterSettlementFault,
+  settlementFaultIsTerminalProcessFault,
+} from "./agent/turn-lifecycle/settlement-convergence.js";
+import {
   sumAttemptCostMicros,
   sumUsageWire,
   turnStopReason,
@@ -21201,7 +21207,13 @@ async function agentLoop(turnId: string): Promise<void> {
               : null;
     const blockedError = taskStatusForStop === "BLOCKED" || taskStatusForStop === "NEEDS_USER_DECISION";
     if (activeEngine !== null) {
-      await persistTurnBudgetLedger(turnId, activeEngine.budget.ledger, turnContextBudgetJson);
+      try {
+        await persistTurnBudgetLedger(turnId, activeEngine.budget.ledger, turnContextBudgetJson);
+      } catch (ledgerError) {
+        // The ledger is evidence, not liveness: a fault here must not prevent
+        // the terminal settlement below from converging the turn.
+        console.error("agentLoop budget ledger persist fault", ledgerError);
+      }
     }
     const immutableTurnStates = [
       "COMPLETED",
@@ -21252,7 +21264,8 @@ async function agentLoop(turnId: string): Promise<void> {
       });
       if (update.count !== 1) throw new Error(`turn ${turnId} changed during failure settlement`);
     };
-    await mutateAgentState(async () => {
+    try {
+      await mutateAgentState(async () => {
       const currentTurn = await db.turn.findUnique({
         where: { id: turnId },
         select: { state: true },
@@ -21375,10 +21388,76 @@ async function agentLoop(turnId: string): Promise<void> {
         });
       }
       if (evidenceOutcome !== null) {
-        await persistEvidenceForCurrentTurn(evidenceOutcome);
+        try {
+          await persistEvidenceForCurrentTurn(evidenceOutcome);
+        } catch (evidenceError) {
+          // Evidence is durable-adjacent, not liveness: the terminal event
+          // above is the authoritative settlement. Surface the fault; never
+          // rethrow it out of the settlement path.
+          console.error("agentLoop evidence persist fault", evidenceError);
+        }
       }
-      await synchronizeV1TaskProjection(failedTaskId, taskEventType);
+      if (failedTaskId !== null) {
+        try {
+          await synchronizeV1TaskProjection(failedTaskId, taskEventType);
+        } catch (projectionError) {
+          // The projection reconciles later; the turn is already settled.
+          console.error("agentLoop task projection fault", projectionError);
+        }
+      }
     });
+  } catch (settlementError: unknown) {
+    // Reference-loop convergence rule: a fault inside the failure-settlement
+    // block must never escape agentLoop. The only trap around this promise
+    // is the admission-site `.catch(console.error)`; a rethrow here leaves an
+    // active turn stranded in CONTEXT_COMPILING (or its pre-failure phase)
+    // with no durable record and no re-driver until process restart.
+    //
+    // A fenced writer lease means this process is being terminated anyway —
+    // restart recovery owns the turn. Anything else leaves a durable
+    // recovery marker event so recovery (or a later settlement attempt)
+    // converges the turn without operator intervention.
+    if (settlementFaultIsTerminalProcessFault(settlementError)) throw settlementError;
+    const currentTurn = await db.turn.findUnique({
+      where: { id: turnId },
+      select: { state: true },
+    }).catch(() => null);
+    if (currentTurn === null || !ACTIVE_TURN_STATES.includes(currentTurn.state as never)) {
+      console.error("agentLoop failure settlement fault after terminal settlement", settlementError);
+      return;
+    }
+    const previousState = currentTurn.state;
+    const plan = planRecoveryAfterSettlementFault({
+      previousState,
+      code: failureCode,
+      details: settlementError instanceof Error ? settlementError.message : String(settlementError),
+    });
+    console.error(
+      `agentLoop failure settlement fault; recorded durable recovery for turn ${turnId} in ${previousState}`,
+      settlementError,
+    );
+    await emit({
+      eventType: "turn.recovery_requested",
+      aggregateType: "turn",
+      aggregateId: turnId,
+      correlationId: turn.taskId ?? undefined,
+      payload: { ...plan.marker },
+    }, async (tx) => {
+      // Idempotent marker write: the turn stays in its current non-terminal
+      // state with an explicit recovery reason. Restart recovery and the
+      // admission path both key off this record instead of the old silent
+      // stranding.
+      const markerJson = JSON.stringify(plan.marker);
+      const marked = await tx.turn.updateMany({
+        where: { id: turnId, state: previousState, terminalErrorJson: null },
+        data: { terminalErrorJson: markerJson },
+      });
+      const interpretation = interpretRecoveryMarkerWrite(marked.count);
+      if (interpretation === "needs_durable_reconciliation") {
+        throw new Error(`turn ${turnId} recovery marker raced during failure settlement`);
+      }
+    });
+    }
   } finally {
     if (activeTurnAbortControllers.get(turnId) === abortController) {
       activeTurnAbortControllers.delete(turnId);
@@ -22303,6 +22382,7 @@ async function recoverActiveAgentTurns(): Promise<number> {
       state: true,
       initiatingActor: true,
       initiatingInputArtifact: true,
+      terminalErrorJson: true,
       episodes: {
         where: { sequence: 1, kind: "user_message" },
         take: 1,
@@ -22317,6 +22397,46 @@ async function recoverActiveAgentTurns(): Promise<number> {
     },
   });
   for (const turn of active) {
+    // A turn whose failure settlement could not be proven carries a durable
+    // recovery marker (see the agentLoop settlement-fault path). Converge it
+    // terminally before any other recovery pass touches it: the marker is
+    // the explicit record that the in-process executor died without
+    // recording the outcome.
+    const recoveryMarker = turn.terminalErrorJson === null
+      ? null
+      : safeParse<Record<string, unknown> | null>(turn.terminalErrorJson, null);
+    if (recoveryMarker?.reason === "failure_settlement_unproven") {
+      await emit({
+        eventType: "turn.failed",
+        aggregateType: "turn",
+        aggregateId: turn.id,
+        correlationId: turn.taskId ?? undefined,
+        payload: { ...recoveryMarker, state: "FAILED" },
+      }, async (tx) => {
+        const settled = await tx.turn.updateMany({
+          where: { id: turn.id, state: turn.state },
+          data: {
+            state: "FAILED",
+            completedAt: new Date(),
+            terminalErrorJson: turn.terminalErrorJson,
+          },
+        });
+        if (settled.count !== 1) {
+          throw new Error(`turn ${turn.id} changed while converging a recovery marker`);
+        }
+      });
+      if (turn.taskId !== null) {
+        await emit({
+          eventType: "task.turn_failed",
+          aggregateType: "task",
+          aggregateId: turn.taskId,
+          correlationId: turn.taskId,
+          payload: { status: "ACTIVE", active_turn: null, ...recoveryMarker },
+        });
+        await synchronizeV1TaskProjection(turn.taskId, "task.turn_failed");
+      }
+      continue;
+    }
     if (turn.state === "VERIFIED" || turn.state === "FINALIZING") {
       if (await recoverVerifiedOrFinalizingTurn(turn)) continue;
       await quarantineTerminalRecoveryTurn({
