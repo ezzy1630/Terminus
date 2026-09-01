@@ -723,6 +723,18 @@ import {
   TurnCoordinator,
   TurnAdmissionError,
   VerificationCoordinator,
+  classifyTerminalTurn,
+  planEnterContextCompiling,
+  planEnterFinalizing,
+  planEnterRepairPending,
+  planEnterToolSettlement,
+  planEnterVerifying,
+  planFailVerification,
+  planComplete,
+  planReenterContextCompiling,
+  planTerminalTurnSettlement,
+  taskRowDataForTerminalStop,
+  type TurnTransitionPlan,
   ProviderExecutionUnavailableError,
   ToolCycleBudgetExhaustedError,
   ToolPolicyDeniedError,
@@ -16961,6 +16973,19 @@ function buildEpisodeObservations(
   return observations;
 }
 
+async function executeTurnTransition(plan: TurnTransitionPlan, tx: Prisma.TransactionClient): Promise<void> {
+  const update = await tx.turn.updateMany({
+    where: { id: plan.aggregateId, state: { in: [...plan.expectedStates] } },
+    data: {
+      state: plan.nextState,
+      ...(plan.setStartedAt ? { startedAt: new Date() } : {}),
+      ...(plan.setCompletedAt ? { completedAt: new Date() } : {}),
+      ...(plan.terminalErrorJson === null ? {} : { terminalErrorJson: plan.terminalErrorJson }),
+    },
+  });
+  if (update.count !== 1) throw new Error(plan.conflictError);
+}
+
 /**
  * The agent loop: compile context → provider attempt → tool settlement →
  * verification → completion. Each step emits semantic events so the UI can
@@ -17019,20 +17044,17 @@ async function agentLoop(turnId: string): Promise<void> {
         || current?.state === "VERIFYING"
       ) return true;
       if (current?.state !== "PENDING" && current?.state !== "REPAIRING") return false;
+      const resumedFrom: "PENDING" | "REPAIRING" = current.state;
       await emit({
         eventType: "turn.context_compiling",
         aggregateType: "turn", aggregateId: turnId,
         correlationId: turn.taskId ?? undefined,
-        payload: { phase: "context_compiling", resumed_from: current.state },
+        payload: { phase: "context_compiling", resumed_from: resumedFrom },
       }, async (tx) => {
-        const update = await tx.turn.updateMany({
-          where: { id: turnId, state: current.state },
-          data: {
-            state: "CONTEXT_COMPILING",
-            ...(current.state === "PENDING" ? { startedAt: new Date() } : {}),
-          },
-        });
-        if (update.count !== 1) throw new Error(`turn ${turnId} changed before context compilation`);
+        await executeTurnTransition(
+          planEnterContextCompiling({ turnId, taskId: turn.taskId, resumedFrom }),
+          tx,
+        );
       });
       return true;
     });
@@ -19857,11 +19879,10 @@ async function agentLoop(turnId: string): Promise<void> {
             correlationId: task.id,
             payload: { provider_attempt_id: attemptId, tool_calls: count },
           }, async (tx) => {
-            const update = await tx.turn.updateMany({
-              where: { id: turnId, state: "RESPONSE_VALIDATING" },
-              data: { state: "TOOL_SETTLEMENT" },
-            });
-            if (update.count !== 1) throw new Error(`turn ${turnId} changed before tool settlement`);
+            await executeTurnTransition(
+              planEnterToolSettlement({ turnId, taskId: task.id, providerAttemptId: attemptId, toolCallCount: count }),
+              tx,
+            );
           }));
         }
         await toolEpisodeSession.settle({
@@ -19906,11 +19927,7 @@ async function agentLoop(turnId: string): Promise<void> {
           correlationId: task.id,
           payload: { phase: "context_compiling", reason: "tool_calls_settled" },
         }, async (tx) => {
-          const update = await tx.turn.updateMany({
-            where: { id: turnId, state: "TOOL_SETTLEMENT" },
-            data: { state: "CONTEXT_COMPILING" },
-          });
-          if (update.count !== 1) throw new Error(`turn ${turnId} changed before context recompilation`);
+          await executeTurnTransition(planReenterContextCompiling({ turnId, taskId: task.id }), tx);
         }));
       },
     });
@@ -20160,11 +20177,12 @@ async function agentLoop(turnId: string): Promise<void> {
         correlationId: turn.taskId ?? undefined,
         payload: { phase: "finalizing", after },
       }, async (tx) => {
-        const update = await tx.turn.updateMany({
-          where: { id: turnId, state: expectedState },
-          data: { state: "FINALIZING" },
-        });
-        if (update.count !== 1) throw new Error(`turn ${turnId} changed before finalizing`);
+        await executeTurnTransition(planEnterFinalizing({
+          turnId,
+          taskId: turn.taskId,
+          after,
+          expectedState,
+        }), tx);
       }));
 
       // R5: automatic end-of-turn checkpoint so cross-turn continuity carries
@@ -20237,11 +20255,10 @@ async function agentLoop(turnId: string): Promise<void> {
         },
         artifactRefs: [finalResponseArtifactUri],
       }, async (tx) => {
-        const update = await tx.turn.updateMany({
-          where: { id: turnId, state: "FINALIZING" },
-          data: { state: "COMPLETED", completedAt: new Date() },
-        });
-        if (update.count !== 1) throw new Error(`turn ${turnId} changed before completion settlement`);
+        await executeTurnTransition(
+          { ...planComplete({ turnId }), eventType: "turn.completed", payload: {} },
+          tx,
+        );
       }));
     };
 
@@ -20253,15 +20270,7 @@ async function agentLoop(turnId: string): Promise<void> {
         correlationId: turn.taskId ?? undefined,
         payload: { reason: "verification_failed", ...reason },
       }, async (tx) => {
-        const update = await tx.turn.updateMany({
-          where: { id: turnId, state: "VERIFYING" },
-          data: {
-            state: "FAILED",
-            completedAt: new Date(),
-            terminalErrorJson: JSON.stringify({ reason: "verification_failed", ...reason }),
-          },
-        });
-        if (update.count !== 1) throw new Error(`turn ${turnId} changed during verification failure settlement`);
+        await executeTurnTransition(planFailVerification({ turnId, taskId: turn.taskId, reason }), tx);
       }));
     };
 
@@ -20303,11 +20312,10 @@ async function agentLoop(turnId: string): Promise<void> {
             payload: { phase: "VERIFY", proposal_artifact: finalResponseArtifactUri },
             artifactRefs: [finalResponseArtifactUri],
           }, async (tx) => {
-            const update = await tx.turn.updateMany({
-              where: { id: turnId, state: "RESPONSE_VALIDATING" },
-              data: { state: "VERIFYING" },
-            });
-            if (update.count !== 1) throw new Error(`turn ${turnId} changed before verification`);
+            await executeTurnTransition(
+              planEnterVerifying({ turnId, taskId: task.id, proposalArtifact: finalResponseArtifactUri }),
+              tx,
+            );
           }));
           const enteredVerification = await verificationCoordinator.begin(task.id);
           if (!enteredVerification) throw new Error(`task ${task.id} changed before verification`);
@@ -20756,11 +20764,16 @@ async function agentLoop(turnId: string): Promise<void> {
               },
               artifactRefs: [directiveArtifact.uri],
             }, async (tx) => {
-              const update = await tx.turn.updateMany({
-                where: { id: turnId, state: "VERIFYING" },
-                data: { state: "REPAIR_PENDING" },
-              });
-              if (update.count !== 1) throw new Error(`turn ${turnId} changed before repair scheduling`);
+              await executeTurnTransition(
+                planEnterRepairPending({ turnId, taskId: task.id, payload: {
+                  phase: "REPAIR_PENDING",
+                  repair_attempt: repairDecision.attemptNumber,
+                  repair_attempt_id: repairAttemptId,
+                  hypothesis_id: repairDecision.hypothesisId,
+                  directive_artifact: directiveArtifact.uri,
+                } }),
+                tx,
+              );
             }));
             const repairTurnId = await admitRepairTurn({
               taskId: task.id,
@@ -21064,11 +21077,18 @@ async function agentLoop(turnId: string): Promise<void> {
               },
               artifactRefs: [directiveArtifact.uri],
             }, async (tx) => {
-              const update = await tx.turn.updateMany({
-                where: { id: turnId, state: "VERIFYING" },
-                data: { state: "REPAIR_PENDING" },
-              });
-              if (update.count !== 1) throw new Error(`turn ${turnId} changed before repair scheduling`);
+              await executeTurnTransition(
+                planEnterRepairPending({ turnId, taskId: task.id, payload: {
+                  phase: "REPAIR_PENDING",
+                  reason: "completion_gate_denied",
+                  missing_claim_ids: missingClaimIds,
+                  repair_attempt: gateRepairDecision.attemptNumber,
+                  repair_attempt_id: repairAttemptId,
+                  hypothesis_id: gateRepairDecision.hypothesisId,
+                  directive_artifact: directiveArtifact.uri,
+                } }),
+                tx,
+              );
             }));
             const repairTurnId = await admitRepairTurn({
               taskId: task.id,
@@ -21131,80 +21151,32 @@ async function agentLoop(turnId: string): Promise<void> {
     const policyDenied = err instanceof ToolPolicyDeniedError;
     const budgetExhausted = err instanceof ToolCycleBudgetExhaustedError;
     const stopKind = engineStop?.kind ?? null;
-    const terminalTurnState = stopKind === "interrupted"
-      ? "ABORTED"
-      : stopKind === "budget_stop" || stopKind === "budget_exhausted" || budgetExhausted
-        ? "BUDGET_EXHAUSTED"
-        : stopKind === "policy_stop" || stopKind === "policy_denied" || policyDenied
-          ? "POLICY_DENIED"
-          : stopKind === "blocked"
-            ? "BLOCKED"
-            : stopKind === "needs_user_input"
-              ? "USER_ACTION_REQUIRED"
-              : ambiguousToolSettlement
-                ? "INTERRUPTED"
-                : "FAILED";
-    const terminalTurnEvent = terminalTurnState === "ABORTED"
-      ? "turn.aborted"
-      : terminalTurnState === "BUDGET_EXHAUSTED"
-        ? "turn.budget_exhausted"
-        : terminalTurnState === "POLICY_DENIED"
-          ? "turn.policy_denied"
-          : terminalTurnState === "BLOCKED"
-            ? "turn.blocked"
-            : terminalTurnState === "USER_ACTION_REQUIRED"
-              ? "turn.needs_user_input"
-              : ambiguousToolSettlement
-                ? "turn.interrupted"
-                : "turn.failed";
-    const failureCode = stopEnvelope?.code
-      ?? (stopKind === "budget_stop" ? "BUDGET_EXHAUSTED"
-        : stopKind === "policy_stop" ? "POLICY_DENIED"
-          : stopKind === "blocked" ? "PROVIDER_BLOCKED"
-            : stopKind === "needs_user_input" ? "USER_INPUT_REQUIRED"
-              : stopKind === "interrupted" ? "CANCELLED"
-                : providerUnavailable
-                  ? "PROVIDER_TRANSPORT_UNAVAILABLE"
-                  : policyDenied
-                    ? "TOOL_POLICY_DENIED"
-                    : budgetExhausted
-                      ? "TOOL_BUDGET_EXHAUSTED"
-                      : ambiguousToolSettlement
-                        ? "TOOL_SETTLEMENT_UNKNOWN"
-                        : "PROVIDER_EXECUTION_FAILED");
+    // Lifecycle decision: classify the stop into the terminal vocabulary.
+    // The task-side consequence rides on the same classification via
+    // turnFailureDisposition, so the turn/task vocabularies cannot drift.
+    const settlement = planTerminalTurnSettlement({
+      turnId,
+      classification: classifyTerminalTurn({
+        stopKind,
+        stopEnvelope,
+        providerUnavailable,
+        policyDenied,
+        budgetExhausted,
+        ambiguousToolSettlement,
+      }),
+      stopEnvelope,
+      classifiedEnvelope: classified.envelope,
+    });
+    const terminalTurnState = settlement.classification.state;
+    const terminalTurnEvent = settlement.classification.eventType;
+    const failureCode = settlement.classification.code;
     const failureMessage = stopEnvelope?.message ?? classified.envelope.message;
     const failureDetails = stopEnvelope?.details ?? classified.envelope.details;
-    const failureReason = stopKind === "budget_stop" || stopKind === "budget_exhausted" || budgetExhausted
-      ? "budget_exhausted"
-      : stopKind === "policy_stop" || stopKind === "policy_denied" || policyDenied
-        ? "policy_denied"
-        : stopKind === "blocked" || providerUnavailable
-          ? "provider_blocked"
-          : stopKind === "needs_user_input"
-            ? "needs_user_input"
-            : stopKind === "interrupted"
-              ? "aborted"
-              : ambiguousToolSettlement
-                ? "tool_settlement_unknown"
-                : stopKind === "failed_verification"
-                  ? "failed_verification"
-                  : "agent_loop_error";
+    const failureReason = settlement.classification.reason;
     // H8: only a user cancellation or a hard budget/policy stop ends the task.
     const disposition = turnFailureDisposition(terminalTurnState);
     const taskStatusForStop = disposition.taskStatus;
-    const terminalEvidenceOutcome: EvidenceTerminalOutcome | null = taskStatusForStop === "ABORTED"
-      ? "ABORTED"
-      : taskStatusForStop === "BUDGET_EXHAUSTED"
-        ? "BUDGET_EXHAUSTED"
-        : taskStatusForStop === "POLICY_DENIED"
-          ? "POLICY_DENIED"
-          : taskStatusForStop === "NEEDS_USER_DECISION"
-            ? "NEEDS_USER_DECISION"
-            : taskStatusForStop === "BLOCKED"
-              ? "BLOCKED"
-              : taskStatusForStop === "FAILED_VERIFICATION"
-                ? "FAILED_VERIFICATION"
-              : null;
+    const terminalEvidenceOutcome: EvidenceTerminalOutcome | null = settlement.classification.evidenceOutcome;
     const blockedError = taskStatusForStop === "BLOCKED" || taskStatusForStop === "NEEDS_USER_DECISION";
     if (activeEngine !== null) {
       try {
@@ -21227,26 +21199,9 @@ async function agentLoop(turnId: string): Promise<void> {
       "VERIFIED",
       "ABORTED",
     ] as const;
-    const failureErrorJson = JSON.stringify({
-      code: failureCode,
-      message: failureMessage,
-      category: stopEnvelope?.category ?? classified.envelope.category,
-      details: failureDetails,
-    });
-    const turnTerminalErrorJson = JSON.stringify({
-      code: failureCode,
-      message: failureMessage,
-      reason: failureReason,
-      details: failureDetails,
-    });
-    const turnFailurePayload = {
-      code: failureCode,
-      category: stopEnvelope?.category ?? classified.envelope.category,
-      message: failureMessage,
-      reason: failureReason,
-      retryable: stopEnvelope?.retryable ?? classified.envelope.retryable,
-      details: failureDetails,
-    };
+    const failureErrorJson = settlement.providerAttemptsErrorJson;
+    const turnTerminalErrorJson = settlement.turnTerminalErrorJson;
+    const turnFailurePayload = settlement.eventPayload;
     const failProviderAttempts = async (tx: Prisma.TransactionClient): Promise<void> => {
       await tx.providerAttempt.updateMany({
         where: { turnId, status: "running" },
@@ -21302,26 +21257,13 @@ async function agentLoop(turnId: string): Promise<void> {
         if (failedTaskId === null || failedTask === null) return;
         const update = await tx.task.updateMany({
           where: { id: failedTaskId, status: failedTask.status },
-          data: taskStaysActive
-            ? {
-                // Returned to the actor, not terminated: no completedAt and no
-                // terminal reason, or the task becomes unsteerable.
-                status: "ACTIVE",
-                phase: "IMPLEMENT",
-                completedAt: null,
-                terminalReasonJson: null,
-              }
-            : {
-                status: taskTerminalStatus,
-                phase: failedTask.status === "VERIFYING" ? "VERIFY" : "IMPLEMENT",
-                completedAt: blockedError ? null : new Date(),
-                terminalReasonJson: JSON.stringify({
-                  reason: failureReason,
-                  code: failureCode,
-                  message: failureMessage,
-                  details: failureDetails,
-                }),
-              },
+          data: taskRowDataForTerminalStop({
+            taskStaysActive,
+            taskTerminalStatus,
+            failedTaskStatus: failedTask.status,
+            blockedError,
+            failure: { reason: failureReason, code: failureCode, message: failureMessage, details: failureDetails },
+          }),
         });
         if (update.count !== 1) throw new Error(`task ${failedTaskId} changed during failure settlement`);
       };
