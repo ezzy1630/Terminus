@@ -734,6 +734,7 @@ import {
   planReenterContextCompiling,
   planTerminalTurnSettlement,
   taskRowDataForTerminalStop,
+  TurnCommandExecutor,
   type TurnTransitionPlan,
   ProviderExecutionUnavailableError,
   ToolCycleBudgetExhaustedError,
@@ -17661,7 +17662,6 @@ async function agentLoop(turnId: string): Promise<void> {
       ? workspaceToolSchemas
       : selectInitialStandaloneToolSchemas(toolsEnabledForTurn);
     let activeToolSchemas = initialToolSchemas;
-    const declaredToolSchemasByAttempt = new Map<string, readonly ProviderToolSchema[]>();
     const activatedToolCapabilities = capabilitySession.activeCapabilityIds();
     const selectedProfile = createTerminusExecutionProfile({
       mode: harnessProfileMode,
@@ -17735,7 +17735,6 @@ async function agentLoop(turnId: string): Promise<void> {
       mutateAgentState,
       assertControlWriterLease,
     );
-    const settlementByProviderCallId = new Map<string, EngineToolSettlement>();
     const toolEpisodeService = new ToolEpisodeService({
       store: {
         // R4/Cubic: page newest-first so the byte-budgeted walk always sees
@@ -17904,7 +17903,6 @@ async function agentLoop(turnId: string): Promise<void> {
     // What the compiler predicted this manifest's prompt would cost, filled
     // by `compileProviderContext` and read at settlement so the estimator
     // gets a predicted/observed pair to calibrate from.
-    const predictedPromptByManifest = new Map<string, number>();
     const confidentialityPolicy: ConfidentialityPolicy = {
       allowedProviders: {
         public: [selectedProvider.providerId],
@@ -18774,13 +18772,33 @@ async function agentLoop(turnId: string): Promise<void> {
     };
     let lastResponseArtifactUri: string | null = null;
     let currentProjected: ProjectedResponse | null = null;
-    const toolSettlementEnteredFor = new Set<string>();
+    // Per-attempt bookkeeping the executor owns; the loop reads it through
+    // the executor so the maps are injectable and independently instantiable.
+    const turnCommandExecutor = new TurnCommandExecutor({
+      mutate: mutateAgentState,
+      emit: async (input) => emit(input as EmitInput),
+      // prepareTurnForProviderContinuation throws the original CAS-failure
+      // error on any miss; the 1 reports the guarded row it updated.
+      rearmProviderContinuation: async (rearmTurnId, tx) => {
+        await prepareTurnForProviderContinuation(
+          tx as Parameters<typeof prepareTurnForProviderContinuation>[0],
+          rearmTurnId,
+        );
+        return 1;
+      },
+    });
+    const {
+      declaredToolSchemasByAttempt,
+      manifestIdByAttempt,
+      predictedCacheByAttempt,
+      predictedPromptByManifest,
+      settlementByProviderCallId,
+      toolSettlementEnteredFor,
+    } = turnCommandExecutor.ledger;
     // R7 (harness critical path): reconcile predicted vs actual prompt-cache
     // reads per attempt; a systematic gap means the cache-stable prefix was
     // mutated, which silently multiplies cost.
     const cacheMonitor = new CacheRatioMonitor();
-    const predictedCacheByAttempt = new Map<string, bigint>();
-    const manifestIdByAttempt = new Map<string, Uuid7>();
     // Merged knob precedence: an explicit TERMINUS_TURN_MAX_STEPS wins;
     // otherwise TERMINUS_MAX_TOOL_CYCLES (validated, fail-closed, default 64)
     // sizes the soft budget. A per-turn budget from `POST /v1/turns` tightens
@@ -19550,15 +19568,7 @@ async function agentLoop(turnId: string): Promise<void> {
           select: { state: true },
         });
         if (turnState?.state === "RESPONSE_VALIDATING") {
-          await mutateAgentState(() => emit({
-            eventType: "turn.context_compiling",
-            aggregateType: "turn",
-            aggregateId: turnId,
-            correlationId: task.id,
-            payload: { phase: "context_compiling", reason: "provider_continuation" },
-          }, async (tx) => {
-            await prepareTurnForProviderContinuation(tx.turn, turnId);
-          }));
+          await turnCommandExecutor.rearmForProviderContinuation({ turnId, taskId: task.id });
         } else if (turnState?.state !== "CONTEXT_COMPILING") {
           throw new Error(
             `turn ${turnId} cannot compile provider context from ${turnState?.state ?? "missing"}`,

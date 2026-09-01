@@ -2,6 +2,9 @@ import type { MutationRunner, ServiceEventAppender } from "./service-types.js";
 import type { LoopErrorEnvelope } from "../agent/loop-contracts.js";
 import type { EvidenceTerminalOutcome } from "../agent/minimal-profile.js";
 import { turnFailureDisposition, type TerminalTurnState } from "../agent/turn-failure-policy.js";
+import type { ProviderToolSchema } from "@terminus/provider-core";
+import type { Uuid7 } from "@terminus/domain";
+import type { EngineToolSettlement } from "../agent/coding-turn-engine.js";
 
 export type TurnAdmissionReason =
   | "task_not_found"
@@ -770,4 +773,114 @@ export function planTerminalTurnSettlement(input: {
       details,
     }),
   };
+}
+
+// ─────────────── Provider-continuation re-arm (engine boundary) ─────────────
+//
+// The loop's compile command used to re-arm RESPONSE_VALIDATING inline. The
+// decision — a settled response may only re-enter compilation with a new
+// generation, in the same transaction as the steering episode — belongs to
+// the coordinator.
+
+/** Plan the RESPONSE_VALIDATING → CONTEXT_COMPILING provider continuation. */
+export function planProviderContinuation(input: {
+  readonly turnId: string;
+  readonly taskId: string;
+}): TurnTransitionPlan {
+  return {
+    eventType: "turn.context_compiling",
+    aggregateType: "turn",
+    aggregateId: input.turnId,
+    correlationId: input.taskId,
+    payload: { phase: "context_compiling", reason: "provider_continuation" },
+    expectedStates: ["RESPONSE_VALIDATING"],
+    nextState: "CONTEXT_COMPILING",
+    setStartedAt: false,
+    setCompletedAt: false,
+    terminalErrorJson: null,
+    conflictError: `turn ${input.turnId} changed before provider continuation`,
+  };
+}
+
+/** The per-attempt bookkeeping a turn's executor accumulates. */
+export interface TurnAttemptLedger {
+  /** Tool schemas declared to the provider, keyed by attempt id. */
+  readonly declaredToolSchemasByAttempt: Map<string, readonly ProviderToolSchema[]>;
+  /** Context manifest backing each attempt. */
+  readonly manifestIdByAttempt: Map<string, Uuid7>;
+  /** Cache tokens the compiler predicted for each attempt. */
+  readonly predictedCacheByAttempt: Map<string, bigint>;
+  /** Cache tokens the compiler predicted for each manifest's prompt. */
+  readonly predictedPromptByManifest: Map<string, number>;
+  /** Tool settlements by provider call id, written by the tool path. */
+  readonly settlementByProviderCallId: Map<string, EngineToolSettlement>;
+  /** Attempt ids whose tool-settlement entry event was already emitted. */
+  readonly toolSettlementEnteredFor: Set<string>;
+}
+
+export function createTurnAttemptLedger(): TurnAttemptLedger {
+  return {
+    declaredToolSchemasByAttempt: new Map(),
+    manifestIdByAttempt: new Map(),
+    predictedCacheByAttempt: new Map(),
+    predictedPromptByManifest: new Map(),
+    settlementByProviderCallId: new Map(),
+    toolSettlementEnteredFor: new Set(),
+  };
+}
+
+/** Ports the executor needs to run one compiled attempt's commands. */
+export interface TurnCommandExecutorPorts {
+  readonly mutate: MutationRunner;
+  readonly emit: (input: {
+    eventType: string;
+    aggregateType: string;
+    aggregateId: string;
+    correlationId?: string | undefined;
+    payload: unknown;
+    artifactRefs?: string[] | undefined;
+  }, mutation?: (transaction: unknown) => Promise<void>) => Promise<unknown>;
+  /**
+   * Re-arm RESPONSE_VALIDATING → CONTEXT_COMPILING for a steering
+   * continuation, in the caller's transaction. Returns rows updated.
+   */
+  readonly rearmProviderContinuation: (turnId: string, tx: unknown) => Promise<number>;
+}
+
+/**
+ * Executes the loop's compiled-attempt commands. Owns effects, not
+ * decisions: the lifecycle state machine stays in the coordinator; this
+ * class turns coordinator state and engine callbacks into durable writes
+ * and provider/tool/verification dispatches.
+ */
+export class TurnCommandExecutor {
+  constructor(
+    private readonly ports: TurnCommandExecutorPorts,
+    readonly ledger: TurnAttemptLedger = createTurnAttemptLedger(),
+  ) {}
+
+  /**
+   * Re-arm a settled response before a durable steering continuation. The
+   * turn must still be in RESPONSE_VALIDATING; the CAS is the guard that
+   * makes a re-delivered continuation command a no-op instead of a second
+   * generation.
+   */
+  async rearmForProviderContinuation(input: {
+    readonly turnId: string;
+    readonly taskId: string;
+  }): Promise<void> {
+    await this.ports.mutate(() => this.ports.emit({
+      eventType: "turn.context_compiling",
+      aggregateType: "turn",
+      aggregateId: input.turnId,
+      correlationId: input.taskId,
+      payload: { phase: "context_compiling", reason: "provider_continuation" },
+    }, async (transaction) => {
+      const updated = await this.ports.rearmProviderContinuation(input.turnId, transaction);
+      if (updated !== 1) {
+        throw new Error(`turn ${input.turnId} changed before provider continuation`);
+      }
+      void transaction;
+    }));
+  }
 }
