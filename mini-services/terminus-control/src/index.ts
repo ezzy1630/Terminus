@@ -634,6 +634,12 @@ import {
 } from "./agent/intent-only-recovery.js";
 import { prepareTurnForProviderContinuation } from "./agent/turn-continuation-state.js";
 import {
+  ACTIVE_TURN_STATES,
+  interpretRecoveryMarkerWrite,
+  planRecoveryAfterSettlementFault,
+  settlementFaultIsTerminalProcessFault,
+} from "./agent/turn-lifecycle/settlement-convergence.js";
+import {
   sumAttemptCostMicros,
   sumUsageWire,
   turnStopReason,
@@ -717,6 +723,23 @@ import {
   TurnCoordinator,
   TurnAdmissionError,
   VerificationCoordinator,
+  completionGateRepairInputs,
+  restoredPlanMatchesContract,
+  stalePlanBindingReason,
+  verificationEvaluationPassed,
+  classifyTerminalTurn,
+  planEnterContextCompiling,
+  planEnterFinalizing,
+  planEnterRepairPending,
+  planEnterToolSettlement,
+  planEnterVerifying,
+  planFailVerification,
+  planComplete,
+  planReenterContextCompiling,
+  planTerminalTurnSettlement,
+  taskRowDataForTerminalStop,
+  TurnCommandExecutor,
+  type TurnTransitionPlan,
   ProviderExecutionUnavailableError,
   ToolCycleBudgetExhaustedError,
   ToolPolicyDeniedError,
@@ -728,6 +751,8 @@ import {
   type ProviderAttemptStartInput,
   type ProviderExecutionInput,
   type ProviderGatewayConfig,
+  IN_FLIGHT_PROVIDER_STATES,
+  ProviderAttemptAlreadyResolvedError,
   type TaskProjectionContractRow,
   type TaskProjectionTaskRow,
   type TurnRow,
@@ -735,6 +760,13 @@ import {
   type VerificationTransitionInput,
   type RepairAttemptPersistenceInput,
 } from "./services/index.js";
+import {
+  denyStandaloneTool as denyStandaloneToolPort,
+  persistSettledToolResult as persistSettledToolResultPort,
+  toolArgumentsExcerpt as toolArgumentsExcerptPort,
+  observedSourceVersionsOf as observedSourceVersionsOfPort,
+  type ToolEpisodeSettlementPorts,
+} from "./services/tool-episode-settlement.js";
 import {
   deriveProviderAttemptIdentity,
   providerAttemptIdempotencyKey,
@@ -832,7 +864,6 @@ const SCOUT_LEDGER = new ScoutUtilityLedger();
  */
 const TURN_RESPONSE_SUMMARY_MAX_CHARS = 16_384;
 /** Bound for the human-readable operand carried on `tool.proposed`. */
-const TOOL_ARGUMENTS_EXCERPT_MAX_CHARS = 240;
 const TURN_REASONING_SUMMARY_MAX_CHARS = 8_192;
 
 const DEV_MODE = process.env.TERMINUS_DEV === "1";
@@ -9202,7 +9233,7 @@ const routes: Route[] = [
     // same event/row transaction without attempting to acquire the lock a
     // second time.
     const effectRecovery = await reconcileUnsettledSideEffects(true);
-    const providerRecovery = await reconcileInFlightProviderAttempts(true);
+    const providerRecovery = await providerSessionService.reconcileInFlightAttempts(V1_ACTIVE_TURN_STATES, true);
     const candidateBranchRecovery = await reconcileInFlightCandidateBranchAdmissions(
       true,
       buildTrustedBranchReceiptReconciler() ?? undefined,
@@ -14960,35 +14991,7 @@ class EngineTerminalStopError extends Error {
   }
 }
 
-interface StandaloneToolSettlementInput {
-  readonly callChunk: ProviderToolCallChunk;
-  readonly providerAttemptId: string;
-  readonly turnId: string;
-  readonly threadId: string;
-  readonly turnSequence: number;
-  readonly taskId: string;
-  readonly sessionId: string;
-  readonly workspaceId: string;
-  readonly contractVersion: number;
-  readonly contractHash: string;
-  readonly artifactClient: ArtifactClient;
-  readonly observedSources: ObservedSourceTracker;
-  readonly capabilitySession: CapabilityDiscoverySession;
-  /** Compute the exact post-transition schema ids before atomic settlement. */
-  readonly nextWorkspaceToolIds: () => readonly string[];
-  /** Read the authoritative workspace identity around the kernel effect. */
-  readonly workspaceRevision?: (() => Promise<string | null>) | undefined;
-  /** Current verifier/repair association, if this turn has one. */
-  readonly operationContext?: (() => {
-    readonly verificationDelta?: string | null | undefined;
-    readonly hypothesisId?: string | null | undefined;
-    readonly criterionIds?: readonly string[] | undefined;
-    readonly objectiveStep?: string | null | undefined;
-  }) | undefined;
-  readonly signal?: AbortSignal | null;
-  /** The loop already rejected this call; settle the correction, run nothing. */
-  readonly rejection?: InvalidToolCallError | undefined;
-}
+type StandaloneToolSettlementInput = import("./services/tool-episode-settlement.js").StandaloneToolSettlementInput;
 
 interface StandaloneOperationMetadata {
   readonly workspaceRevisionBefore: string | null;
@@ -15041,6 +15044,28 @@ type ToolApprovalVerdict =
  * which is why startup recovery expires every pending tool-call approval —
  * there is no longer anything to wake.
  */
+const toolEpisodeSettlementPorts: ToolEpisodeSettlementPorts = {
+  mutate: mutateAgentState,
+  emit: (input, mutation) => emit(input as EmitInput, mutation as Parameters<typeof emit>[1]),
+  settleEffect: (input, events) => effectSettlementService.settle(input as never, events as never),
+};
+
+function toolArgumentsExcerpt(call: ParsedStandaloneToolCall): string {
+  return toolArgumentsExcerptPort(call);
+}
+
+function observedSourceVersionsOf(result: ToolResult<unknown>): Record<string, string> {
+  return observedSourceVersionsOfPort(result);
+}
+
+function persistSettledToolResult(input: Parameters<typeof persistSettledToolResultPort>[1]): Promise<import("./services/tool-episode-settlement.js").EngineToolSettlement> {
+  return persistSettledToolResultPort(toolEpisodeSettlementPorts, input);
+}
+
+function denyStandaloneTool(input: Parameters<typeof denyStandaloneToolPort>[1]): Promise<string> {
+  return denyStandaloneToolPort(toolEpisodeSettlementPorts, input);
+}
+
 const toolApprovalWaiters = new Map<string, (verdict: ToolApprovalVerdict) => void>();
 
 /**
@@ -16314,118 +16339,8 @@ async function settleStandaloneProviderTool(
   });
 }
 
-async function denyStandaloneTool(input: {
-  readonly input: StandaloneToolSettlementInput;
-  readonly call: ParsedStandaloneToolCall;
-  readonly toolCallId: string;
-  readonly argumentsArtifactUri: string;
-  readonly effectType: string;
-  readonly ruleId: string;
-  readonly explanation: string;
-}): Promise<string> {
-  const policyDecisionId = uuid();
-  await mutateAgentState(() => emit({
-    eventType: "tool.denied",
-    aggregateType: "tool_call",
-    aggregateId: input.toolCallId,
-    correlationId: input.input.taskId,
-    payload: {
-      tool_call_id: input.toolCallId,
-      tool_id: input.call.toolId,
-      provider_call_id: input.call.providerCallId,
-      policy_decision_id: policyDecisionId,
-      rule_id: input.ruleId,
-      explanation: input.explanation,
-    },
-    artifactRefs: [input.argumentsArtifactUri],
-  }, async (tx) => {
-    await tx.policyDecision.create({
-      data: {
-        id: policyDecisionId,
-        toolCallId: input.toolCallId,
-        effectType: input.effectType,
-        normalizedInputArtifact: input.argumentsArtifactUri,
-        decision: "deny",
-        ruleIdsJson: JSON.stringify([input.ruleId]),
-        constraintsJson: "{}",
-        policyVersion: "secure-local-default:v1",
-        explanation: input.explanation,
-      },
-    });
-    await tx.toolCall.update({
-      where: { id: input.toolCallId },
-      data: { state: "DENIED", policyDecisionId, settledAt: new Date(), resultStatus: "denied" },
-    });
-  }));
-  return policyDecisionId;
-}
 
-/**
- * A short, human-readable operand for a proposed tool call — the path being
- * read, the command being run, the pattern being searched for.
- *
- * The full arguments are already ingested as a linked artifact, but artifact
- * refs do not travel on the v1 event stream, so without this a client can only
- * say that *some* read happened. The excerpt is bounded and carries operands
- * the model chose, never file contents: `patch` deliberately reports only its
- * path, because its arguments hold whole file bodies.
- */
-function toolArgumentsExcerpt(call: ParsedStandaloneToolCall): string {
-  const excerpt = ((): string => {
-    switch (call.toolId) {
-      case "capability":
-        return "capability_id" in call.arguments
-          ? `${call.arguments.action}: ${call.arguments.capability_id}`
-          : "query" in call.arguments && call.arguments.query !== undefined
-            ? `${call.arguments.action}: ${call.arguments.query}`
-            : call.arguments.action;
-      case "read":
-      case "patch":
-      case "write":
-        return call.arguments.path;
-      case "exec": {
-        const shell = call.arguments.shell;
-        if (shell !== undefined) return shell.script;
-        const program = call.arguments.program ?? "";
-        return [program, ...call.arguments.args].join(" ").trim();
-      }
-      case "exec_poll":
-        return call.arguments.background_id;
-      case "web_fetch":
-        return call.arguments.url;
-      case "grep":
-        return `${call.arguments.pattern} in ${call.arguments.path}`;
-      case "glob":
-        return call.arguments.pattern;
-      case "inspect":
-        return call.arguments.action === "symbol"
-          ? `${call.arguments.action}: ${call.arguments.query}`
-          : call.arguments.action;
-      case "recall":
-        return call.arguments.action === "search"
-          ? `${call.arguments.action}: ${call.arguments.query}`
-          : call.arguments.action === "read"
-            ? `${call.arguments.action}: turn ${call.arguments.turn_sequence}`
-            : call.arguments.action;
-    }
-  })();
-  const codePoints = Array.from(excerpt);
-  return codePoints.length <= TOOL_ARGUMENTS_EXCERPT_MAX_CHARS
-    ? excerpt
-    : `${codePoints.slice(0, TOOL_ARGUMENTS_EXCERPT_MAX_CHARS - 1).join("")}…`;
-}
 
-/** `path → sha256` observations a settled result proves, bounded and clean. */
-function observedSourceVersionsOf(result: ToolResult<unknown>): Record<string, string> {
-  const sources: Record<string, string> = {};
-  if (result.status !== "success" && result.status !== "partial") return sources;
-  for (const [path, sha256] of Object.entries(result.sourceVersions ?? {})) {
-    if (typeof sha256 !== "string" || !/^sha256:[0-9a-f]{64}$/.test(sha256)) continue;
-    if (path.length === 0 || path.length > 4_096) continue;
-    sources[path] = sha256;
-  }
-  return sources;
-}
 
 /**
  * Restore this task's read-before-edit knowledge from the durable episode log.
@@ -16802,122 +16717,6 @@ async function loadLiveWorkingMemory(input: LiveWorkingMemoryInput): Promise<{
   return { section, sourceVersions };
 }
 
-async function persistSettledToolResult(input: {
-  readonly input: StandaloneToolSettlementInput;
-  /** A parsed call, or the identity of a rejected one. */
-  readonly call: ProviderCallIdentity;
-  readonly toolCallId: string;
-  readonly callTranscriptArtifactUri: string;
-  readonly sideEffectId: string | null;
-  readonly result: ToolResult<unknown>;
-  /** Structured provenance retained in the full result artifact and loop. */
-  readonly denial?: ToolDenialMetadata | undefined;
-  /** Optional data projection; the full result artifact retains result.data. */
-  readonly modelVisibleData?: unknown;
-  readonly workspaceRevisionBefore?: string | null | undefined;
-  readonly workspaceRevisionAfter?: string | null | undefined;
-  readonly verificationDelta?: string | null | undefined;
-  readonly hypothesisId?: string | null | undefined;
-  readonly criterionIds?: readonly string[] | undefined;
-  readonly objectiveStep?: string | null | undefined;
-  /** Semantic transitions committed atomically with the settled tool result. */
-  readonly settlementEvents?: readonly CapabilityTransitionEvent[] | undefined;
-}): Promise<EngineToolSettlement> {
-  // Keep the model-facing projection minimal, while the authoritative result
-  // artifact retains denial provenance and the kernel decision identity.
-  const durableResult: ExecutedToolResult = input.denial === undefined
-    ? input.result
-    : { ...input.result, denial: input.denial };
-  const fullResultText = canonicalJson(durableResult);
-  const fullResultArtifact = await input.input.artifactClient.ingest(
-    new TextEncoder().encode(fullResultText),
-    { mediaType: "application/json", custom: { purpose: "tool-result", toolCallId: input.toolCallId } },
-  );
-  await input.input.artifactClient.link(fullResultArtifact.hash, "tool_call", input.toolCallId, "result");
-  const fullResultBytes = new TextEncoder().encode(fullResultText).byteLength;
-  // Dual-path projection (ADR-0039 §11): the model-visible transcript carries
-  // a minimal view of the same settled result; ceremony stays in the
-  // observability artifact ingested above.
-  const modelVisibleRecord = projectModelVisibleResult(
-    input.result,
-    input.modelVisibleData === undefined ? undefined : { data: input.modelVisibleData },
-  );
-  const projectedResult = fullResultBytes <= MAX_TOOL_MODEL_RESULT_BYTES
-    ? modelVisibleRecord
-    : z.record(z.string(), z.unknown()).parse(canonicalJson({
-        ...modelVisibleRecord,
-        data: null,
-        summary: `${input.result.summary} Full result: ${fullResultArtifact.uri}`,
-        truncation: {
-          occurred: true,
-          reason: `tool result exceeded ${MAX_TOOL_MODEL_RESULT_BYTES} model bytes`,
-          continuation: fullResultArtifact.uri,
-        },
-      }));
-  const resultTranscriptText = canonicalJson(providerToolResultTranscript(input.call, projectedResult));
-  if (new TextEncoder().encode(resultTranscriptText).byteLength > MAX_TOOL_MODEL_RESULT_BYTES) {
-    throw new Error("bounded tool result transcript still exceeds the model-result limit");
-  }
-  const resultTranscriptArtifact = await input.input.artifactClient.ingest(
-    new TextEncoder().encode(resultTranscriptText),
-    { mediaType: "application/json", custom: { purpose: "tool-result-transcript", toolCallId: input.toolCallId } },
-  );
-  await input.input.artifactClient.link(resultTranscriptArtifact.hash, "tool_call", input.toolCallId, "provider-result-transcript");
-
-  const toolState = input.result.status === "denied"
-    ? "DENIED"
-    : input.result.status === "success" || input.result.status === "partial"
-      ? "SETTLED"
-      : "FAILED";
-  await effectSettlementService.settle({
-    taskId: input.input.taskId,
-    turnId: input.input.turnId,
-    providerAttemptId: input.input.providerAttemptId,
-    toolCallId: input.toolCallId,
-    toolId: input.call.toolId,
-    sideEffectId: input.sideEffectId,
-    providerCallId: input.call.providerCallId,
-    status: input.result.status,
-    resultStatus: input.result.status,
-    toolState,
-    summary: input.result.summary,
-    callTranscriptArtifactUri: input.callTranscriptArtifactUri,
-    resultArtifactUri: fullResultArtifact.uri,
-    resultTranscriptArtifactUri: resultTranscriptArtifact.uri,
-    resultTranscriptHash: resultTranscriptArtifact.hash,
-    errorJson: toolState === "SETTLED"
-      ? null
-      : JSON.stringify({
-          summary: input.result.summary,
-          ...(input.denial === undefined ? {} : { denial: input.denial }),
-        }),
-    truncation: input.result.truncation,
-    observedSourceVersions: observedSourceVersionsOf(input.result),
-  }, input.settlementEvents ?? []);
-  const status = input.result.status;
-  return {
-    status: status === "success" || status === "partial" || status === "error"
-      || status === "denied" || status === "timeout" || status === "cancelled" || status === "unknown"
-      ? status
-      : "unknown",
-    resultHash: fullResultArtifact.hash,
-    errorCode: status === "success" || status === "partial"
-      ? null
-      : input.denial?.origin === "kernel"
-        ? "KERNEL_POLICY_DENIED"
-        : `TOOL_RESULT_${status.toUpperCase()}`,
-    errorClass: status === "success" || status === "partial"
-      ? null
-      : input.denial?.origin === "kernel" ? "kernel_policy_denied" : status,
-    denial: input.denial,
-    workspaceRevisionBefore: input.workspaceRevisionBefore ?? null,
-    workspaceRevisionAfter: input.workspaceRevisionAfter ?? null,
-    verificationDelta: input.verificationDelta ?? null,
-    hypothesisId: input.hypothesisId ?? null,
-    criterionIds: input.criterionIds,
-    objectiveStep: input.objectiveStep ?? null,
-  };
-}
 
 // ────────────────────────── Agent loop ─────────────────────────────────────
 
@@ -16953,6 +16752,19 @@ function buildEpisodeObservations(
     }
   }
   return observations;
+}
+
+async function executeTurnTransition(plan: TurnTransitionPlan, tx: Prisma.TransactionClient): Promise<void> {
+  const update = await tx.turn.updateMany({
+    where: { id: plan.aggregateId, state: { in: [...plan.expectedStates] } },
+    data: {
+      state: plan.nextState,
+      ...(plan.setStartedAt ? { startedAt: new Date() } : {}),
+      ...(plan.setCompletedAt ? { completedAt: new Date() } : {}),
+      ...(plan.terminalErrorJson === null ? {} : { terminalErrorJson: plan.terminalErrorJson }),
+    },
+  });
+  if (update.count !== 1) throw new Error(plan.conflictError);
 }
 
 /**
@@ -17013,20 +16825,17 @@ async function agentLoop(turnId: string): Promise<void> {
         || current?.state === "VERIFYING"
       ) return true;
       if (current?.state !== "PENDING" && current?.state !== "REPAIRING") return false;
+      const resumedFrom: "PENDING" | "REPAIRING" = current.state;
       await emit({
         eventType: "turn.context_compiling",
         aggregateType: "turn", aggregateId: turnId,
         correlationId: turn.taskId ?? undefined,
-        payload: { phase: "context_compiling", resumed_from: current.state },
+        payload: { phase: "context_compiling", resumed_from: resumedFrom },
       }, async (tx) => {
-        const update = await tx.turn.updateMany({
-          where: { id: turnId, state: current.state },
-          data: {
-            state: "CONTEXT_COMPILING",
-            ...(current.state === "PENDING" ? { startedAt: new Date() } : {}),
-          },
-        });
-        if (update.count !== 1) throw new Error(`turn ${turnId} changed before context compilation`);
+        await executeTurnTransition(
+          planEnterContextCompiling({ turnId, taskId: turn.taskId, resumedFrom }),
+          tx,
+        );
       });
       return true;
     });
@@ -17633,7 +17442,6 @@ async function agentLoop(turnId: string): Promise<void> {
       ? workspaceToolSchemas
       : selectInitialStandaloneToolSchemas(toolsEnabledForTurn);
     let activeToolSchemas = initialToolSchemas;
-    const declaredToolSchemasByAttempt = new Map<string, readonly ProviderToolSchema[]>();
     const activatedToolCapabilities = capabilitySession.activeCapabilityIds();
     const selectedProfile = createTerminusExecutionProfile({
       mode: harnessProfileMode,
@@ -17707,7 +17515,6 @@ async function agentLoop(turnId: string): Promise<void> {
       mutateAgentState,
       assertControlWriterLease,
     );
-    const settlementByProviderCallId = new Map<string, EngineToolSettlement>();
     const toolEpisodeService = new ToolEpisodeService({
       store: {
         // R4/Cubic: page newest-first so the byte-budgeted walk always sees
@@ -17876,7 +17683,6 @@ async function agentLoop(turnId: string): Promise<void> {
     // What the compiler predicted this manifest's prompt would cost, filled
     // by `compileProviderContext` and read at settlement so the estimator
     // gets a predicted/observed pair to calibrate from.
-    const predictedPromptByManifest = new Map<string, number>();
     const confidentialityPolicy: ConfidentialityPolicy = {
       allowedProviders: {
         public: [selectedProvider.providerId],
@@ -18746,13 +18552,33 @@ async function agentLoop(turnId: string): Promise<void> {
     };
     let lastResponseArtifactUri: string | null = null;
     let currentProjected: ProjectedResponse | null = null;
-    const toolSettlementEnteredFor = new Set<string>();
+    // Per-attempt bookkeeping the executor owns; the loop reads it through
+    // the executor so the maps are injectable and independently instantiable.
+    const turnCommandExecutor = new TurnCommandExecutor({
+      mutate: mutateAgentState,
+      emit: async (input) => emit(input as EmitInput),
+      // prepareTurnForProviderContinuation throws the original CAS-failure
+      // error on any miss; the 1 reports the guarded row it updated.
+      rearmProviderContinuation: async (rearmTurnId, tx) => {
+        await prepareTurnForProviderContinuation(
+          tx as Parameters<typeof prepareTurnForProviderContinuation>[0],
+          rearmTurnId,
+        );
+        return 1;
+      },
+    });
+    const {
+      declaredToolSchemasByAttempt,
+      manifestIdByAttempt,
+      predictedCacheByAttempt,
+      predictedPromptByManifest,
+      settlementByProviderCallId,
+      toolSettlementEnteredFor,
+    } = turnCommandExecutor.ledger;
     // R7 (harness critical path): reconcile predicted vs actual prompt-cache
     // reads per attempt; a systematic gap means the cache-stable prefix was
     // mutated, which silently multiplies cost.
     const cacheMonitor = new CacheRatioMonitor();
-    const predictedCacheByAttempt = new Map<string, bigint>();
-    const manifestIdByAttempt = new Map<string, Uuid7>();
     // Merged knob precedence: an explicit TERMINUS_TURN_MAX_STEPS wins;
     // otherwise TERMINUS_MAX_TOOL_CYCLES (validated, fail-closed, default 64)
     // sizes the soft budget. A per-turn budget from `POST /v1/turns` tightens
@@ -19522,15 +19348,7 @@ async function agentLoop(turnId: string): Promise<void> {
           select: { state: true },
         });
         if (turnState?.state === "RESPONSE_VALIDATING") {
-          await mutateAgentState(() => emit({
-            eventType: "turn.context_compiling",
-            aggregateType: "turn",
-            aggregateId: turnId,
-            correlationId: task.id,
-            payload: { phase: "context_compiling", reason: "provider_continuation" },
-          }, async (tx) => {
-            await prepareTurnForProviderContinuation(tx.turn, turnId);
-          }));
+          await turnCommandExecutor.rearmForProviderContinuation({ turnId, taskId: task.id });
         } else if (turnState?.state !== "CONTEXT_COMPILING") {
           throw new Error(
             `turn ${turnId} cannot compile provider context from ${turnState?.state ?? "missing"}`,
@@ -19851,11 +19669,10 @@ async function agentLoop(turnId: string): Promise<void> {
             correlationId: task.id,
             payload: { provider_attempt_id: attemptId, tool_calls: count },
           }, async (tx) => {
-            const update = await tx.turn.updateMany({
-              where: { id: turnId, state: "RESPONSE_VALIDATING" },
-              data: { state: "TOOL_SETTLEMENT" },
-            });
-            if (update.count !== 1) throw new Error(`turn ${turnId} changed before tool settlement`);
+            await executeTurnTransition(
+              planEnterToolSettlement({ turnId, taskId: task.id, providerAttemptId: attemptId, toolCallCount: count }),
+              tx,
+            );
           }));
         }
         await toolEpisodeSession.settle({
@@ -19900,11 +19717,7 @@ async function agentLoop(turnId: string): Promise<void> {
           correlationId: task.id,
           payload: { phase: "context_compiling", reason: "tool_calls_settled" },
         }, async (tx) => {
-          const update = await tx.turn.updateMany({
-            where: { id: turnId, state: "TOOL_SETTLEMENT" },
-            data: { state: "CONTEXT_COMPILING" },
-          });
-          if (update.count !== 1) throw new Error(`turn ${turnId} changed before context recompilation`);
+          await executeTurnTransition(planReenterContextCompiling({ turnId, taskId: task.id }), tx);
         }));
       },
     });
@@ -20154,11 +19967,12 @@ async function agentLoop(turnId: string): Promise<void> {
         correlationId: turn.taskId ?? undefined,
         payload: { phase: "finalizing", after },
       }, async (tx) => {
-        const update = await tx.turn.updateMany({
-          where: { id: turnId, state: expectedState },
-          data: { state: "FINALIZING" },
-        });
-        if (update.count !== 1) throw new Error(`turn ${turnId} changed before finalizing`);
+        await executeTurnTransition(planEnterFinalizing({
+          turnId,
+          taskId: turn.taskId,
+          after,
+          expectedState,
+        }), tx);
       }));
 
       // R5: automatic end-of-turn checkpoint so cross-turn continuity carries
@@ -20231,11 +20045,10 @@ async function agentLoop(turnId: string): Promise<void> {
         },
         artifactRefs: [finalResponseArtifactUri],
       }, async (tx) => {
-        const update = await tx.turn.updateMany({
-          where: { id: turnId, state: "FINALIZING" },
-          data: { state: "COMPLETED", completedAt: new Date() },
-        });
-        if (update.count !== 1) throw new Error(`turn ${turnId} changed before completion settlement`);
+        await executeTurnTransition(
+          { ...planComplete({ turnId }), eventType: "turn.completed", payload: {} },
+          tx,
+        );
       }));
     };
 
@@ -20247,15 +20060,7 @@ async function agentLoop(turnId: string): Promise<void> {
         correlationId: turn.taskId ?? undefined,
         payload: { reason: "verification_failed", ...reason },
       }, async (tx) => {
-        const update = await tx.turn.updateMany({
-          where: { id: turnId, state: "VERIFYING" },
-          data: {
-            state: "FAILED",
-            completedAt: new Date(),
-            terminalErrorJson: JSON.stringify({ reason: "verification_failed", ...reason }),
-          },
-        });
-        if (update.count !== 1) throw new Error(`turn ${turnId} changed during verification failure settlement`);
+        await executeTurnTransition(planFailVerification({ turnId, taskId: turn.taskId, reason }), tx);
       }));
     };
 
@@ -20297,11 +20102,10 @@ async function agentLoop(turnId: string): Promise<void> {
             payload: { phase: "VERIFY", proposal_artifact: finalResponseArtifactUri },
             artifactRefs: [finalResponseArtifactUri],
           }, async (tx) => {
-            const update = await tx.turn.updateMany({
-              where: { id: turnId, state: "RESPONSE_VALIDATING" },
-              data: { state: "VERIFYING" },
-            });
-            if (update.count !== 1) throw new Error(`turn ${turnId} changed before verification`);
+            await executeTurnTransition(
+              planEnterVerifying({ turnId, taskId: task.id, proposalArtifact: finalResponseArtifactUri }),
+              tx,
+            );
           }));
           const enteredVerification = await verificationCoordinator.begin(task.id);
           if (!enteredVerification) throw new Error(`task ${task.id} changed before verification`);
@@ -20399,21 +20203,21 @@ async function agentLoop(turnId: string): Promise<void> {
         // threw "stale source or environment binding" and the task could
         // never complete. A stale binding says the plan describes a world
         // that no longer exists — so we plan against the world that does.
-        const staleBindingReason = existingVerificationPlan === null
-          ? null
-          : existingVerificationPlan.environmentDigest === null
-            ? "missing_environment_digest"
-            : existingVerificationPlan.environmentDigest !== environmentDigest
-              ? "environment_changed"
-              : existingVerificationPlan.sourceRevision !== sourceRevision
-                ? "source_revision_changed"
-                : null;
+        const staleBindingReason = stalePlanBindingReason({
+          existingPlan: existingVerificationPlan,
+          sourceRevision,
+          environmentDigest,
+        });
         const restoredPlan = existingVerificationPlan === null || staleBindingReason !== null
           ? null
           : verificationPlanFromPrisma(existingVerificationPlan);
-        const resumablePlan = restoredPlan !== null
-          && restoredPlan.taskContractId === task.id
-          && restoredPlan.taskContractVersion === task.activeContractVersion
+        const resumablePlan = restoredPlanMatchesContract({
+          restoredPlan: restoredPlan === null
+            ? null
+            : { taskContractId: restoredPlan.taskContractId, taskContractVersion: restoredPlan.taskContractVersion },
+          taskId: task.id,
+          activeContractVersion: task.activeContractVersion,
+        })
           ? restoredPlan
           : null;
         if (existingVerificationPlan !== null && resumablePlan === null) {
@@ -20534,8 +20338,10 @@ async function agentLoop(turnId: string): Promise<void> {
         );
         const attempts = await runtime.store.listAttempts(plan.id);
         const evidenceGraph = await runtime.store.getEvidenceGraph(plan.id);
-        const allPassed =
-          evaluation.allRequiredPassed && evaluation.completionExpressionSatisfied;
+        const allPassed = verificationEvaluationPassed({
+          allRequiredPassed: evaluation.allRequiredPassed,
+          completionExpressionSatisfied: evaluation.completionExpressionSatisfied,
+        });
         // H3: distinguish "the repository's checks failed" from "this
         // repository has no check to run". The second is not a verification
         // failure and must not burn repair attempts.
@@ -20750,11 +20556,16 @@ async function agentLoop(turnId: string): Promise<void> {
               },
               artifactRefs: [directiveArtifact.uri],
             }, async (tx) => {
-              const update = await tx.turn.updateMany({
-                where: { id: turnId, state: "VERIFYING" },
-                data: { state: "REPAIR_PENDING" },
-              });
-              if (update.count !== 1) throw new Error(`turn ${turnId} changed before repair scheduling`);
+              await executeTurnTransition(
+                planEnterRepairPending({ turnId, taskId: task.id, payload: {
+                  phase: "REPAIR_PENDING",
+                  repair_attempt: repairDecision.attemptNumber,
+                  repair_attempt_id: repairAttemptId,
+                  hypothesis_id: repairDecision.hypothesisId,
+                  directive_artifact: directiveArtifact.uri,
+                } }),
+                tx,
+              );
             }));
             const repairTurnId = await admitRepairTurn({
               taskId: task.id,
@@ -20970,8 +20781,14 @@ async function agentLoop(turnId: string): Promise<void> {
               .filter((claim) => claim.status === "SATISFIED" || claim.status === "WAIVED")
               .map((claim) => claim.id),
           );
-          const missingClaimIds = requiredClaimIdsForRepair.filter((claimId) => !admissibleClaimIds.has(claimId));
-          const gateFailures = (missingClaimIds.length > 0 ? missingClaimIds : ["completion-gate"]).map((claimId) =>
+          // The verification coordinator decides whether the bounded repair
+          // targets missing required claims or the completion gate itself.
+          const gateRepairInputs = completionGateRepairInputs({
+            requiredClaimIds: requiredClaimIdsForRepair,
+            admissibleClaimIds: [...admissibleClaimIds],
+          });
+          const missingClaimIds = gateRepairInputs.missingClaimIds;
+          const gateFailures = gateRepairInputs.failureNodeIds.map((claimId) =>
             normalizeFailure({
               nodeId: claimId,
               predicateType: "completion_gate",
@@ -21058,11 +20875,18 @@ async function agentLoop(turnId: string): Promise<void> {
               },
               artifactRefs: [directiveArtifact.uri],
             }, async (tx) => {
-              const update = await tx.turn.updateMany({
-                where: { id: turnId, state: "VERIFYING" },
-                data: { state: "REPAIR_PENDING" },
-              });
-              if (update.count !== 1) throw new Error(`turn ${turnId} changed before repair scheduling`);
+              await executeTurnTransition(
+                planEnterRepairPending({ turnId, taskId: task.id, payload: {
+                  phase: "REPAIR_PENDING",
+                  reason: "completion_gate_denied",
+                  missing_claim_ids: missingClaimIds,
+                  repair_attempt: gateRepairDecision.attemptNumber,
+                  repair_attempt_id: repairAttemptId,
+                  hypothesis_id: gateRepairDecision.hypothesisId,
+                  directive_artifact: directiveArtifact.uri,
+                } }),
+                tx,
+              );
             }));
             const repairTurnId = await admitRepairTurn({
               taskId: task.id,
@@ -21125,83 +20949,41 @@ async function agentLoop(turnId: string): Promise<void> {
     const policyDenied = err instanceof ToolPolicyDeniedError;
     const budgetExhausted = err instanceof ToolCycleBudgetExhaustedError;
     const stopKind = engineStop?.kind ?? null;
-    const terminalTurnState = stopKind === "interrupted"
-      ? "ABORTED"
-      : stopKind === "budget_stop" || stopKind === "budget_exhausted" || budgetExhausted
-        ? "BUDGET_EXHAUSTED"
-        : stopKind === "policy_stop" || stopKind === "policy_denied" || policyDenied
-          ? "POLICY_DENIED"
-          : stopKind === "blocked"
-            ? "BLOCKED"
-            : stopKind === "needs_user_input"
-              ? "USER_ACTION_REQUIRED"
-              : ambiguousToolSettlement
-                ? "INTERRUPTED"
-                : "FAILED";
-    const terminalTurnEvent = terminalTurnState === "ABORTED"
-      ? "turn.aborted"
-      : terminalTurnState === "BUDGET_EXHAUSTED"
-        ? "turn.budget_exhausted"
-        : terminalTurnState === "POLICY_DENIED"
-          ? "turn.policy_denied"
-          : terminalTurnState === "BLOCKED"
-            ? "turn.blocked"
-            : terminalTurnState === "USER_ACTION_REQUIRED"
-              ? "turn.needs_user_input"
-              : ambiguousToolSettlement
-                ? "turn.interrupted"
-                : "turn.failed";
-    const failureCode = stopEnvelope?.code
-      ?? (stopKind === "budget_stop" ? "BUDGET_EXHAUSTED"
-        : stopKind === "policy_stop" ? "POLICY_DENIED"
-          : stopKind === "blocked" ? "PROVIDER_BLOCKED"
-            : stopKind === "needs_user_input" ? "USER_INPUT_REQUIRED"
-              : stopKind === "interrupted" ? "CANCELLED"
-                : providerUnavailable
-                  ? "PROVIDER_TRANSPORT_UNAVAILABLE"
-                  : policyDenied
-                    ? "TOOL_POLICY_DENIED"
-                    : budgetExhausted
-                      ? "TOOL_BUDGET_EXHAUSTED"
-                      : ambiguousToolSettlement
-                        ? "TOOL_SETTLEMENT_UNKNOWN"
-                        : "PROVIDER_EXECUTION_FAILED");
+    // Lifecycle decision: classify the stop into the terminal vocabulary.
+    // The task-side consequence rides on the same classification via
+    // turnFailureDisposition, so the turn/task vocabularies cannot drift.
+    const settlement = planTerminalTurnSettlement({
+      turnId,
+      classification: classifyTerminalTurn({
+        stopKind,
+        stopEnvelope,
+        providerUnavailable,
+        policyDenied,
+        budgetExhausted,
+        ambiguousToolSettlement,
+      }),
+      stopEnvelope,
+      classifiedEnvelope: classified.envelope,
+    });
+    const terminalTurnState = settlement.classification.state;
+    const terminalTurnEvent = settlement.classification.eventType;
+    const failureCode = settlement.classification.code;
     const failureMessage = stopEnvelope?.message ?? classified.envelope.message;
     const failureDetails = stopEnvelope?.details ?? classified.envelope.details;
-    const failureReason = stopKind === "budget_stop" || stopKind === "budget_exhausted" || budgetExhausted
-      ? "budget_exhausted"
-      : stopKind === "policy_stop" || stopKind === "policy_denied" || policyDenied
-        ? "policy_denied"
-        : stopKind === "blocked" || providerUnavailable
-          ? "provider_blocked"
-          : stopKind === "needs_user_input"
-            ? "needs_user_input"
-            : stopKind === "interrupted"
-              ? "aborted"
-              : ambiguousToolSettlement
-                ? "tool_settlement_unknown"
-                : stopKind === "failed_verification"
-                  ? "failed_verification"
-                  : "agent_loop_error";
+    const failureReason = settlement.classification.reason;
     // H8: only a user cancellation or a hard budget/policy stop ends the task.
     const disposition = turnFailureDisposition(terminalTurnState);
     const taskStatusForStop = disposition.taskStatus;
-    const terminalEvidenceOutcome: EvidenceTerminalOutcome | null = taskStatusForStop === "ABORTED"
-      ? "ABORTED"
-      : taskStatusForStop === "BUDGET_EXHAUSTED"
-        ? "BUDGET_EXHAUSTED"
-        : taskStatusForStop === "POLICY_DENIED"
-          ? "POLICY_DENIED"
-          : taskStatusForStop === "NEEDS_USER_DECISION"
-            ? "NEEDS_USER_DECISION"
-            : taskStatusForStop === "BLOCKED"
-              ? "BLOCKED"
-              : taskStatusForStop === "FAILED_VERIFICATION"
-                ? "FAILED_VERIFICATION"
-              : null;
+    const terminalEvidenceOutcome: EvidenceTerminalOutcome | null = settlement.classification.evidenceOutcome;
     const blockedError = taskStatusForStop === "BLOCKED" || taskStatusForStop === "NEEDS_USER_DECISION";
     if (activeEngine !== null) {
-      await persistTurnBudgetLedger(turnId, activeEngine.budget.ledger, turnContextBudgetJson);
+      try {
+        await persistTurnBudgetLedger(turnId, activeEngine.budget.ledger, turnContextBudgetJson);
+      } catch (ledgerError) {
+        // The ledger is evidence, not liveness: a fault here must not prevent
+        // the terminal settlement below from converging the turn.
+        console.error("agentLoop budget ledger persist fault", ledgerError);
+      }
     }
     const immutableTurnStates = [
       "COMPLETED",
@@ -21215,26 +20997,9 @@ async function agentLoop(turnId: string): Promise<void> {
       "VERIFIED",
       "ABORTED",
     ] as const;
-    const failureErrorJson = JSON.stringify({
-      code: failureCode,
-      message: failureMessage,
-      category: stopEnvelope?.category ?? classified.envelope.category,
-      details: failureDetails,
-    });
-    const turnTerminalErrorJson = JSON.stringify({
-      code: failureCode,
-      message: failureMessage,
-      reason: failureReason,
-      details: failureDetails,
-    });
-    const turnFailurePayload = {
-      code: failureCode,
-      category: stopEnvelope?.category ?? classified.envelope.category,
-      message: failureMessage,
-      reason: failureReason,
-      retryable: stopEnvelope?.retryable ?? classified.envelope.retryable,
-      details: failureDetails,
-    };
+    const failureErrorJson = settlement.providerAttemptsErrorJson;
+    const turnTerminalErrorJson = settlement.turnTerminalErrorJson;
+    const turnFailurePayload = settlement.eventPayload;
     const failProviderAttempts = async (tx: Prisma.TransactionClient): Promise<void> => {
       await tx.providerAttempt.updateMany({
         where: { turnId, status: "running" },
@@ -21252,7 +21017,8 @@ async function agentLoop(turnId: string): Promise<void> {
       });
       if (update.count !== 1) throw new Error(`turn ${turnId} changed during failure settlement`);
     };
-    await mutateAgentState(async () => {
+    try {
+      await mutateAgentState(async () => {
       const currentTurn = await db.turn.findUnique({
         where: { id: turnId },
         select: { state: true },
@@ -21289,26 +21055,13 @@ async function agentLoop(turnId: string): Promise<void> {
         if (failedTaskId === null || failedTask === null) return;
         const update = await tx.task.updateMany({
           where: { id: failedTaskId, status: failedTask.status },
-          data: taskStaysActive
-            ? {
-                // Returned to the actor, not terminated: no completedAt and no
-                // terminal reason, or the task becomes unsteerable.
-                status: "ACTIVE",
-                phase: "IMPLEMENT",
-                completedAt: null,
-                terminalReasonJson: null,
-              }
-            : {
-                status: taskTerminalStatus,
-                phase: failedTask.status === "VERIFYING" ? "VERIFY" : "IMPLEMENT",
-                completedAt: blockedError ? null : new Date(),
-                terminalReasonJson: JSON.stringify({
-                  reason: failureReason,
-                  code: failureCode,
-                  message: failureMessage,
-                  details: failureDetails,
-                }),
-              },
+          data: taskRowDataForTerminalStop({
+            taskStaysActive,
+            taskTerminalStatus,
+            failedTaskStatus: failedTask.status,
+            blockedError,
+            failure: { reason: failureReason, code: failureCode, message: failureMessage, details: failureDetails },
+          }),
         });
         if (update.count !== 1) throw new Error(`task ${failedTaskId} changed during failure settlement`);
       };
@@ -21375,10 +21128,76 @@ async function agentLoop(turnId: string): Promise<void> {
         });
       }
       if (evidenceOutcome !== null) {
-        await persistEvidenceForCurrentTurn(evidenceOutcome);
+        try {
+          await persistEvidenceForCurrentTurn(evidenceOutcome);
+        } catch (evidenceError) {
+          // Evidence is durable-adjacent, not liveness: the terminal event
+          // above is the authoritative settlement. Surface the fault; never
+          // rethrow it out of the settlement path.
+          console.error("agentLoop evidence persist fault", evidenceError);
+        }
       }
-      await synchronizeV1TaskProjection(failedTaskId, taskEventType);
+      if (failedTaskId !== null) {
+        try {
+          await synchronizeV1TaskProjection(failedTaskId, taskEventType);
+        } catch (projectionError) {
+          // The projection reconciles later; the turn is already settled.
+          console.error("agentLoop task projection fault", projectionError);
+        }
+      }
     });
+  } catch (settlementError: unknown) {
+    // Reference-loop convergence rule: a fault inside the failure-settlement
+    // block must never escape agentLoop. The only trap around this promise
+    // is the admission-site `.catch(console.error)`; a rethrow here leaves an
+    // active turn stranded in CONTEXT_COMPILING (or its pre-failure phase)
+    // with no durable record and no re-driver until process restart.
+    //
+    // A fenced writer lease means this process is being terminated anyway —
+    // restart recovery owns the turn. Anything else leaves a durable
+    // recovery marker event so recovery (or a later settlement attempt)
+    // converges the turn without operator intervention.
+    if (settlementFaultIsTerminalProcessFault(settlementError)) throw settlementError;
+    const currentTurn = await db.turn.findUnique({
+      where: { id: turnId },
+      select: { state: true },
+    }).catch(() => null);
+    if (currentTurn === null || !ACTIVE_TURN_STATES.includes(currentTurn.state as never)) {
+      console.error("agentLoop failure settlement fault after terminal settlement", settlementError);
+      return;
+    }
+    const previousState = currentTurn.state;
+    const plan = planRecoveryAfterSettlementFault({
+      previousState,
+      code: failureCode,
+      details: settlementError instanceof Error ? settlementError.message : String(settlementError),
+    });
+    console.error(
+      `agentLoop failure settlement fault; recorded durable recovery for turn ${turnId} in ${previousState}`,
+      settlementError,
+    );
+    await emit({
+      eventType: "turn.recovery_requested",
+      aggregateType: "turn",
+      aggregateId: turnId,
+      correlationId: turn.taskId ?? undefined,
+      payload: { ...plan.marker },
+    }, async (tx) => {
+      // Idempotent marker write: the turn stays in its current non-terminal
+      // state with an explicit recovery reason. Restart recovery and the
+      // admission path both key off this record instead of the old silent
+      // stranding.
+      const markerJson = JSON.stringify(plan.marker);
+      const marked = await tx.turn.updateMany({
+        where: { id: turnId, state: previousState, terminalErrorJson: null },
+        data: { terminalErrorJson: markerJson },
+      });
+      const interpretation = interpretRecoveryMarkerWrite(marked.count);
+      if (interpretation === "needs_durable_reconciliation") {
+        throw new Error(`turn ${turnId} recovery marker raced during failure settlement`);
+      }
+    });
+    }
   } finally {
     if (activeTurnAbortControllers.get(turnId) === abortController) {
       activeTurnAbortControllers.delete(turnId);
@@ -21555,164 +21374,6 @@ async function reconcileUnsettledSideEffects(
 
 const RECOVERABLE_TOOL_CALL_STATES = new Set(["SETTLED", "FAILED", "TIMED_OUT", "CANCELLED", "DENIED"]);
 const RECOVERABLE_EFFECT_STATES = new Set(["SETTLED", "FAILED"]);
-const IN_FLIGHT_PROVIDER_STATES = new Set(["running", "submitted", "streaming", "starting"]);
-
-interface ProviderAttemptRecoveryRecord {
-  readonly id: string;
-  readonly turnId: string;
-  readonly taskId: string | null;
-  readonly previousStatus: string;
-  readonly providerIdempotencyKey: string | null;
-  readonly requestFingerprint: string | null;
-}
-
-interface ProviderAttemptRecoveryResult {
-  readonly scanned: number;
-  readonly interrupted: readonly ProviderAttemptRecoveryRecord[];
-  readonly alreadyResolved: readonly string[];
-  readonly failed: readonly { id: string; error: string }[];
-}
-
-class ProviderAttemptAlreadyResolvedError extends Error {
-  constructor(readonly attemptId: string) {
-    super(`provider attempt ${attemptId} was already resolved before recovery`);
-    this.name = "ProviderAttemptAlreadyResolvedError";
-  }
-}
-
-/**
- * Reconcile provider calls that crossed the kernel boundary without a durable
- * response. They cannot be retried safely: the provider may have accepted the
- * request even when control did not receive a response. Recovery therefore
- * records an interrupted attempt, blocks its task, and leaves a deterministic
- * evidence event for manual/provider-side reconciliation.
- */
-async function reconcileInFlightProviderAttempts(
-  alreadyUnderMutationLock = false,
-): Promise<ProviderAttemptRecoveryResult> {
-  const attempts = await db.providerAttempt.findMany({
-    where: { status: { in: [...IN_FLIGHT_PROVIDER_STATES] } },
-    orderBy: [{ startedAt: "asc" }, { id: "asc" }],
-    select: {
-      id: true,
-      turnId: true,
-      status: true,
-      providerIdempotencyKey: true,
-      requestFingerprint: true,
-      requestArtifact: true,
-      responseArtifact: true,
-      turn: { select: { state: true, taskId: true } },
-    },
-  });
-  const interrupted: ProviderAttemptRecoveryRecord[] = [];
-  const alreadyResolved: string[] = [];
-  const failed: Array<{ id: string; error: string }> = [];
-  for (const attempt of attempts) {
-    const recover = async (): Promise<void> => {
-      const interruptedAt = new Date();
-      await emit({
-        eventType: "turn.recovery_interrupted",
-        aggregateType: "turn",
-        aggregateId: attempt.turnId,
-        correlationId: attempt.turn.taskId ?? attempt.turnId,
-        idempotencyKey: `provider-recovery:${attempt.id}`,
-        payload: {
-          previous_state: attempt.turn.state,
-          state: "INTERRUPTED",
-          reason: "provider_attempt_in_flight_on_process_restart",
-          reconciliation_required: true,
-          provider_attempt_id: attempt.id,
-          provider_idempotency_key: attempt.providerIdempotencyKey,
-          request_fingerprint: attempt.requestFingerprint,
-        },
-        artifactRefs: [attempt.requestArtifact, ...(attempt.responseArtifact === null ? [] : [attempt.responseArtifact])],
-      }, async (tx) => {
-        const current = await tx.providerAttempt.findUnique({
-          where: { id: attempt.id },
-          select: { status: true },
-        });
-        if (current === null || !IN_FLIGHT_PROVIDER_STATES.has(current.status.toLowerCase())) {
-          throw new ProviderAttemptAlreadyResolvedError(attempt.id);
-        }
-        const attemptUpdate = await tx.providerAttempt.updateMany({
-          where: { id: attempt.id, status: { in: [...IN_FLIGHT_PROVIDER_STATES] } },
-          data: {
-            status: "interrupted",
-            completedAt: interruptedAt,
-            errorJson: JSON.stringify({
-              reason: "process_restart_before_provider_response",
-              reconciliation_required: true,
-              provider_idempotency_key: attempt.providerIdempotencyKey,
-            }),
-          },
-        });
-        if (attemptUpdate.count !== 1) {
-          throw new ProviderAttemptAlreadyResolvedError(attempt.id);
-        }
-
-        const turn = await tx.turn.findUnique({
-          where: { id: attempt.turnId },
-          select: { state: true, taskId: true },
-        });
-        if (turn !== null && V1_ACTIVE_TURN_STATES.includes(turn.state as (typeof V1_ACTIVE_TURN_STATES)[number])) {
-          const turnUpdate = await tx.turn.updateMany({
-            where: { id: attempt.turnId, state: turn.state },
-            data: {
-              state: "INTERRUPTED",
-              completedAt: interruptedAt,
-              terminalErrorJson: JSON.stringify({
-                reason: "provider_attempt_in_flight_on_process_restart",
-                provider_attempt_id: attempt.id,
-                reconciliation_required: true,
-              }),
-            },
-          });
-          if (turnUpdate.count !== 1) {
-            throw new Error(`turn ${attempt.turnId} changed during provider recovery`);
-          }
-        }
-        if (turn?.taskId !== null && turn?.taskId !== undefined) {
-          await tx.task.updateMany({
-            where: { id: turn.taskId, status: { in: ["ACTIVE", "VERIFYING"] } },
-            data: {
-              status: "BLOCKED",
-              phase: turn.state === "VERIFYING" ? "VERIFY" : "IMPLEMENT",
-              completedAt: null,
-              terminalReasonJson: JSON.stringify({
-                reason: "provider_recovery_required",
-                provider_attempt_id: attempt.id,
-                turn_id: attempt.turnId,
-                reconciliation_required: true,
-              }),
-            },
-          });
-        }
-      });
-    };
-    try {
-      if (alreadyUnderMutationLock) await recover();
-      else await mutateAgentState(recover);
-      interrupted.push({
-        id: attempt.id,
-        turnId: attempt.turnId,
-        taskId: attempt.turn.taskId,
-        previousStatus: attempt.status,
-        providerIdempotencyKey: attempt.providerIdempotencyKey,
-        requestFingerprint: attempt.requestFingerprint,
-      });
-    } catch (error: unknown) {
-      if (error instanceof ProviderAttemptAlreadyResolvedError) {
-        alreadyResolved.push(error.attemptId);
-      } else {
-        failed.push({
-          id: attempt.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-  }
-  return { scanned: attempts.length, interrupted, alreadyResolved, failed };
-}
 
 interface CandidateBranchRecoveryRecord {
   readonly id: string;
@@ -21908,7 +21569,7 @@ async function canResumeTurnAtBoundary(turnId: string, state: string): Promise<b
     db.toolCall.findMany({ where: { turnId }, select: { state: true } }),
     db.sideEffect.findMany({ where: { toolCall: { turnId } }, select: { state: true } }),
   ]);
-  const providerSafe = attempts.every((attempt) => !IN_FLIGHT_PROVIDER_STATES.has(attempt.status.toLowerCase()));
+  const providerSafe = attempts.every((attempt) => !(IN_FLIGHT_PROVIDER_STATES as readonly string[]).includes(attempt.status.toLowerCase()));
   const effectsSafe = toolCalls.every((call) => RECOVERABLE_TOOL_CALL_STATES.has(call.state))
     && effects.every((effect) => RECOVERABLE_EFFECT_STATES.has(effect.state));
   if (!providerSafe || !effectsSafe) return false;
@@ -22303,6 +21964,7 @@ async function recoverActiveAgentTurns(): Promise<number> {
       state: true,
       initiatingActor: true,
       initiatingInputArtifact: true,
+      terminalErrorJson: true,
       episodes: {
         where: { sequence: 1, kind: "user_message" },
         take: 1,
@@ -22317,6 +21979,46 @@ async function recoverActiveAgentTurns(): Promise<number> {
     },
   });
   for (const turn of active) {
+    // A turn whose failure settlement could not be proven carries a durable
+    // recovery marker (see the agentLoop settlement-fault path). Converge it
+    // terminally before any other recovery pass touches it: the marker is
+    // the explicit record that the in-process executor died without
+    // recording the outcome.
+    const recoveryMarker = turn.terminalErrorJson === null
+      ? null
+      : safeParse<Record<string, unknown> | null>(turn.terminalErrorJson, null);
+    if (recoveryMarker?.reason === "failure_settlement_unproven") {
+      await emit({
+        eventType: "turn.failed",
+        aggregateType: "turn",
+        aggregateId: turn.id,
+        correlationId: turn.taskId ?? undefined,
+        payload: { ...recoveryMarker, state: "FAILED" },
+      }, async (tx) => {
+        const settled = await tx.turn.updateMany({
+          where: { id: turn.id, state: turn.state },
+          data: {
+            state: "FAILED",
+            completedAt: new Date(),
+            terminalErrorJson: turn.terminalErrorJson,
+          },
+        });
+        if (settled.count !== 1) {
+          throw new Error(`turn ${turn.id} changed while converging a recovery marker`);
+        }
+      });
+      if (turn.taskId !== null) {
+        await emit({
+          eventType: "task.turn_failed",
+          aggregateType: "task",
+          aggregateId: turn.taskId,
+          correlationId: turn.taskId,
+          payload: { status: "ACTIVE", active_turn: null, ...recoveryMarker },
+        });
+        await synchronizeV1TaskProjection(turn.taskId, "task.turn_failed");
+      }
+      continue;
+    }
     if (turn.state === "VERIFIED" || turn.state === "FINALIZING") {
       if (await recoverVerifiedOrFinalizingTurn(turn)) continue;
       await quarantineTerminalRecoveryTurn({
@@ -23141,7 +22843,7 @@ async function runStartupRecovery(): Promise<void> {
   await replayArpV2();
   const jobRecovery = await reconcileNonterminalJobs();
   const effectRecovery = await reconcileUnsettledSideEffects();
-  const providerRecovery = await reconcileInFlightProviderAttempts();
+  const providerRecovery = await providerSessionService.reconcileInFlightAttempts(V1_ACTIVE_TURN_STATES);
   const candidateBranchRecovery = await reconcileInFlightCandidateBranchAdmissions(
     false,
     buildTrustedBranchReceiptReconciler() ?? undefined,

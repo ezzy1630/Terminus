@@ -98,6 +98,7 @@ export const EVENT_TYPES = [
   "turn.recovery_interrupted",
   "turn.recovery_reconciled",
   "turn.recovery_failed",
+  "turn.recovery_requested",
   "completion.proposed",
   "tool.proposed",
   "tool.denied",
@@ -535,6 +536,7 @@ export interface EventPayloadMap {
   "turn.recovery_interrupted": RuntimeLifecyclePayload;
   "turn.recovery_reconciled": RuntimeLifecyclePayload;
   "turn.recovery_failed": RuntimeLifecyclePayload;
+  "turn.recovery_requested": RuntimeLifecyclePayload;
   "completion.proposed": RuntimeLifecyclePayload;
   "tool.proposed": ToolProposedPayload;
   "tool.denied": RuntimeLifecyclePayload;
@@ -722,6 +724,7 @@ export function payloadSchemaFor(type: EventType): z.ZodType<Readonly<Record<str
     "turn.recovery_interrupted": runtimeLifecyclePayloadSchema,
     "turn.recovery_reconciled": runtimeLifecyclePayloadSchema,
     "turn.recovery_failed": runtimeLifecyclePayloadSchema,
+    "turn.recovery_requested": runtimeLifecyclePayloadSchema,
     "completion.proposed": runtimeLifecyclePayloadSchema,
     "tool.proposed": toolProposedPayloadSchema,
     "tool.denied": runtimeLifecyclePayloadSchema,

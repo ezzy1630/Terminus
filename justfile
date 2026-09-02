@@ -203,8 +203,19 @@ security:
     cargo deny check
 
 # End-to-end task tests.
-e2e:
+e2e: test-reference-loop
     bun run test:e2e
+
+# Deterministic reference-loop conformance: the canonical turn lifecycle as a
+# pure State + Event -> State + Commands reducer with a command executor.
+# Fast and mandatory — runs before the assembled E2E. Covers the fixed
+# regression schedules (duplicates, restarts, deadlines, cancellation, lease
+# loss, revision churn, interrupted publication), seeded schedule
+# permutations (replay seeds printed, failing event logs retained), and
+# executor crash/restart replay at every persisted transition. Internal tests
+# use a virtual clock: no setTimeout, Date.now, sleeps, or wall-clock polling.
+test-reference-loop:
+    bun test mini-services/terminus-control/src/agent/turn-lifecycle/
 
 # Fast fixture coverage for eval schemas, aggregation, and graders. These
 # scripted records are never runtime or release evidence.
@@ -233,6 +244,12 @@ eval-runtime-adaptive-inspect-smoke:
 
 # Per-PR smoke gate: retain fast fixture coverage and require a real runtime path.
 eval-smoke: eval-fixture-smoke eval-runtime-smoke eval-runtime-adaptive-smoke eval-runtime-adaptive-inspect-smoke
+
+# Very small continuously-runnable canary for the canonical turn lifecycle:
+# the deterministic reference-loop suite plus one graded task through the
+# live local provider -> control -> kernel tool loop. Produces the same
+# runtime eval artifacts as the full cohort, sized for per-commit cadence.
+canary-reference-loop: test-reference-loop eval-runtime-smoke
 
 # Full configured evaluation suite.
 eval-full:
