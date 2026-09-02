@@ -997,4 +997,5 @@ export * from "./standard-predicates.js";
 export * from "./lifecycle.js";
 export * from "./plan-derivation.js";
 export * from "./risk-tier.js";
+export * from "./calibration.js";
 export * from "./harness-verify.js";

@@ -34,6 +34,12 @@ describe("verification plan derivation", () => {
       "acceptance_query",
     ]);
 
+    const lowRiskDoc = derive("low", ["docs/guide.md"]);
+    expect(lowRiskDoc.verificationTier).toBe(1);
+    expect(lowRiskDoc.nodes.map((node) => parseNodeSpec(node.specification).predicateType)).toEqual([
+      "diff_policy",
+    ]);
+
     const ordinary = derive("normal", ["src/index.ts"]);
     expect(ordinary.verificationTier).toBe(2);
     expect(ordinary.nodes.some((node) => parseNodeSpec(node.specification).predicateType === "diff_policy")).toBe(true);

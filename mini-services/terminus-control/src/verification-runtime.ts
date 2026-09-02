@@ -440,6 +440,7 @@ const OPTIONAL_UNAVAILABLE_BASELINE_PREDICATES = new Set([
   "formatter_check",
   "static_diagnostics",
   "unit_test",
+  "diff_policy",
 ]);
 
 type PredicateCommandResolution =

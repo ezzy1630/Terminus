@@ -302,10 +302,12 @@ function auxiliaryDrafts(
     readonly hasUi: boolean;
     readonly hasSecurity: boolean;
   },
+  tier: VerificationTier,
 ): readonly NodeDraft[] {
   const required = input.mode === "admission";
+  const isTier1 = tier === 1;
   const drafts: NodeDraft[] = [];
-  if (signals.hasCode || input.criteria.length === 0) {
+  if (signals.hasCode || (!isTier1 && input.criteria.length === 0)) {
     drafts.push({
       label: "parse",
       predicateType: PredicateType.FILE_PARSES,
@@ -335,7 +337,7 @@ function auxiliaryDrafts(
       dependsOn: [],
       reasons: ["typed-language or configuration changes make diagnostics relevant"],
     });
-  } else if (signals.hasCode || input.criteria.length === 0) {
+  } else if (signals.hasCode || (!isTier1 && input.criteria.length === 0)) {
     drafts.push({
       label: "diagnostics",
       predicateType: PredicateType.STATIC_DIAGNOSTICS,
@@ -346,7 +348,7 @@ function auxiliaryDrafts(
       reasons: ["code changes make static diagnostics relevant"],
     });
   }
-  const nativeCommands = uniqueSorted(input.signals.nativeTestCommands ?? []);
+  const nativeCommands = isTier1 ? [] : uniqueSorted(input.signals.nativeTestCommands ?? []);
   if (nativeCommands.length > 0) {
     for (const [index, command] of nativeCommands.entries()) {
       drafts.push({
@@ -360,7 +362,7 @@ function auxiliaryDrafts(
         reasons: ["repository supplied a native test recipe"],
       });
     }
-  } else if (signals.hasTests || input.criteria.length === 0) {
+  } else if (signals.hasTests || (!isTier1 && input.criteria.length === 0)) {
     drafts.push({
       label: "targeted_tests",
       predicateType: PredicateType.UNIT_TEST,
@@ -454,16 +456,21 @@ export function deriveVerificationNodes(
     riskClass: input.riskClass,
     changedFiles,
   });
-  const auxiliary = auxiliaryDrafts(input, paths, {
-    hasCode,
-    hasTypedCode,
-    hasTests,
-    hasMigration,
-    hasProtocol,
-    hasGenerated,
-    hasUi,
-    hasSecurity,
-  });
+  const auxiliary = auxiliaryDrafts(
+    input,
+    paths,
+    {
+      hasCode,
+      hasTypedCode,
+      hasTests,
+      hasMigration,
+      hasProtocol,
+      hasGenerated,
+      hasUi,
+      hasSecurity,
+    },
+    tierDecision.tier,
+  );
   const drafts: NodeDraft[] = tierDecision.tier === 0 ? [] : [...auxiliary];
   if (tierDecision.tier > 0) {
     drafts.push({
