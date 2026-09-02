@@ -440,7 +440,6 @@ const OPTIONAL_UNAVAILABLE_BASELINE_PREDICATES = new Set([
   "formatter_check",
   "static_diagnostics",
   "unit_test",
-  "diff_policy",
 ]);
 
 type PredicateCommandResolution =
@@ -476,6 +475,14 @@ export function resolvePredicateCommand(
     return {
       kind: "skipped",
       reason: "governed UI verification requires a configured computer-use verifier; no kernel command is defined",
+    };
+  }
+  if (predicateType === "diff_policy") {
+    return {
+      kind: "command",
+      program: "git",
+      args: ["diff", "--check"],
+      source: "terminus:diff-policy-v1",
     };
   }
   const kinds = RUNNER_KINDS_BY_PREDICATE[predicateType];
