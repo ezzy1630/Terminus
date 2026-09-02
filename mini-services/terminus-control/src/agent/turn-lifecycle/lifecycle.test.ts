@@ -25,22 +25,24 @@ import {
   TURN_DEADLINE,
 } from "./schedules.js";
 
+const TURN_CONST = "0199face-7000-7000-8000-000000000001";
+
 /**
  * Replay the full canonical spine. Already-applied prefixes collapse as
  * duplicates — that idempotence is itself part of the contract under test.
  */
-function spineAll(run: ScheduleRun): void {
+const spineAll = (run: ScheduleRun): void => {
   for (const partial of canonicalSpine()) {
     run.apply(ev(partial));
   }
-}
+};
 
-function spinePrefix(run: ScheduleRun, count: number): void {
+const spinePrefix = (run: ScheduleRun, count: number): void => {
   const spine = canonicalSpine();
   for (let index = 0; index < count; index += 1) {
     run.apply(ev(spine[index]!));
   }
-}
+};
 
 describe("turn lifecycle — canonical spine", () => {
   test("settled provider/tool interaction converges to COMPLETED with monotonic generations", () => {
@@ -285,7 +287,7 @@ describe("turn lifecycle — deterministic reproduction of the production strand
    */
   test("legacy failure settlement strands a settled turn in CONTEXT_COMPILING; the reference loop converges", () => {
     // Production-shaped simulation of the settled window.
-    let phase: string = "ADMITTED";
+    let phase = "ADMITTED";
     const legacyApply = (next: string): void => {
       const allowed: Record<string, readonly string[]> = {
         ADMITTED: ["CONTEXT_COMPILING"],
@@ -326,5 +328,3 @@ describe("turn lifecycle — deterministic reproduction of the production strand
     expect(requireConvergence(run, "reference-loop-recovery").finalPhase).toBe("COMPLETED");
   });
 });
-
-const TURN_CONST = "0199face-7000-7000-8000-000000000001";

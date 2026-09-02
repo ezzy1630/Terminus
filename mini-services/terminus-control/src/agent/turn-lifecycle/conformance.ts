@@ -94,7 +94,7 @@ const property = (
  * returns whether the property held; any failure is a conformance regression
  * even if every random schedule passed.
  */
-// skipcq: JS-0067
+// skipcq: JS-R1005, JS-0067
 const fixedProbes = (): Record<string, { held: boolean; detail: string }> => {
   const probes: Record<string, { held: boolean; detail: string }> = {};
 
@@ -160,7 +160,7 @@ const fixedProbes = (): Record<string, { held: boolean; detail: string }> => {
  * failures are counted, classified, and reported; the first five failing
  * seeds are returned for exact replay.
  */
-// skipcq: JS-0067
+// skipcq: JS-R1005, JS-0067
 export const runConformance = (iterations: number, startSeed = 1): LifecycleConformanceReport => {
   const started = Date.now();
   let stuck = 0;

@@ -97,6 +97,7 @@ export const mutatingSettlementRecordsRevision: InvariantCheck = (state) => {
 };
 
 /** Every durable transition is justified by an event, never an in-memory callback. */
+// skipcq: JS-R1005, JS-0067
 export const transitionsAreEventSourced: InvariantCheck = (state, events) => {
   if (events.length === 0) return null;
   const last = events[events.length - 1]!;
@@ -121,6 +122,7 @@ export const transitionsAreEventSourced: InvariantCheck = (state, events) => {
  * Active states always expose a recoverable pending command, a deadline, or
  * an explicit waiting reason.
  */
+// skipcq: JS-R1005, JS-0067
 export const activeStatesAreRecoverable: InvariantCheck = (state) => {
   if (isTerminalPhase(state.phase)) return null;
   if (
@@ -201,13 +203,13 @@ export const LIFECYCLE_INVARIANTS: readonly InvariantCheck[] = [
 ];
 
 /** Run every invariant; return the first violation, if any. */
-export function checkInvariants(
+export const checkInvariants = (
   state: LifecycleState,
   events: readonly LifecycleEvent[],
-): InvariantViolation | null {
+): InvariantViolation | null => {
   for (const check of LIFECYCLE_INVARIANTS) {
     const violation = check(state, events);
     if (violation !== null) return violation;
   }
   return null;
-}
+};

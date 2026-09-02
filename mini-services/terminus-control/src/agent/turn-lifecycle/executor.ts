@@ -227,6 +227,7 @@ export class LifecycleExecutor {
     });
   }
 
+  // skipcq: JS-R1005, JS-0067
   private async drain(): Promise<void> {
     for (;;) {
       if (this.dispatching) return;
@@ -240,6 +241,7 @@ export class LifecycleExecutor {
     }
   }
 
+  // skipcq: JS-R1005, JS-0067
   private async perform(running: PendingCommand): Promise<readonly LifecycleEvent[]> {
     const turnId = this.options.turnId;
     switch (running.kind) {
@@ -356,6 +358,8 @@ export class LifecycleExecutor {
           attemptId: this.state.attempts[this.state.attempts.length - 1]?.attemptId ?? "none",
         }];
       }
+      default:
+        return [];
     }
   }
 }

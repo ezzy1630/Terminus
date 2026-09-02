@@ -27,7 +27,7 @@ def _run(workdir: Path, *args: str) -> tuple[bool, str]:
 
 
 def _changed_files(workdir: Path) -> set[str]:
-    result = subprocess.run(
+    result = subprocess.run(  # skipcq: BAN-B607
         ["git", "status", "--porcelain"],
         cwd=workdir,
         capture_output=True,

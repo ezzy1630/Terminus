@@ -17,12 +17,12 @@ def test_order_requires_currency():
 
 def test_receipt_format_exactly():
     order = Order("sku-2", 3, 250, "EUR")
-    assert render_receipt(order) == "sku-2 x3 = 750 EUR"
+    assert render_receipt(order) == "sku-2 x3 = 750 EUR"  # skipcq: BAN-B101
 
 
 def test_serialization_emits_currency_last_key():
     payload = serialize_order(Order("sku-2", 3, 250, "EUR"))
-    assert payload == {
+    assert payload == {  # skipcq: BAN-B101
         "sku": "sku-2",
         "quantity": 3,
         "total_cents": 750,
@@ -31,4 +31,4 @@ def test_serialization_emits_currency_last_key():
 
 
 def test_render_receipt_signature_still_takes_order():
-    assert "order" in inspect.signature(render_receipt).parameters
+    assert "order" in inspect.signature(render_receipt).parameters  # skipcq: BAN-B101

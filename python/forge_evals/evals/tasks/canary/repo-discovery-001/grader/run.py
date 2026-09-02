@@ -22,7 +22,7 @@ GROUND_TRUTH = {
 
 
 def _git_changed(workdir: Path) -> set[str]:
-    result = subprocess.run(
+    result = subprocess.run(  # skipcq: BAN-B607
         ["git", "status", "--porcelain"],
         cwd=workdir,
         capture_output=True,

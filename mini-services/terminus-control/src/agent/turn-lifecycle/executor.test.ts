@@ -321,7 +321,9 @@ describe("turn lifecycle executor", () => {
       effects: {
         ...scriptedEffects(HAPPY_SCRIPT, effectLog),
         // The compile never returns; the deadline must end the turn.
-        compileContext: () => new Promise(() => {}),
+        compileContext: () => new Promise((_resolve) => {
+          /* deliberately never settles to verify deadline expiration */
+        }),
       },
     });
     // The gate holds the drain; deliver the deadline event directly.
@@ -333,6 +335,7 @@ describe("turn lifecycle executor", () => {
     await liveExecutor.deliver({
       eventId: "deadline-hit", type: "DeadlineExpired", turnId: "0199face-7000-7000-8000-00000000e2e2", deadline: 100,
     });
+    // skipcq: JS-0098
     void pendingTurn;
     expect(liveExecutor.currentState.phase).toBe("BUDGET_EXHAUSTED");
   });

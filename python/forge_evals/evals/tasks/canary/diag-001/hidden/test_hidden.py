@@ -17,7 +17,7 @@ REQUIRED_SPANS = [
 
 
 def _changed_files(workdir: Path) -> set[str]:
-    completed = subprocess.run(
+    completed = subprocess.run(  # skipcq: BAN-B607
         ["git", "status", "--porcelain"],
         cwd=workdir,
         capture_output=True,
@@ -33,15 +33,15 @@ def _changed_files(workdir: Path) -> set[str]:
 
 
 def test_diagnosis_file_exists(workdir: Path) -> None:
-    assert (workdir / "DIAGNOSIS.md").is_file()
+    assert (workdir / "DIAGNOSIS.md").is_file()  # skipcq: BAN-B101
 
 
 def test_diagnosis_names_module_function_and_defect(workdir: Path) -> None:
     text = (workdir / "DIAGNOSIS.md").read_text(encoding="utf-8").lower()
     for span in REQUIRED_SPANS:
-        assert span.lower() in text, f"diagnosis must name {span!r}"
+        assert span.lower() in text, f"diagnosis must name {span!r}"  # skipcq: BAN-B101
 
 
 def test_workspace_stayed_read_only(workdir: Path) -> None:
     changed = _changed_files(workdir)
-    assert changed <= {"DIAGNOSIS.md"}, f"tracked files changed: {sorted(changed)}"
+    assert changed <= {"DIAGNOSIS.md"}, f"tracked files changed: {sorted(changed)}"  # skipcq: BAN-B101
