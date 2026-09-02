@@ -144,10 +144,13 @@ export class LifecycleExecutor {
     const candidate = reduce(this.state, delivered);
     const violation = checkInvariants(candidate.state, [...this.history, delivered]);
     if (violation !== null) throw new LifecycleInvariantError(violation);
-    this.state = candidate.state;
-    if (candidate.duplicate) return this.state;
-    this.history.push(delivered);
+    if (candidate.duplicate) {
+      this.state = candidate.state;
+      return this.state;
+    }
     await this.options.store.append(delivered);
+    this.state = candidate.state;
+    this.history.push(delivered);
     this.ensureDeadlineWakeup();
     return this.state;
   }
@@ -193,6 +196,7 @@ export class LifecycleExecutor {
     this.state = state;
     this.history.length = 0;
     this.history.push(...history);
+    this.ensureDeadlineWakeup();
     return recoverableCommands(state);
   }
 
@@ -232,7 +236,7 @@ export class LifecycleExecutor {
     for (;;) {
       if (this.dispatching) return;
       const pending = this.state.pendingCommand;
-      if (pending === null || isTerminalPhase(this.state.phase)) return;
+      if (pending === null || isTerminalPhase(this.state.phase) || this.state.waitReason !== null) return;
       await this.dispatch(pending);
       if (this.state.pendingCommand?.idempotencyKey === pending.idempotencyKey) {
         // The effect produced no advancing outcome; avoid spinning forever.
@@ -271,7 +275,7 @@ export class LifecycleExecutor {
         // replay after a crash re-derives the same identity. Acceptance and
         // settlement are separate durable events, mirroring the production
         // begin-then-settle boundary.
-        const attemptId = `a${this.state.contextGeneration}`;
+        const attemptId = running.attemptId ?? `a${this.state.contextGeneration}`;
         const result = await this.options.effects.invokeProvider({ turnId, attemptId });
         return [
           {

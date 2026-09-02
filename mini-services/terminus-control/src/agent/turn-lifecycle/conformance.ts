@@ -141,9 +141,9 @@ const fixedProbes = (): Record<string, { held: boolean; detail: string }> => {
     const spine = canonicalSpine();
     for (const partial of spine) {
       run.apply(ev(partial));
-      const before = run.fingerprint();
+      const before = JSON.stringify(run.currentState);
       run.crash();
-      if (run.fingerprint() === before) reconstructions += 1;
+      if (JSON.stringify(run.currentState) === before) reconstructions += 1;
     }
     probes.reconstruction_from_persisted_events = {
       held: reconstructions === spine.length,

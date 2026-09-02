@@ -164,7 +164,8 @@ export const generationsMonotonic: InvariantCheck = (_state, events) => {
   let previous = -1;
   for (const event of events) {
     if (event.type !== "ContextCompiled") continue;
-    if (event.generation <= previous) {
+    if (event.generation === previous) continue;
+    if (event.generation < previous) {
       return {
         invariant: "generations_monotonic",
         detail: `generation ${event.generation} does not advance beyond ${previous}`,

@@ -240,7 +240,7 @@ const settleTerminal = (state: LifecycleState, event: {
 }): LifecycleState => terminal({ state, phase: event.phase, reason: event.reason });
 
 /** Commands that re-drive a turn stuck at a safe boundary after restart. */
-// skipcq: JS-0067
+// skipcq: JS-R1005, JS-0067
 const recoveryCommands = (state: LifecycleState): readonly PendingCommand[] => {
   switch (state.phase) {
     case "ADMITTED":
@@ -279,6 +279,7 @@ const recoveryCommands = (state: LifecycleState): readonly PendingCommand[] => {
  * The transition function. Total over events; unknown/duplicate/terminal
  * events return the unchanged state with no commands.
  */
+// skipcq: JS-R1005, JS-0067
 export const reduce = (state: LifecycleState, event: LifecycleEvent): Reduction => {
   // A terminal turn absorbs every later event: terminal settlement is the
   // authoritative record, so re-delivered outcomes are duplicates.
@@ -598,8 +599,11 @@ export const reduce = (state: LifecycleState, event: LifecycleEvent): Reduction 
       const recovered = commands.length > 0 ? withPending({ state, pending: commands[0]! }) : state;
       return { state: recovered, commands, duplicate: false };
     }
+
+    default:
+      return { state, commands: NO_COMMANDS, duplicate: false };
   }
-}
+};
 
 /**
  * Derive the pending command for a state without an event. Used on restart:

@@ -22,13 +22,13 @@ import {
 export const TURN = "0199face-7000-7000-8000-000000000001";
 
 /** Deterministic linear-congruential PRNG so seeds replay exactly. */
-export function makeRng(seed: number): () => number {
+export const makeRng = (seed: number): () => number => {
   let current = seed >>> 0;
   return () => {
     current = (Math.imul(current, 1664525) + 1013904223) >>> 0;
     return current / 0x1_0000_0000;
   };
-}
+};
 
 let eventCounter = 0;
 
@@ -43,14 +43,14 @@ export type LifecycleEventInput = DistributiveOmit<LifecycleEvent, "eventId" | "
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
-export function ev(partial: LifecycleEventInput): LifecycleEvent {
+export const ev = (partial: LifecycleEventInput): LifecycleEvent => {
   eventCounter += 1;
   return { ...partial, eventId: `e${eventCounter}`, turnId: TURN } as LifecycleEvent;
-}
+};
 
-export function resetEventCounter(): void {
+export const resetEventCounter = (): void => {
   eventCounter = 0;
-}
+};
 
 /**
  * The canonical spine: user request → activation tool succeeds → observation
@@ -66,8 +66,7 @@ export function resetEventCounter(): void {
  */
 export const TURN_DEADLINE = 1_000_000;
 
-export function canonicalSpine(): readonly LifecycleEventInput[] {
-  return [
+export const canonicalSpine = (): readonly LifecycleEventInput[] => [
     { type: "TurnStarted", at: 1, deadline: TURN_DEADLINE },
     { type: "ContextCompiled", generation: 1, observationsThrough: 0 },
     { type: "ProviderAttemptAccepted", attemptId: "a1", attemptNumber: 1, contextGeneration: 1 },
@@ -85,7 +84,6 @@ export function canonicalSpine(): readonly LifecycleEventInput[] {
     { type: "VerificationSettled", planId: "plan-1", passed: true },
     { type: "CompletionAccepted", attemptId: "a3" },
   ];
-}
 
 /**
  * A schedule run: applies events to the pure reducer, enforcing the
@@ -187,10 +185,10 @@ export interface ScheduleOutcome {
  * terminal, or be explicitly waiting on a named external reason. Anything
  * else is a stuck schedule and the failure carries the retained event log.
  */
-export function requireConvergence(
+export const requireConvergence = (
   run: ScheduleRun,
   label: string,
-): ScheduleOutcome {
+): ScheduleOutcome => {
   run.assertInvariants();
   const phase = run.phase;
   if (!isTerminalPhase(phase) && phase !== "ADMITTED") {
@@ -207,4 +205,4 @@ export function requireConvergence(
     );
   }
   return { finalPhase: phase, eventLog: run.eventLog };
-}
+};

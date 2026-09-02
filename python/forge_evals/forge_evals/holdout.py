@@ -22,6 +22,7 @@ registry commit — not a note in a run directory.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -38,7 +39,20 @@ __all__ = [
     "load_partition_registry",
 ]
 
-_DEFAULT_REGISTRY = Path(__file__).resolve().parents[3] / "evals" / "holdout-partitions.yaml"
+
+def _resolve_default_registry() -> Path:
+    candidates = [
+        Path(os.environ["TERMINUS_ROOT"]) / "evals" / "holdout-partitions.yaml" if "TERMINUS_ROOT" in os.environ else None,
+        Path.cwd() / "evals" / "holdout-partitions.yaml",
+        Path(__file__).resolve().parents[3] / "evals" / "holdout-partitions.yaml",
+    ]
+    for c in candidates:
+        if c is not None and c.is_file():
+            return c
+    return Path(__file__).resolve().parents[3] / "evals" / "holdout-partitions.yaml"
+
+
+_DEFAULT_REGISTRY = _resolve_default_registry()
 
 
 class PartitionError(RuntimeError):
@@ -152,8 +166,13 @@ def load_partition_registry(
             "required for any baseline/candidate comparison"
         )
     raw = yaml.safe_load(registry_path.read_text(encoding="utf-8")) or {}
+    partitions = raw.get("partitions")
+    if not isinstance(partitions, list) or len(partitions) == 0:
+        raise PartitionError(
+            f"partition registry {registry_path} has missing or empty 'partitions' list"
+        )
     rules: list[PartitionRule] = []
-    for entry in raw.get("partitions", []):
+    for entry in partitions:
         if not isinstance(entry, dict):
             continue
         partition = Partition(str(entry.get("partition", Partition.DEV.value)))

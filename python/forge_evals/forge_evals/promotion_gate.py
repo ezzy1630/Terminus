@@ -232,7 +232,10 @@ def _gate_reliability(ev: Evaluation) -> GateVerdict:
             status=GateStatus.NOT_APPLICABLE,
             detail="No reliability evidence supplied; the gate did not run.",
         )
-    breaches = ev.reliability.breaches()
+    rel = ev.reliability
+    if isinstance(rel, dict):
+        rel = ReliabilityEvidence(**rel)
+    breaches = rel.breaches()
     if breaches:
         return GateVerdict(
             name="reliability",

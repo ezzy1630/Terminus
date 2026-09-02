@@ -168,6 +168,8 @@ def _identity_issue(baseline: RunRecord, candidate: RunRecord) -> str | None:
     c = candidate.evaluation_identity
     if b is None or c is None:
         return "one side has no evaluation identity"
+    if not b.is_complete or not c.is_complete:
+        return "incomplete evaluation identity"
     if b.model_fixed_key != c.model_fixed_key:
         return "model-fixed identity mismatch"
     return None

@@ -145,11 +145,11 @@ interface PermutationOutcome {
   readonly postQuiescenceStable: boolean;
 }
 
-function retentionPath(seed: number): string {
+const retentionPath = (seed: number): string => {
   return join(FAILURE_DIR, `schedule-${seed}.json`);
-}
+};
 
-function retainFailure(seed: number, scheduleName: string, error: unknown, log: readonly LifecycleEvent[]): void {
+const retainFailure = (seed: number, scheduleName: string, error: unknown, log: readonly LifecycleEvent[]): void => {
   try {
     mkdirSync(FAILURE_DIR, { recursive: true });
     writeFileSync(
@@ -168,7 +168,7 @@ function retainFailure(seed: number, scheduleName: string, error: unknown, log: 
   } catch {
     // Retention is best-effort; the printed seed already replays exactly.
   }
-}
+};
 
 /**
  * Run one randomized schedule. The spine is applied in canonical order but
@@ -178,7 +178,8 @@ function retainFailure(seed: number, scheduleName: string, error: unknown, log: 
  * must end terminal or explicitly waiting; a completed turn must absorb
  * every later event unchanged (terminal-outcome immutability).
  */
-export function runPermutation(seed: number): PermutationOutcome {
+// skipcq: JS-R1005, JS-0067
+export const runPermutation = (seed: number): PermutationOutcome => {
   const rng = makeRng(seed);
   const run = new ScheduleRun();
   const spine = canonicalSpine();
@@ -338,10 +339,10 @@ export function runPermutation(seed: number): PermutationOutcome {
 }
 
 /** Batch runner with printed seeds; used by the unit test and the CLI. */
-export function runPermutations(iterations: number, startSeed = 1): {
+export const runPermutations = (iterations: number, startSeed = 1): {
   readonly passed: number;
   readonly seeds: readonly number[];
-} {
+} => {
   const seeds: number[] = [];
   for (let index = 0; index < iterations; index += 1) {
     const seed = startSeed + index;
@@ -349,7 +350,7 @@ export function runPermutations(iterations: number, startSeed = 1): {
     seeds.push(seed);
   }
   return { passed: seeds.length, seeds };
-}
+};
 
 const isDirectRun = process.argv[1] !== undefined && import.meta.path === process.argv[1];
 if (isDirectRun) {
@@ -357,6 +358,7 @@ if (isDirectRun) {
   const startSeed = Number(process.argv[3] ?? "1");
   const started = Date.now();
   const { passed } = runPermutations(iterations, startSeed);
+  // skipcq: JS-0002
   console.log(
     JSON.stringify({
       permutations: passed,

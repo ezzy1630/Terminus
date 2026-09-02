@@ -23,6 +23,7 @@ from __future__ import annotations
 import difflib
 import json
 from dataclasses import dataclass, field
+from itertools import zip_longest
 from typing import Any
 
 __all__ = [
@@ -295,15 +296,24 @@ def diff_context_manifests(
     token_deltas: list[int | None] = []
     kinds_removed: list[tuple[str, ...]] = []
     kinds_added: list[tuple[str, ...]] = []
-    for b, c in zip(baseline, candidate, strict=False):
-        if b.selected_tokens is not None and c.selected_tokens is not None:
-            token_deltas.append(c.selected_tokens - b.selected_tokens)
-        else:
-            token_deltas.append(None)
-        b_kinds = set(b.fragment_kinds)
-        c_kinds = set(c.fragment_kinds)
-        kinds_removed.append(tuple(sorted(b_kinds - c_kinds)))
-        kinds_added.append(tuple(sorted(c_kinds - b_kinds)))
+    for b, c in zip_longest(baseline, candidate, fillvalue=None):
+        if b is not None and c is not None:
+            if b.selected_tokens is not None and c.selected_tokens is not None:
+                token_deltas.append(c.selected_tokens - b.selected_tokens)
+            else:
+                token_deltas.append(None)
+            b_kinds = set(b.fragment_kinds)
+            c_kinds = set(c.fragment_kinds)
+            kinds_removed.append(tuple(sorted(b_kinds - c_kinds)))
+            kinds_added.append(tuple(sorted(c_kinds - b_kinds)))
+        elif b is not None:
+            token_deltas.append(None if b.selected_tokens is None else -b.selected_tokens)
+            kinds_removed.append(tuple(sorted(set(b.fragment_kinds))))
+            kinds_added.append(())
+        elif c is not None:
+            token_deltas.append(c.selected_tokens)
+            kinds_removed.append(())
+            kinds_added.append(tuple(sorted(set(c.fragment_kinds))))
     b_total = sum(s.selected_tokens for s in baseline if s.selected_tokens is not None)
     c_total = sum(s.selected_tokens for s in candidate if s.selected_tokens is not None)
     return ContextManifestDiff(

@@ -31,6 +31,8 @@ def _git_changed(workdir: Path) -> set[str]:
         timeout=20,
         check=False,
     )
+    if result.returncode != 0:
+        return {"<git-status-failed>"}
     return {
         line[3:].strip()
         for line in result.stdout.splitlines()
