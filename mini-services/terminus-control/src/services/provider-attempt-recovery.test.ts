@@ -24,9 +24,9 @@ interface RecoveryWorld {
   events: { eventType: string; idempotencyKey: string | null; payload: Record<string, unknown> }[];
 }
 
-function makeService(world: RecoveryWorld) {
+const makeService = (world: RecoveryWorld) => {
   const service = new ProviderSessionService<unknown>({
-    readTurnState: async (turnId) => world.turnStates.get(turnId)?.state ?? null,
+    readTurnState: (turnId) => Promise.resolve(world.turnStates.get(turnId)?.state ?? null),
     appendEvent: async (event, mutation) => {
       world.events.push({
         eventType: event.eventType,
@@ -36,40 +36,38 @@ function makeService(world: RecoveryWorld) {
       await mutation({});
     },
     transaction: (): ProviderSessionTransaction => ({
-      startAttempt: async () => {},
-      completeAttempt: async () => {},
-      findAttemptStatus: async (attemptId) =>
-        world.attempts.find((attempt) => attempt.id === attemptId)?.status ?? null,
-      interruptAttempt: async ({ attemptId, inFlightStates }) => {
+      startAttempt: () => Promise.resolve(),
+      completeAttempt: () => Promise.resolve(),
+      findAttemptStatus: (attemptId) =>
+        Promise.resolve(world.attempts.find((attempt) => attempt.id === attemptId)?.status ?? null),
+      interruptAttempt: ({ attemptId, inFlightStates }) => {
         const attempt = world.attempts.find((candidate) => candidate.id === attemptId);
-        if (attempt === undefined || !inFlightStates.includes(attempt.status)) return 0;
+        if (attempt === undefined || !inFlightStates.includes(attempt.status)) return Promise.resolve(0);
         (attempt as { status: string }).status = "interrupted";
-        return 1;
+        return Promise.resolve(1);
       },
-      readTurnForRecovery: async (turnId) => world.turnStates.get(turnId) ?? null,
-      interruptTurnForRecovery: async ({ turnId, expectedState }) => {
+      readTurnForRecovery: (turnId) => Promise.resolve(world.turnStates.get(turnId) ?? null),
+      interruptTurnForRecovery: ({ turnId, expectedState }) => {
         const turn = world.turnStates.get(turnId);
-        if (turn === undefined || turn.state !== expectedState) return 0;
+        if (turn === undefined || turn.state !== expectedState) return Promise.resolve(0);
         (turn as { state: string }).state = "INTERRUPTED";
-        return 1;
+        return Promise.resolve(1);
       },
-      blockTaskForRecovery: async ({ taskId, expectedStatuses }) => {
+      blockTaskForRecovery: ({ taskId, expectedStatuses }) => {
         const status = world.taskStatuses.get(taskId);
-        if (status === undefined || !expectedStatuses.includes(status)) return;
+        if (status === undefined || !expectedStatuses.includes(status)) return Promise.resolve();
         world.taskStatuses.set(taskId, "BLOCKED");
+        return Promise.resolve();
       },
     }),
-    mutate: async (op) => op(),
-    executeLocal: async () => {
-      throw new Error("not wired");
-    },
-    executeGateway: async () => {
-      throw new Error("not wired");
-    },
-    listInFlightAttempts: async () => world.attempts.filter((a) => (IN_FLIGHT_PROVIDER_STATES as readonly string[]).includes(a.status)),
+    mutate: (op) => Promise.resolve(op()),
+    executeLocal: () => Promise.reject(new Error("not wired")),
+    executeGateway: () => Promise.reject(new Error("not wired")),
+    listInFlightAttempts: () =>
+      Promise.resolve(world.attempts.filter((a) => (IN_FLIGHT_PROVIDER_STATES as readonly string[]).includes(a.status))),
   });
   return service;
-}
+};
 
 describe("provider attempt recovery (restart reconciliation)", () => {
   test("an in-flight attempt is interrupted, its turn settled, and its task blocked in one event", async () => {

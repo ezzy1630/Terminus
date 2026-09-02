@@ -17574,7 +17574,7 @@ async function agentLoop(turnId: string): Promise<void> {
         },
         readArtifact: (hash) => artifactClient.get(hash as ContentHash),
       },
-      settleCall: async (toolInput) => settleStandaloneProviderTool({
+      settleCall: (toolInput) => settleStandaloneProviderTool({
         callChunk: toolInput.call,
         providerAttemptId: toolInput.providerAttemptId,
         turnId: toolInput.turnId,
@@ -21072,6 +21072,7 @@ async function agentLoop(turnId: string): Promise<void> {
       if (update.count !== 1) throw new Error(`turn ${turnId} changed during failure settlement`);
     };
     try {
+      // skipcq: JS-R1005
       await mutateAgentState(async () => {
       const currentTurn = await db.turn.findUnique({
         where: { id: turnId },
@@ -22006,6 +22007,7 @@ async function quarantineTerminalRecoveryTurn(input: {
  * phases are quarantined with explicit evidence rather than replaying a
  * provider request or effect blindly.
  */
+// skipcq: JS-R1005, JS-0067
 async function recoverActiveAgentTurns(): Promise<number> {
   const active = await db.turn.findMany({
     where: { state: { in: [...V1_ACTIVE_TURN_STATES, "VERIFIED"] } },
