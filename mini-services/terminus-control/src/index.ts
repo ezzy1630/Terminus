@@ -723,6 +723,10 @@ import {
   TurnCoordinator,
   TurnAdmissionError,
   VerificationCoordinator,
+  completionGateRepairInputs,
+  restoredPlanMatchesContract,
+  stalePlanBindingReason,
+  verificationEvaluationPassed,
   classifyTerminalTurn,
   planEnterContextCompiling,
   planEnterFinalizing,
@@ -20199,21 +20203,21 @@ async function agentLoop(turnId: string): Promise<void> {
         // threw "stale source or environment binding" and the task could
         // never complete. A stale binding says the plan describes a world
         // that no longer exists — so we plan against the world that does.
-        const staleBindingReason = existingVerificationPlan === null
-          ? null
-          : existingVerificationPlan.environmentDigest === null
-            ? "missing_environment_digest"
-            : existingVerificationPlan.environmentDigest !== environmentDigest
-              ? "environment_changed"
-              : existingVerificationPlan.sourceRevision !== sourceRevision
-                ? "source_revision_changed"
-                : null;
+        const staleBindingReason = stalePlanBindingReason({
+          existingPlan: existingVerificationPlan,
+          sourceRevision,
+          environmentDigest,
+        });
         const restoredPlan = existingVerificationPlan === null || staleBindingReason !== null
           ? null
           : verificationPlanFromPrisma(existingVerificationPlan);
-        const resumablePlan = restoredPlan !== null
-          && restoredPlan.taskContractId === task.id
-          && restoredPlan.taskContractVersion === task.activeContractVersion
+        const resumablePlan = restoredPlanMatchesContract({
+          restoredPlan: restoredPlan === null
+            ? null
+            : { taskContractId: restoredPlan.taskContractId, taskContractVersion: restoredPlan.taskContractVersion },
+          taskId: task.id,
+          activeContractVersion: task.activeContractVersion,
+        })
           ? restoredPlan
           : null;
         if (existingVerificationPlan !== null && resumablePlan === null) {
@@ -20334,8 +20338,10 @@ async function agentLoop(turnId: string): Promise<void> {
         );
         const attempts = await runtime.store.listAttempts(plan.id);
         const evidenceGraph = await runtime.store.getEvidenceGraph(plan.id);
-        const allPassed =
-          evaluation.allRequiredPassed && evaluation.completionExpressionSatisfied;
+        const allPassed = verificationEvaluationPassed({
+          allRequiredPassed: evaluation.allRequiredPassed,
+          completionExpressionSatisfied: evaluation.completionExpressionSatisfied,
+        });
         // H3: distinguish "the repository's checks failed" from "this
         // repository has no check to run". The second is not a verification
         // failure and must not burn repair attempts.
@@ -20775,8 +20781,14 @@ async function agentLoop(turnId: string): Promise<void> {
               .filter((claim) => claim.status === "SATISFIED" || claim.status === "WAIVED")
               .map((claim) => claim.id),
           );
-          const missingClaimIds = requiredClaimIdsForRepair.filter((claimId) => !admissibleClaimIds.has(claimId));
-          const gateFailures = (missingClaimIds.length > 0 ? missingClaimIds : ["completion-gate"]).map((claimId) =>
+          // The verification coordinator decides whether the bounded repair
+          // targets missing required claims or the completion gate itself.
+          const gateRepairInputs = completionGateRepairInputs({
+            requiredClaimIds: requiredClaimIdsForRepair,
+            admissibleClaimIds: [...admissibleClaimIds],
+          });
+          const missingClaimIds = gateRepairInputs.missingClaimIds;
+          const gateFailures = gateRepairInputs.failureNodeIds.map((claimId) =>
             normalizeFailure({
               nodeId: claimId,
               predicateType: "completion_gate",
