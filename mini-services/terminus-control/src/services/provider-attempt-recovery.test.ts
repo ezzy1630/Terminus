@@ -35,7 +35,30 @@ function makeService(world: RecoveryWorld) {
       });
       await mutation({});
     },
-    transaction: (): ProviderSessionTransaction => ({ startAttempt: async () => {}, completeAttempt: async () => {} }),
+    transaction: (): ProviderSessionTransaction => ({
+      startAttempt: async () => {},
+      completeAttempt: async () => {},
+      findAttemptStatus: async (attemptId) =>
+        world.attempts.find((attempt) => attempt.id === attemptId)?.status ?? null,
+      interruptAttempt: async ({ attemptId, inFlightStates }) => {
+        const attempt = world.attempts.find((candidate) => candidate.id === attemptId);
+        if (attempt === undefined || !inFlightStates.includes(attempt.status)) return 0;
+        (attempt as { status: string }).status = "interrupted";
+        return 1;
+      },
+      readTurnForRecovery: async (turnId) => world.turnStates.get(turnId) ?? null,
+      interruptTurnForRecovery: async ({ turnId, expectedState }) => {
+        const turn = world.turnStates.get(turnId);
+        if (turn === undefined || turn.state !== expectedState) return 0;
+        (turn as { state: string }).state = "INTERRUPTED";
+        return 1;
+      },
+      blockTaskForRecovery: async ({ taskId, expectedStatuses }) => {
+        const status = world.taskStatuses.get(taskId);
+        if (status === undefined || !expectedStatuses.includes(status)) return;
+        world.taskStatuses.set(taskId, "BLOCKED");
+      },
+    }),
     mutate: async (op) => op(),
     executeLocal: async () => {
       throw new Error("not wired");
@@ -44,25 +67,6 @@ function makeService(world: RecoveryWorld) {
       throw new Error("not wired");
     },
     listInFlightAttempts: async () => world.attempts.filter((a) => (IN_FLIGHT_PROVIDER_STATES as readonly string[]).includes(a.status)),
-    findAttemptStatus: async (attemptId) => world.attempts.find((a) => a.id === attemptId)?.status ?? null,
-    interruptAttempt: async ({ attemptId, inFlightStates }) => {
-      const attempt = world.attempts.find((a) => a.id === attemptId);
-      if (attempt === undefined || !(inFlightStates as readonly string[]).includes(attempt.status)) return 0;
-      (attempt as { status: string }).status = "interrupted";
-      return 1;
-    },
-    readTurnForRecovery: async (turnId) => world.turnStates.get(turnId) ?? null,
-    interruptTurnForRecovery: async ({ turnId, expectedState }) => {
-      const turn = world.turnStates.get(turnId);
-      if (turn === undefined || turn.state !== expectedState) return 0;
-      (turn as { state: string }).state = "INTERRUPTED";
-      return 1;
-    },
-    blockTaskForRecovery: async ({ taskId, expectedStatuses }) => {
-      const status = world.taskStatuses.get(taskId);
-      if (status === undefined || !expectedStatuses.includes(status)) return;
-      world.taskStatuses.set(taskId, "BLOCKED");
-    },
   });
   return service;
 }
@@ -157,7 +161,15 @@ describe("provider attempt recovery (restart reconciliation)", () => {
         await mutation({});
         return event;
       },
-      transaction: (): ProviderSessionTransaction => ({ startAttempt: async () => {}, completeAttempt: async () => {} }),
+      transaction: (): ProviderSessionTransaction => ({
+        startAttempt: async () => {},
+        completeAttempt: async () => {},
+        findAttemptStatus: async () => "completed",
+        interruptAttempt: async () => 0,
+        readTurnForRecovery: async () => null,
+        interruptTurnForRecovery: async () => 1,
+        blockTaskForRecovery: async () => undefined,
+      }),
       mutate: async (op) => op(),
       executeLocal: async () => {
         throw new Error("not wired");
@@ -166,11 +178,6 @@ describe("provider attempt recovery (restart reconciliation)", () => {
         throw new Error("not wired");
       },
       listInFlightAttempts: async () => world.attempts,
-      findAttemptStatus: async () => "completed",
-      interruptAttempt: async () => 0,
-      readTurnForRecovery: async () => null,
-      interruptTurnForRecovery: async () => 1,
-      blockTaskForRecovery: async () => undefined,
     });
     const result = await service.reconcileInFlightAttempts(["PROVIDER_RUNNING"]);
     expect(result.alreadyResolved).toEqual(["a1"]);
@@ -240,7 +247,18 @@ describe("provider attempt recovery (restart reconciliation)", () => {
         await mutation({});
         return event;
       },
-      transaction: (): ProviderSessionTransaction => ({ startAttempt: async () => {}, completeAttempt: async () => {} }),
+      transaction: (): ProviderSessionTransaction => ({
+        startAttempt: async () => {},
+        completeAttempt: async () => {},
+        findAttemptStatus: async (attemptId) => {
+          if (attemptId === "bad") throw new Error("durable store unavailable");
+          return world.attempts.find((attempt) => attempt.id === attemptId)?.status ?? null;
+        },
+        interruptAttempt: async () => 1,
+        readTurnForRecovery: async (turnId) => world.turnStates.get(turnId) ?? null,
+        interruptTurnForRecovery: async () => 1,
+        blockTaskForRecovery: async () => undefined,
+      }),
       mutate: async (op) => op(),
       executeLocal: async () => {
         throw new Error("not wired");
@@ -249,14 +267,6 @@ describe("provider attempt recovery (restart reconciliation)", () => {
         throw new Error("not wired");
       },
       listInFlightAttempts: async () => world.attempts,
-      findAttemptStatus: async (attemptId) => {
-        if (attemptId === "bad") throw new Error("durable store unavailable");
-        return world.attempts.find((a) => a.id === attemptId)?.status ?? null;
-      },
-      interruptAttempt: async () => 1,
-      readTurnForRecovery: async (turnId) => world.turnStates.get(turnId) ?? null,
-      interruptTurnForRecovery: async () => 1,
-      blockTaskForRecovery: async () => undefined,
     });
     const result = await service.reconcileInFlightAttempts(["PROVIDER_RUNNING"]);
     expect(result.failed).toEqual([{ id: "bad", error: "durable store unavailable" }]);
@@ -286,7 +296,15 @@ describe("provider attempt recovery (restart reconciliation)", () => {
         await mutation({});
         return event;
       },
-      transaction: (): ProviderSessionTransaction => ({ startAttempt: async () => {}, completeAttempt: async () => {} }),
+      transaction: (): ProviderSessionTransaction => ({
+        startAttempt: async () => {},
+        completeAttempt: async () => {},
+        findAttemptStatus: async () => "completed",
+        interruptAttempt: async () => 0,
+        readTurnForRecovery: async () => null,
+        interruptTurnForRecovery: async () => 1,
+        blockTaskForRecovery: async () => undefined,
+      }),
       mutate: async (op) => op(),
       executeLocal: async () => {
         throw new Error("not wired");
@@ -295,15 +313,52 @@ describe("provider attempt recovery (restart reconciliation)", () => {
         throw new Error("not wired");
       },
       listInFlightAttempts: async () => world.attempts,
-      findAttemptStatus: async () => "completed",
-      interruptAttempt: async () => 0,
-      readTurnForRecovery: async () => null,
-      interruptTurnForRecovery: async () => 1,
-      blockTaskForRecovery: async () => undefined,
     });
     const result = await service.reconcileInFlightAttempts(["PROVIDER_RUNNING"]);
     expect(result.alreadyResolved).toEqual(["a3"]);
     expect(result.failed).toEqual([]);
     expect(new ProviderAttemptAlreadyResolvedError("a3").attemptId).toBe("a3");
+  });
+
+  test("resolves recovery mutations from the event transaction client", async () => {
+    const transactionMarker = {};
+    let observedTransaction: object | null = null;
+    const service = new ProviderSessionService<object>({
+      readTurnState: async () => null,
+      appendEvent: async (_event, mutation) => mutation(transactionMarker),
+      transaction: (transaction): ProviderSessionTransaction => {
+        observedTransaction = transaction;
+        return {
+          startAttempt: async () => {},
+          completeAttempt: async () => {},
+          findAttemptStatus: async () => "running",
+          interruptAttempt: async () => 1,
+          readTurnForRecovery: async () => null,
+          interruptTurnForRecovery: async () => 1,
+          blockTaskForRecovery: async () => undefined,
+        };
+      },
+      mutate: async (operation) => operation(),
+      executeLocal: async () => {
+        throw new Error("not wired");
+      },
+      executeGateway: async () => {
+        throw new Error("not wired");
+      },
+      listInFlightAttempts: async () => [{
+        id: "attempt-transaction",
+        turnId: "turn-transaction",
+        status: "running",
+        providerIdempotencyKey: null,
+        requestFingerprint: null,
+        requestArtifact: "artifact://sha256/request",
+        responseArtifact: null,
+        turn: { state: "COMPLETED", taskId: null },
+      }],
+    });
+
+    const result = await service.reconcileInFlightAttempts(["PROVIDER_RUNNING"]);
+    expect(result.interrupted).toHaveLength(1);
+    expect(observedTransaction).toBe(transactionMarker);
   });
 });

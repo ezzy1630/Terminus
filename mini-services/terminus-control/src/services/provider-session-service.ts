@@ -207,35 +207,6 @@ export interface ProviderSessionDependencies<TTransaction> {
     readonly responseArtifact: string | null;
     readonly turn: { readonly state: string; readonly taskId: string | null };
   }[]>;
-  /** Read one attempt's current status for the recovery CAS. */
-  readonly findAttemptStatus?: (attemptId: string) => Promise<string | null>;
-  /** Mark one attempt `interrupted`; returns rows updated. */
-  readonly interruptAttempt?: (input: {
-    readonly attemptId: string;
-    readonly inFlightStates: readonly string[];
-    readonly interruptedAt: Date;
-    readonly errorJson: string;
-  }) => Promise<number>;
-  /** Read the owning turn's state and task for recovery decisions. */
-  readonly readTurnForRecovery?: (turnId: string) => Promise<{ readonly state: string; readonly taskId: string | null } | null>;
-  /** Settle the owning turn as INTERRUPTED while it is still active. */
-  readonly interruptTurnForRecovery?: (input: {
-    readonly turnId: string;
-    readonly expectedState: string;
-    readonly interruptedAt: Date;
-    readonly errorJson: string;
-  }) => Promise<number>;
-  /**
-   * Block the owning task: a live attempt may have taken effect upstream.
-   * Only the given statuses may be written (the original scope: ACTIVE and
-   * VERIFYING); a terminal task is left alone.
-   */
-  readonly blockTaskForRecovery?: (input: {
-    readonly taskId: string;
-    readonly phase: string;
-    readonly expectedStatuses: readonly string[];
-    readonly reasonJson: string;
-  }) => Promise<void>;
 }
 
 /**
@@ -355,23 +326,8 @@ export class ProviderSessionService<TTransaction> {
     activeTurnStates: readonly string[],
     alreadyUnderMutationLock = false,
   ): Promise<ProviderAttemptRecoveryResult> {
-    const {
-      appendEvent,
-      listInFlightAttempts,
-      findAttemptStatus,
-      interruptAttempt,
-      readTurnForRecovery,
-      interruptTurnForRecovery,
-      blockTaskForRecovery,
-    } = this.dependencies;
-    if (
-      listInFlightAttempts === undefined
-      || findAttemptStatus === undefined
-      || interruptAttempt === undefined
-      || readTurnForRecovery === undefined
-      || interruptTurnForRecovery === undefined
-      || blockTaskForRecovery === undefined
-    ) {
+    const { appendEvent, listInFlightAttempts } = this.dependencies;
+    if (listInFlightAttempts === undefined) {
       throw new Error("provider attempt recovery ports are not configured");
     }
     const attempts = await listInFlightAttempts();
@@ -404,6 +360,23 @@ export class ProviderSessionService<TTransaction> {
             ],
           },
           async (transaction) => {
+            const recovery = this.dependencies.transaction(transaction);
+            const {
+              findAttemptStatus,
+              interruptAttempt,
+              readTurnForRecovery,
+              interruptTurnForRecovery,
+              blockTaskForRecovery,
+            } = recovery;
+            if (
+              findAttemptStatus === undefined
+              || interruptAttempt === undefined
+              || readTurnForRecovery === undefined
+              || interruptTurnForRecovery === undefined
+              || blockTaskForRecovery === undefined
+            ) {
+              throw new Error("provider attempt recovery transaction ports are not configured");
+            }
             const current = await findAttemptStatus(attempt.id);
             if (current === null || !inFlightStates.includes(current.toLowerCase())) {
               throw new ProviderAttemptAlreadyResolvedError(attempt.id);

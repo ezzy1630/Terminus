@@ -12388,6 +12388,52 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
         },
       });
     },
+    findAttemptStatus: async (attemptId: string) => {
+      const current = await tx.providerAttempt.findUnique({
+        where: { id: attemptId },
+        select: { status: true },
+      });
+      return current?.status ?? null;
+    },
+    interruptAttempt: async (input) => {
+      const update = await tx.providerAttempt.updateMany({
+        where: { id: input.attemptId, status: { in: [...input.inFlightStates] } },
+        data: {
+          status: "interrupted",
+          completedAt: input.interruptedAt,
+          errorJson: input.errorJson,
+        },
+      });
+      return update.count;
+    },
+    readTurnForRecovery: async (turnId: string) => {
+      return tx.turn.findUnique({
+        where: { id: turnId },
+        select: { state: true, taskId: true },
+      });
+    },
+    interruptTurnForRecovery: async (input) => {
+      const update = await tx.turn.updateMany({
+        where: { id: input.turnId, state: input.expectedState },
+        data: {
+          state: "INTERRUPTED",
+          completedAt: input.interruptedAt,
+          terminalErrorJson: input.errorJson,
+        },
+      });
+      return update.count;
+    },
+    blockTaskForRecovery: async (input) => {
+      await tx.task.updateMany({
+        where: { id: input.taskId, status: { in: [...input.expectedStatuses] } },
+        data: {
+          status: "BLOCKED",
+          phase: input.phase,
+          completedAt: null,
+          terminalReasonJson: input.reasonJson,
+        },
+      });
+    },
   }),
   mutate: mutateAgentState,
   executeLocal: async (input: ProviderExecutionInput) => {
@@ -12419,52 +12465,6 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
         requestArtifact: true,
         responseArtifact: true,
         turn: { select: { state: true, taskId: true } },
-      },
-    });
-  },
-  findAttemptStatus: async (attemptId: string) => {
-    const current = await db.providerAttempt.findUnique({
-      where: { id: attemptId },
-      select: { status: true },
-    });
-    return current?.status ?? null;
-  },
-  interruptAttempt: async (input) => {
-    const update = await db.providerAttempt.updateMany({
-      where: { id: input.attemptId, status: { in: [...input.inFlightStates] } },
-      data: {
-        status: "interrupted",
-        completedAt: input.interruptedAt,
-        errorJson: input.errorJson,
-      },
-    });
-    return update.count;
-  },
-  readTurnForRecovery: async (turnId: string) => {
-    return db.turn.findUnique({
-      where: { id: turnId },
-      select: { state: true, taskId: true },
-    });
-  },
-  interruptTurnForRecovery: async (input) => {
-    const update = await db.turn.updateMany({
-      where: { id: input.turnId, state: input.expectedState },
-      data: {
-        state: "INTERRUPTED",
-        completedAt: input.interruptedAt,
-        terminalErrorJson: input.errorJson,
-      },
-    });
-    return update.count;
-  },
-  blockTaskForRecovery: async (input) => {
-    await db.task.updateMany({
-      where: { id: input.taskId, status: { in: [...input.expectedStatuses] } },
-      data: {
-        status: "BLOCKED",
-        phase: input.phase,
-        completedAt: null,
-        terminalReasonJson: input.reasonJson,
       },
     });
   },
