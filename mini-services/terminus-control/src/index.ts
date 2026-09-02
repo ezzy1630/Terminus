@@ -722,6 +722,8 @@ import {
   ToolEpisodeService,
   TurnCoordinator,
   TurnAdmissionError,
+  projectTurn,
+  projectAttempts,
   VerificationCoordinator,
   completionGateRepairInputs,
   restoredPlanMatchesContract,
@@ -4688,8 +4690,13 @@ const checkpointSequenceStateSchema = z.object({
  * so the two agree.
  */
 function canonicalArtifactHash(raw: string): string | null {
-  const hex = raw.startsWith("sha256:") ? raw.slice("sha256:".length) : raw;
-  return /^[0-9a-f]{64}$/.test(hex) ? `sha256:${hex}` : null;
+  const hexPart = raw.startsWith("artifact://sha256/")
+    ? raw.slice("artifact://sha256/".length)
+    : raw.startsWith("sha256:")
+      ? raw.slice("sha256:".length)
+      : raw;
+  const hash = hexPart.split("#", 1)[0] ?? "";
+  return /^[0-9a-f]{64}$/i.test(hash) ? `sha256:${hash.toLowerCase()}` : null;
 }
 
 // ───────────────────── External Codex subscription lane ───────────────────
@@ -7118,46 +7125,28 @@ const routes: Route[] = [
   route("GET", "/v1/turns/:id", async (_req, res, params) => {
     const turn = await db.turn.findUnique({ where: { id: String(params.id) } });
     if (!turn) return sendError(res, 404, "TURN_NOT_FOUND", "turn not found", "not_found");
-    // Usage, cost and stop reason are recorded per attempt and were readable
-    // only at task granularity, so anything wanting per-turn numbers had to
-    // re-derive them from the event log. They are summed here instead.
     const attempts = await db.providerAttempt.findMany({
       where: { turnId: turn.id },
       orderBy: { attemptNumber: "asc" },
       select: {
+        id: true,
         attemptNumber: true,
+        modelKey: true,
+        providerId: true,
+        status: true,
         usageJson: true,
         finishReason: true,
+        providerRequestId: true,
         providerReportedCostMicros: true,
         computedCostMicros: true,
         costSource: true,
+        requestArtifact: true,
+        responseArtifact: true,
+        startedAt: true,
+        completedAt: true,
       },
     });
-    const terminalError = turn.terminalErrorJson === null
-      ? null
-      : safeParse<unknown>(turn.terminalErrorJson, null);
-    const costMicros = sumAttemptCostMicros(attempts);
-    const requestedBudget = parsePersistedTurnBudget(turn.requestedBudgetJson);
-    sendJson(res, 200, {
-      id: turn.id, thread_id: turn.threadId, task_id: turn.taskId,
-      sequence: turn.sequence, state: turn.state,
-      initiating_actor: turn.initiatingActor,
-      started_at: turn.startedAt?.toISOString() ?? null,
-      completed_at: turn.completedAt?.toISOString() ?? null,
-      model: turn.selectedModel,
-      reasoning_effort: turn.selectedReasoningEffort,
-      selected_provider_account_id: turn.selectedProviderAccountId,
-      budget: turnRequestBudgetWire(requestedBudget),
-      usage: sumUsageWire(attempts.map((attempt) => usageWire(attempt.usageJson))),
-      // Null, not zero: a turn whose price is unknown did not cost nothing.
-      cost_micros: costMicros === null ? null : costMicros.toString(),
-      stop_reason: turnStopReason({
-        state: turn.state,
-        terminalError,
-        lastFinishReason: attempts[attempts.length - 1]?.finishReason ?? null,
-      }),
-      terminal_error: terminalError,
-    });
+    sendJson(res, 200, projectTurn(turn, attempts));
   }),
   /**
    * Per-attempt provider accounting for one turn.
@@ -7192,25 +7181,7 @@ const routes: Route[] = [
         completedAt: true,
       },
     });
-    sendJson(res, 200, attempts.map((attempt) => ({
-      provider_attempt_id: attempt.id,
-      attempt_number: attempt.attemptNumber,
-      model: attempt.modelKey,
-      provider_id: attempt.providerId,
-      status: attempt.status,
-      usage: usageWire(attempt.usageJson),
-      finish_reason: attempt.finishReason,
-      provider_request_id: attempt.providerRequestId,
-      // BigInt columns cross as decimal strings, consistent with
-      // `budget_ledger`; `cost_source` says which of the two to trust.
-      provider_reported_cost_micros: attempt.providerReportedCostMicros?.toString() ?? null,
-      computed_cost_micros: attempt.computedCostMicros?.toString() ?? null,
-      cost_source: attempt.costSource,
-      request_artifact: attempt.requestArtifact,
-      response_artifact: attempt.responseArtifact,
-      started_at: attempt.startedAt.toISOString(),
-      completed_at: attempt.completedAt?.toISOString() ?? null,
-    })));
+    sendJson(res, 200, projectAttempts(attempts));
   }),
   // SPEC §32.2 — interrupt a running turn. The agent loop checks turn
   // state between phases and stops at the next safe point.
@@ -12434,6 +12405,68 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
   executeGateway: async (input: ProviderExecutionInput) => {
     if (input.gateway === null) throw new ProviderExecutionUnavailableError(input.rendered.providerId);
     return executeGatewayProviderRequest(input.rendered, input.gateway, input.context, input.signal, input.onChunk);
+  },
+  listInFlightAttempts: async () => {
+    return db.providerAttempt.findMany({
+      where: { status: { in: [...IN_FLIGHT_PROVIDER_STATES] } },
+      orderBy: [{ startedAt: "asc" }, { id: "asc" }],
+      select: {
+        id: true,
+        turnId: true,
+        status: true,
+        providerIdempotencyKey: true,
+        requestFingerprint: true,
+        requestArtifact: true,
+        responseArtifact: true,
+        turn: { select: { state: true, taskId: true } },
+      },
+    });
+  },
+  findAttemptStatus: async (attemptId: string) => {
+    const current = await db.providerAttempt.findUnique({
+      where: { id: attemptId },
+      select: { status: true },
+    });
+    return current?.status ?? null;
+  },
+  interruptAttempt: async (input) => {
+    const update = await db.providerAttempt.updateMany({
+      where: { id: input.attemptId, status: { in: [...input.inFlightStates] } },
+      data: {
+        status: "interrupted",
+        completedAt: input.interruptedAt,
+        errorJson: input.errorJson,
+      },
+    });
+    return update.count;
+  },
+  readTurnForRecovery: async (turnId: string) => {
+    return db.turn.findUnique({
+      where: { id: turnId },
+      select: { state: true, taskId: true },
+    });
+  },
+  interruptTurnForRecovery: async (input) => {
+    const update = await db.turn.updateMany({
+      where: { id: input.turnId, state: input.expectedState },
+      data: {
+        state: "INTERRUPTED",
+        completedAt: input.interruptedAt,
+        terminalErrorJson: input.errorJson,
+      },
+    });
+    return update.count;
+  },
+  blockTaskForRecovery: async (input) => {
+    await db.task.updateMany({
+      where: { id: input.taskId, status: { in: [...input.expectedStatuses] } },
+      data: {
+        status: "BLOCKED",
+        phase: input.phase,
+        completedAt: null,
+        terminalReasonJson: input.reasonJson,
+      },
+    });
   },
 });
 

@@ -155,8 +155,8 @@ export interface ProviderSessionTransaction {
     readonly id: string;
     readonly turnId: string;
     readonly status: string;
-    readonly providerIdempotencyKey: string;
-    readonly requestFingerprint: string;
+    readonly providerIdempotencyKey: string | null;
+    readonly requestFingerprint: string | null;
     readonly requestArtifact: string;
     readonly responseArtifact: string | null;
     readonly turn: { readonly state: string; readonly taskId: string | null };
@@ -178,8 +178,8 @@ export interface ProviderAttemptRecoveryRecord {
   readonly turnId: string;
   readonly taskId: string | null;
   readonly previousStatus: string;
-  readonly providerIdempotencyKey: string;
-  readonly requestFingerprint: string;
+  readonly providerIdempotencyKey: string | null;
+  readonly requestFingerprint: string | null;
 }
 
 export interface ProviderAttemptRecoveryResult {
@@ -201,8 +201,8 @@ export interface ProviderSessionDependencies<TTransaction> {
     readonly id: string;
     readonly turnId: string;
     readonly status: string;
-    readonly providerIdempotencyKey: string;
-    readonly requestFingerprint: string;
+    readonly providerIdempotencyKey: string | null;
+    readonly requestFingerprint: string | null;
     readonly requestArtifact: string;
     readonly responseArtifact: string | null;
     readonly turn: { readonly state: string; readonly taskId: string | null };
