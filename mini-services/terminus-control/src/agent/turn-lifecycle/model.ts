@@ -56,9 +56,8 @@ export const TERMINAL_PHASES: readonly TerminalPhase[] = [
   "USER_ACTION_REQUIRED",
 ];
 
-export function isTerminalPhase(state: LifecycleStateName): state is TerminalPhase {
-  return (TERMINAL_PHASES as readonly string[]).includes(state);
-}
+export const isTerminalPhase = (state: LifecycleStateName): state is TerminalPhase =>
+  (TERMINAL_PHASES as readonly string[]).includes(state);
 
 /** States that must never remain permanently reachable by any schedule. */
 export const LIVENESS_CRITICAL_PHASES: readonly LifecyclePhase[] = [
@@ -172,88 +171,77 @@ export interface Reduction {
 
 const NO_COMMANDS: readonly PendingCommand[] = [];
 
-export function initialLifecycleState(turnId: string): LifecycleState {
-  return {
-    turnId,
-    phase: "ADMITTED",
-    contextGeneration: 0,
-    observationsThrough: 0,
-    pendingObservations: [],
-    attempts: [],
-    activeAttemptId: null,
-    toolCalls: [],
-    pendingCommand: null,
-    waitReason: null,
-    deadline: null,
-    compileRetries: 0,
-    terminalReason: null,
-    workspaceRevision: null,
-    leaseLost: false,
-  };
-}
+export const initialLifecycleState = (turnId: string): LifecycleState => ({
+  turnId,
+  phase: "ADMITTED",
+  contextGeneration: 0,
+  observationsThrough: 0,
+  pendingObservations: [],
+  attempts: [],
+  activeAttemptId: null,
+  toolCalls: [],
+  pendingCommand: null,
+  waitReason: null,
+  deadline: null,
+  compileRetries: 0,
+  terminalReason: null,
+  workspaceRevision: null,
+  leaseLost: false,
+});
 
-export function command(input: {
+export const command = (input: {
   readonly kind: PendingCommand["kind"];
   readonly idempotencyKey: string;
   readonly attemptId?: string | null | undefined;
   readonly detail?: string | null | undefined;
-}): PendingCommand {
-  return {
-    kind: input.kind,
-    idempotencyKey: input.idempotencyKey,
-    attemptId: input.attemptId ?? null,
-    detail: input.detail ?? null,
-  };
-}
+}): PendingCommand => ({
+  kind: input.kind,
+  idempotencyKey: input.idempotencyKey,
+  attemptId: input.attemptId ?? null,
+  detail: input.detail ?? null,
+});
 
-function terminal(input: {
+const terminal = (input: {
   readonly state: LifecycleState;
   readonly phase: TerminalPhase;
   readonly reason: string;
-}): LifecycleState {
-  return {
-    ...input.state,
-    phase: input.phase,
-    pendingCommand: null,
-    waitReason: null,
-    deadline: null,
-    activeAttemptId: null,
-    terminalReason: input.reason,
-  };
-}
+}): LifecycleState => ({
+  ...input.state,
+  phase: input.phase,
+  pendingCommand: null,
+  waitReason: null,
+  deadline: null,
+  activeAttemptId: null,
+  terminalReason: input.reason,
+});
 
-function withPending(input: {
+const withPending = (input: {
   readonly state: LifecycleState;
   readonly pending: PendingCommand;
-}): LifecycleState {
-  return {
-    ...input.state,
-    pendingCommand: input.pending,
-    waitReason: null,
-  };
-}
+}): LifecycleState => ({
+  ...input.state,
+  pendingCommand: input.pending,
+  waitReason: null,
+});
 
-function attemptRecord(state: LifecycleState, attemptId: string): AttemptRecord | undefined {
-  return state.attempts.find((attempt) => attempt.attemptId === attemptId);
-}
+const attemptRecord = (state: LifecycleState, attemptId: string): AttemptRecord | undefined =>
+  state.attempts.find((attempt) => attempt.attemptId === attemptId);
 
-function toolRecord(state: LifecycleState, toolCallId: string): ToolCallRecord | undefined {
-  return state.toolCalls.find((call) => call.toolCallId === toolCallId);
-}
+const toolRecord = (state: LifecycleState, toolCallId: string): ToolCallRecord | undefined =>
+  state.toolCalls.find((call) => call.toolCallId === toolCallId);
 
 /**
  * Settle into a terminal phase from any non-terminal state. The mapping keeps
  * production's failure disposition vocabulary (`turn-failure-policy.ts`).
  */
-function settleTerminal(state: LifecycleState, event: {
+const settleTerminal = (state: LifecycleState, event: {
   readonly phase: TerminalPhase;
   readonly reason: string;
-}): LifecycleState {
-  return terminal({ state, phase: event.phase, reason: event.reason });
-}
+}): LifecycleState => terminal({ state, phase: event.phase, reason: event.reason });
 
 /** Commands that re-drive a turn stuck at a safe boundary after restart. */
-function recoveryCommands(state: LifecycleState): readonly PendingCommand[] {
+// skipcq: JS-0067
+const recoveryCommands = (state: LifecycleState): readonly PendingCommand[] => {
   switch (state.phase) {
     case "ADMITTED":
       return [command({ kind: "CompileContext", idempotencyKey: `compile:${state.turnId}:g${state.contextGeneration}` })];
@@ -285,13 +273,13 @@ function recoveryCommands(state: LifecycleState): readonly PendingCommand[] {
     default:
       return NO_COMMANDS;
   }
-}
+};
 
 /**
  * The transition function. Total over events; unknown/duplicate/terminal
  * events return the unchanged state with no commands.
  */
-export function reduce(state: LifecycleState, event: LifecycleEvent): Reduction {
+export const reduce = (state: LifecycleState, event: LifecycleEvent): Reduction => {
   // A terminal turn absorbs every later event: terminal settlement is the
   // authoritative record, so re-delivered outcomes are duplicates.
   if (isTerminalPhase(state.phase)) return { state, commands: NO_COMMANDS, duplicate: true };
@@ -617,9 +605,9 @@ export function reduce(state: LifecycleState, event: LifecycleEvent): Reduction 
  * Derive the pending command for a state without an event. Used on restart:
  * the executor reduces the durable log and then asks the model what must run.
  */
-export function recoverableCommands(state: LifecycleState): readonly PendingCommand[] {
+export const recoverableCommands = (state: LifecycleState): readonly PendingCommand[] => {
   if (isTerminalPhase(state.phase)) return NO_COMMANDS;
   if (state.pendingCommand !== null) return [state.pendingCommand];
   if (state.waitReason !== null) return NO_COMMANDS;
   return recoveryCommands(state);
-}
+};

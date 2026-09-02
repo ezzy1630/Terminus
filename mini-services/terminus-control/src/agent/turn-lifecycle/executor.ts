@@ -94,7 +94,7 @@ export interface LifecycleExecutorOptions {
    * active state carries a deadline: one of the three recovery anchors
    * (pending command, deadline, explicit waiting reason).
    */
-  readonly deadlineTick?: number | null | undefined;
+  readonly deadlineTick?: number | null;
 }
 
 export class LifecycleInvariantError extends Error {

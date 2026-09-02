@@ -94,10 +94,10 @@ export function interpretRecoveryMarkerWrite(
  * process is being terminated anyway; anything else must produce a durable
  * recovery record inside the same catch block.
  */
-export function settlementFaultIsTerminalProcessFault(error: unknown): boolean {
+export const settlementFaultIsTerminalProcessFault = (error: unknown): boolean => {
   const name = error instanceof Error ? error.name : "";
   return name === "ControlWriterFencedError";
-}
+};
 
 export interface RecoveryPlan {
   readonly marker: TurnRecoveryMarker;
@@ -107,20 +107,18 @@ export interface RecoveryPlan {
 /**
  * The catch-block plan: never rethrow; record recovery.
  */
-export function planRecoveryAfterSettlementFault(input: {
+export const planRecoveryAfterSettlementFault = (input: {
   readonly previousState: string;
   readonly code: string;
   readonly details: string | null;
-}): RecoveryPlan {
-  return {
-    marker: {
-      reason: "failure_settlement_unproven",
-      code: input.code,
-      previous_state: input.previousState,
-      recovery: "settle_or_retry",
-      retryable: true,
-      details: input.details,
-    },
-    rethrow: false,
-  };
-}
+}): RecoveryPlan => ({
+  marker: {
+    reason: "failure_settlement_unproven",
+    code: input.code,
+    previous_state: input.previousState,
+    recovery: "settle_or_retry",
+    retryable: true,
+    details: input.details,
+  },
+  rethrow: false,
+});

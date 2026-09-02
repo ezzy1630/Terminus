@@ -32,7 +32,7 @@ exclude_patterns = [
   "docs/generated/**",
   "skills/**",
   "Terminus — Research/**",
-  "evals/**",
+  "**/evals/**",
   "**/generated/**",
   "packages/terminus-kernel-client/src/generated/**",
   "scripts/**"

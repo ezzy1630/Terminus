@@ -43,22 +43,23 @@ class VirtualScheduler implements LifecycleScheduler {
   pending(): readonly ScheduledWakeup[] {
     return [...this.wakeups];
   }
-  async fire(wakeupId: string): Promise<LifecycleEvent> {
+  fire(wakeupId: string): Promise<LifecycleEvent> {
     const index = this.wakeups.findIndex((wakeup) => wakeup.wakeupId === wakeupId);
     if (index < 0) throw new Error(`no such wakeup: ${wakeupId}`);
     const [wakeup] = this.wakeups.splice(index, 1);
-    return wakeup!.deliver();
+    return Promise.resolve(wakeup!.deliver());
   }
 }
 
 /** In-memory durable log standing in for the SQLite event store. */
 class MemoryEventStore implements LifecycleEventStore {
   private readonly events: LifecycleEvent[] = [];
-  async append(event: LifecycleEvent): Promise<void> {
+  append(event: LifecycleEvent): Promise<void> {
     this.events.push(event);
+    return Promise.resolve();
   }
-  async readAll(): Promise<readonly LifecycleEvent[]> {
-    return [...this.events];
+  readAll(): Promise<readonly LifecycleEvent[]> {
+    return Promise.resolve([...this.events]);
   }
   get size(): number {
     return this.events.length;
@@ -72,70 +73,73 @@ interface EffectScript {
   readonly verificationPasses: boolean;
 }
 
-function scriptedEffects(script: EffectScript, effectLog: string[]): LifecycleEffects {
+const scriptedEffects = (script: EffectScript, effectLog: string[]): LifecycleEffects => {
   let compileFailuresLeft = script.compileFailures;
   let persistFailuresLeft = script.persistFailures;
   // The compiler binds every observation accepted so far, mirroring the
   // production context compiler's read of the durable episode ledger.
   let observationsAccepted = 0;
   return {
-    compileContext: async ({ generation }) => {
+    compileContext: ({ generation }) => {
       if (compileFailuresLeft > 0) {
         compileFailuresLeft -= 1;
         effectLog.push(`compile:fail:${generation}`);
-        return { retryable: true };
+        return Promise.resolve({ retryable: true });
       }
       effectLog.push(`compile:ok:${generation}`);
-      return { generation: generation + 1, observationsThrough: observationsAccepted };
+      return Promise.resolve({ generation: generation + 1, observationsThrough: observationsAccepted });
     },
-    invokeProvider: async ({ attemptId }) => {
+    invokeProvider: ({ attemptId }) => {
       effectLog.push(`provider:${attemptId}`);
       // Attempt 1 activates the workspace (no observation); attempt 2
       // mutates the workspace (observation committed durably); attempt 3
       // returns the final response.
       if (attemptId === "a1") {
-        return { finishReason: "stop", toolCallIds: ["t-activate"], observation: null };
+        return Promise.resolve({ finishReason: "stop", toolCallIds: ["t-activate"], observation: null });
       }
       if (attemptId === "a2") {
         observationsAccepted += 1;
-        return { finishReason: "stop", toolCallIds: ["t-patch"], observation: "obs-patch" };
+        return Promise.resolve({ finishReason: "stop", toolCallIds: ["t-patch"], observation: "obs-patch" });
       }
-      return { finishReason: "stop", toolCallIds: [], observation: null };
+      return Promise.resolve({ finishReason: "stop", toolCallIds: [], observation: null });
     },
-    executeToolBatch: async ({ toolCallIds }) => {
+    executeToolBatch: ({ toolCallIds }) => {
       effectLog.push(`tools:${toolCallIds.join("+")}`);
-      return toolCallIds.map((toolCallId) => ({
-        toolCallId,
-        status: "success" as const,
-        mutatesWorkspace: toolCallId === "t-patch",
-        workspaceRevision: toolCallId === "t-patch" ? "rev-1" : null,
-      }));
+      return Promise.resolve(
+        toolCallIds.map((toolCallId) => ({
+          toolCallId,
+          status: "success" as const,
+          mutatesWorkspace: toolCallId === "t-patch",
+          workspaceRevision: toolCallId === "t-patch" ? "rev-1" : null,
+        })),
+      );
     },
-    persistArtifacts: async ({ generation }) => {
+    persistArtifacts: ({ generation }) => {
       if (persistFailuresLeft > 0) {
         persistFailuresLeft -= 1;
         effectLog.push(`persist:interrupted:${generation}`);
-        return { published: false, artifactKeys: ["response"] };
+        return Promise.resolve({ published: false, artifactKeys: ["response"] });
       }
       effectLog.push(`persist:ok:${generation}`);
-      return { published: true, artifactKeys: ["response"] };
+      return Promise.resolve({ published: true, artifactKeys: ["response"] });
     },
-    runVerification: async () => {
+    runVerification: () => {
       effectLog.push("verification");
-      return { passed: script.verificationPasses, planId: "plan-1" };
+      return Promise.resolve({ passed: script.verificationPasses, planId: "plan-1" });
     },
-    markTerminal: async () => {
+    markTerminal: () => {
       effectLog.push("terminal");
+      return Promise.resolve();
     },
   };
-}
+};
 
-function buildExecutor(script: EffectScript, effectLog: string[]): {
+const buildExecutor = (script: EffectScript, effectLog: string[]): {
   readonly executor: LifecycleExecutor;
   readonly clock: VirtualClock;
   readonly scheduler: VirtualScheduler;
   readonly store: MemoryEventStore;
-} {
+} => {
   const clock = new VirtualClock();
   const scheduler = new VirtualScheduler();
   const store = new MemoryEventStore();
@@ -147,7 +151,7 @@ function buildExecutor(script: EffectScript, effectLog: string[]): {
     effects: scriptedEffects(script, effectLog),
   });
   return { executor, clock, scheduler, store };
-}
+};
 
 const HAPPY_SCRIPT: EffectScript = {
   compileFailures: 0,
@@ -186,8 +190,8 @@ describe("turn lifecycle executor", () => {
     const fullLog = await store.readAll();
     for (let cut = 1; cut <= fullLog.length; cut += 1) {
       const prefixStore: LifecycleEventStore = {
-        append: async () => {},
-        readAll: async () => fullLog.slice(0, cut),
+        append: () => Promise.resolve(),
+        readAll: () => Promise.resolve(fullLog.slice(0, cut)),
       };
       const restarted = new LifecycleExecutor({
         turnId: TURN_ID,

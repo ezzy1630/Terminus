@@ -66,14 +66,14 @@ export interface LifecycleConformanceReport {
   readonly elapsedMs: number;
 }
 
-function property(
+const property = (
   schedules: number,
   measure: string,
   numerator: number,
   threshold: number,
   detail: string,
   direction: "maximize" | "minimize" = "maximize",
-): ConformanceProperty {
+): ConformanceProperty => {
   const rate = schedules === 0 ? 1.0 : numerator / schedules;
   const pass = direction === "maximize" ? rate >= threshold : rate <= threshold;
   return {
@@ -86,7 +86,7 @@ function property(
     pass,
     detail,
   };
-}
+};
 
 /**
  * One fixed end-to-end probe per measured property that needs a *deterministic*
@@ -94,7 +94,8 @@ function property(
  * returns whether the property held; any failure is a conformance regression
  * even if every random schedule passed.
  */
-function fixedProbes(): Record<string, { held: boolean; detail: string }> {
+// skipcq: JS-0067
+const fixedProbes = (): Record<string, { held: boolean; detail: string }> => {
   const probes: Record<string, { held: boolean; detail: string }> = {};
 
   // Cancellation settles exactly once, mid-provider, and the rest of the
@@ -159,7 +160,8 @@ function fixedProbes(): Record<string, { held: boolean; detail: string }> {
  * failures are counted, classified, and reported; the first five failing
  * seeds are returned for exact replay.
  */
-export function runConformance(iterations: number, startSeed = 1): LifecycleConformanceReport {
+// skipcq: JS-0067
+export const runConformance = (iterations: number, startSeed = 1): LifecycleConformanceReport => {
   const started = Date.now();
   let stuck = 0;
   const invariantViolations: Record<string, number> = {};
