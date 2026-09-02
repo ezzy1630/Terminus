@@ -55,6 +55,13 @@ export interface ModelProfileReportInput {
   readonly checks: readonly ModelProfileCheckResult[];
 }
 
+export const IMMUTABLE_ARTIFACT_REF_PATTERN =
+  /^(?:artifact:\/\/sha256\/[0-9a-f]{64}(?:#[a-zA-Z0-9_.-]+)?|sha256:[0-9a-f]{64})$/i;
+
+export function isImmutableArtifactRef(ref: string): boolean {
+  return IMMUTABLE_ARTIFACT_REF_PATTERN.test(ref.trim());
+}
+
 function requireText(name: string, value: string): void {
   if (value.trim().length === 0) throw new Error(`${name} must be non-empty`);
 }
@@ -80,6 +87,11 @@ export function buildModelProfileConformanceReport(
     }
     if (byId.has(check.checkId)) throw new Error(`duplicate model-profile check: ${check.checkId}`);
     requireText(`${check.checkId}.artifactRef`, check.artifactRef);
+    if (!isImmutableArtifactRef(check.artifactRef)) {
+      throw new Error(
+        `${check.checkId}.artifactRef must be an immutable content-addressed artifact reference`,
+      );
+    }
     if (check.status !== "passed" && (check.diagnostic === null || check.diagnostic.trim().length === 0)) {
       throw new Error(`${check.checkId} ${check.status} result requires a diagnostic`);
     }
@@ -150,4 +162,47 @@ export function runModelProfileExitGate(input: {
     failures,
     reports: input.reports,
   };
+}
+
+/** Validate an untrusted report object at boundary transitions. */
+export function validateModelProfileConformanceReport(
+  value: unknown,
+): ModelProfileConformanceReport {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("model profile conformance report must be an object");
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.schemaVersion !== MODEL_PROFILE_CONFORMANCE_SCHEMA_VERSION) {
+    throw new Error(`unsupported schemaVersion: ${String(obj.schemaVersion)}`);
+  }
+  for (const field of [
+    "providerId",
+    "modelSnapshot",
+    "apiVersion",
+    "profileId",
+    "profileVersion",
+    "testedAt",
+    "terminusCommit",
+  ]) {
+    if (typeof obj[field] !== "string" || (obj[field] as string).trim().length === 0) {
+      throw new Error(`report.${field} must be a non-empty string`);
+    }
+  }
+  if (obj.evidenceClass !== "deterministic_adapter" && obj.evidenceClass !== "external_live") {
+    throw new Error(`invalid evidenceClass: ${String(obj.evidenceClass)}`);
+  }
+  if (!Array.isArray(obj.checks)) {
+    throw new Error("report.checks must be an array");
+  }
+  return buildModelProfileConformanceReport({
+    providerId: obj.providerId as string,
+    modelSnapshot: obj.modelSnapshot as string,
+    apiVersion: obj.apiVersion as string,
+    profileId: obj.profileId as string,
+    profileVersion: obj.profileVersion as string,
+    evidenceClass: obj.evidenceClass as ConformanceEvidenceClass,
+    testedAt: obj.testedAt as string,
+    terminusCommit: obj.terminusCommit as string,
+    checks: obj.checks as ModelProfileCheckResult[],
+  });
 }

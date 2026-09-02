@@ -3,6 +3,7 @@ import {
   MODEL_PROFILE_CHECK_IDS,
   buildModelProfileConformanceReport,
   runModelProfileExitGate,
+  validateModelProfileConformanceReport,
   type ConformanceEvidenceClass,
   type ModelProfileCheckStatus,
 } from "./model-profile.js";
@@ -67,5 +68,32 @@ describe("versioned model-profile conformance", () => {
   test("blocked checks remain a failed profile", () => {
     const blocked = report("external_live", "blocked");
     expect(blocked.passed).toBe(false);
+  });
+
+  test("rejects mutable or non-content-addressed artifact reference", () => {
+    expect(() => buildModelProfileConformanceReport({
+      providerId: "openai",
+      modelSnapshot: "snapshot",
+      apiVersion: "api",
+      profileId: "profile",
+      profileVersion: "1",
+      evidenceClass: "external_live",
+      testedAt: "2026-09-02T00:00:00Z",
+      terminusCommit: "a".repeat(40),
+      checks: MODEL_PROFILE_CHECK_IDS.map((checkId) => ({
+        checkId,
+        status: "passed",
+        artifactRef: "not-a-valid-sha256-reference",
+        diagnostic: null,
+      })),
+    })).toThrow("must be an immutable content-addressed artifact reference");
+  });
+
+  test("validateModelProfileConformanceReport parses valid and rejects malformed objects", () => {
+    const valid = report();
+    const validated = validateModelProfileConformanceReport(JSON.parse(JSON.stringify(valid)));
+    expect(validated.profileId).toBe(valid.profileId);
+    expect(() => validateModelProfileConformanceReport(null)).toThrow();
+    expect(() => validateModelProfileConformanceReport({ schemaVersion: 99 })).toThrow();
   });
 });
