@@ -17,6 +17,34 @@ function specs(nodes: readonly { readonly id: string; readonly specification: st
 }
 
 describe("verification plan derivation", () => {
+  test("calibrates no-mutation, ordinary, and high-risk plans", () => {
+    const derive = (riskClass: "low" | "normal" | "high", changedFiles: string[]) =>
+      deriveVerificationNodes({
+        criteria: [],
+        objective: "calibrate",
+        riskClass,
+        mode: "admission",
+        signals: { changedFiles },
+        idSource: idSource(),
+      });
+
+    const noMutation = derive("normal", []);
+    expect(noMutation.verificationTier).toBe(0);
+    expect(noMutation.nodes.map((node) => parseNodeSpec(node.specification).predicateType)).toEqual([
+      "acceptance_query",
+    ]);
+
+    const ordinary = derive("normal", ["src/index.ts"]);
+    expect(ordinary.verificationTier).toBe(2);
+    expect(ordinary.nodes.some((node) => parseNodeSpec(node.specification).predicateType === "diff_policy")).toBe(true);
+
+    const highRisk = derive("high", ["src/auth.ts"]);
+    expect(highRisk.verificationTier).toBe(3);
+    const highRiskPredicates = highRisk.nodes.map((node) => parseNodeSpec(node.specification).predicateType);
+    expect(highRiskPredicates).toContain("security_scanner");
+    expect(highRiskPredicates).toContain("detached_review");
+  });
+
   test("selects checks from code, risk, scope, and criterion signals", () => {
     const derivation = deriveVerificationNodes({
       criteria: [
@@ -79,6 +107,8 @@ describe("verification plan derivation", () => {
       "security_scanner",
       "schema_compatibility",
       "migration_dry_run",
+      "diff_policy",
+      "detached_review",
     ]));
 
     const nativeTest = derivation.nodes.find((node) => parsed.get(node.id)?.command === "bun test src/app.test.ts");

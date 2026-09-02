@@ -10,6 +10,7 @@ import {
   serializeNodeSpec,
   type PredicateType as PredicateTypeName,
 } from "./node-spec.js";
+import { classifyVerificationTier, type VerificationTier } from "./risk-tier.js";
 
 export type VerificationPlanMode = "incremental" | "admission";
 
@@ -62,6 +63,7 @@ export interface VerificationPlanDerivationInput {
 }
 
 export interface VerificationPlanDerivation {
+  readonly verificationTier: VerificationTier;
   readonly nodes: readonly VerificationNode[];
   readonly completionExpression: string;
   readonly rationale: ReadonlyMap<string, readonly string[]>;
@@ -237,10 +239,12 @@ function makeNode(
   input: VerificationPlanDerivationInput,
   draft: NodeDraft,
   rationale: Map<string, readonly string[]>,
+  verificationTier: VerificationTier,
 ): VerificationNode {
   const id = `${slug(draft.label)}_${input.idSource()}`;
   const observation = {
     derivationVersion: "terminus.verification.plan.v1",
+    verificationTier,
     mode: input.mode,
     objectivePresent: input.objective.trim().length > 0,
     uiComputerUseAvailable: input.signals.uiComputerUseAvailable === true,
@@ -446,6 +450,10 @@ export function deriveVerificationNodes(
   const hasGenerated = generatedPaths.length > 0 || allSignalPaths.some((path) => GENERATED_PATTERN.test(path));
   const hasUi = allSignalPaths.some((path) => UI_PATTERN.test(path));
   const hasSecurity = allSignalPaths.some((path) => SECURITY_PATTERN.test(path));
+  const tierDecision = classifyVerificationTier({
+    riskClass: input.riskClass,
+    changedFiles,
+  });
   const auxiliary = auxiliaryDrafts(input, paths, {
     hasCode,
     hasTypedCode,
@@ -456,10 +464,38 @@ export function deriveVerificationNodes(
     hasUi,
     hasSecurity,
   });
-  const drafts: NodeDraft[] = [...auxiliary];
+  const drafts: NodeDraft[] = tierDecision.tier === 0 ? [] : [...auxiliary];
+  if (tierDecision.tier > 0) {
+    drafts.push({
+      label: "diff_policy",
+      predicateType: PredicateType.DIFF_POLICY,
+      criterionId: null,
+      paths,
+      required: input.mode === "admission",
+      dependsOn: [],
+      reasons: [tierDecision.reason],
+    });
+  }
+  if (tierDecision.tier === 3) {
+    drafts.push({
+      label: "detached_review",
+      predicateType: PredicateType.DETACHED_REVIEW,
+      criterionId: null,
+      paths,
+      required: input.mode === "admission",
+      dependsOn: [],
+      reasons: ["Tier 3 requires review independent from the implementing trajectory"],
+    });
+  }
   for (const [index, criterion] of input.criteria.entries()) {
     const selectionText = criterion.verificationHint?.trim() || criterion.statement;
-    const selected = predicateFromHint(selectionText, hasUi);
+    const selected = tierDecision.tier === 0 && !criterion.verificationHint?.trim()
+      ? {
+          predicateType: PredicateType.ACCEPTANCE_QUERY,
+          command: undefined,
+          reason: "Tier 0 uses a direct observable acceptance query",
+        }
+      : predicateFromHint(selectionText, hasUi);
     const reasons = [
       selected.reason,
       ...(input.signals.failingTests?.length ? ["current failure selectors were available"] : []),
@@ -478,13 +514,17 @@ export function deriveVerificationNodes(
   }
   if (drafts.length === 0) {
     drafts.push({
-      label: "parse",
-      predicateType: PredicateType.FILE_PARSES,
+      label: tierDecision.tier === 0 ? "observation" : "parse",
+      predicateType: tierDecision.tier === 0 ? PredicateType.ACCEPTANCE_QUERY : PredicateType.FILE_PARSES,
       criterionId: null,
       paths,
       required: true,
       dependsOn: [],
-      reasons: ["no structured criteria were available; use the conservative baseline"],
+      reasons: [
+        tierDecision.tier === 0
+          ? "no mutation or criterion was available; require one direct observation"
+          : "no structured criteria were available; use the conservative baseline",
+      ],
     });
   }
 
@@ -508,7 +548,7 @@ export function deriveVerificationNodes(
         : tailId === null
           ? []
           : [tailId];
-    const node = makeNode(input, { ...draft, dependsOn }, rationale);
+    const node = makeNode(input, { ...draft, dependsOn }, rationale, tierDecision.tier);
     nodes.push(node);
     if (draft.criterionId !== null) criterionIds.push(node.id);
     if (draft.criterionId === null) tailId = node.id;
@@ -517,6 +557,7 @@ export function deriveVerificationNodes(
   const requiredIds = nodes.filter((node) => node.required).map((node) => node.id);
   const expressionIds = requiredIds.length > 0 ? requiredIds : criterionIds;
   return {
+    verificationTier: tierDecision.tier,
     nodes,
     completionExpression: expressionIds.join(" && "),
     rationale,
