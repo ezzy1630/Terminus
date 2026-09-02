@@ -109,10 +109,10 @@ def load_feature_registry(path: Path | str) -> FeatureExperimentRegistry:
     for experiment in experiments:
         assert isinstance(experiment, Mapping)
         experiment_id = str(experiment["id"])
-        feature_id = experiment.get("feature_id")
-        if feature_id not in feature_ids:
-            raise FeatureRegistryError(f"{experiment_id} names unknown feature {feature_id!r}")
-        covered.add(str(feature_id))
+        exp_feature_id = experiment.get("feature_id")
+        if not isinstance(exp_feature_id, str) or exp_feature_id not in feature_ids:
+            raise FeatureRegistryError(f"{experiment_id} names unknown feature {exp_feature_id!r}")
+        covered.add(exp_feature_id)
         baseline = experiment.get("baseline")
         candidate = experiment.get("candidate")
         if not isinstance(baseline, Mapping) or not isinstance(candidate, Mapping):
