@@ -206,7 +206,8 @@ def test_promotion_gate_has_seven_gates() -> None:
 def test_promotion_gate_reliability_gate_present_without_evidence() -> None:
     """The reliability gate reports n/a when no reliability evidence exists."""
     result = evaluate_promotion(_winning_evaluation())
-    reliability = next(g for g in result.gates if g.name == "reliability")
+    reliability = next((g for g in result.gates if g.name == "reliability"), None)
+    assert reliability is not None
     assert reliability.status is GateStatus.NOT_APPLICABLE
 
 

@@ -60,6 +60,7 @@ def _unique_ids(rows: list[Any], *, owner: str) -> set[str]:
     return set(ids)
 
 
+# skipcq: PY-R1000
 def load_feature_registry(path: Path | str) -> FeatureExperimentRegistry:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, Mapping) or raw.get("schema_version") != 1:

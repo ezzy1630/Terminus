@@ -301,7 +301,7 @@ def test_compare_cohort_runs_holdout_requires_stamping(tmp_path: Path) -> None:
     )
     comparison = compare_cohort_runs(baseline, candidate, registry=registry, output_dir=None)
     assert comparison.eligible is False
-    stamped_baseline = [r for r in baseline]
+    stamped_baseline = list(baseline)
     for record in stamped_baseline + candidate:
         record.holdout_partition = "holdout"
     ok = compare_cohort_runs(stamped_baseline, candidate, registry=registry, output_dir=None)
@@ -361,7 +361,8 @@ def test_promotion_gate_fails_on_reliability_regression() -> None:
     )
     result = evaluate_promotion(evaluation)
     assert result.decision is PromotionDecision.REVISE
-    reliability_gate = next(g for g in result.gates if g.name == "reliability")
+    reliability_gate = next((g for g in result.gates if g.name == "reliability"), None)
+    assert reliability_gate is not None
     assert reliability_gate.status.value == "fail"
 
 
@@ -381,7 +382,8 @@ def test_promotion_gate_silent_without_reliability_evidence() -> None:
         reliability=None,
     )
     result = evaluate_promotion(evaluation)
-    reliability_gate = next(g for g in result.gates if g.name == "reliability")
+    reliability_gate = next((g for g in result.gates if g.name == "reliability"), None)
+    assert reliability_gate is not None
     assert reliability_gate.status.value == "n/a"
 
 
@@ -393,39 +395,12 @@ def test_evaluate_paired_promotion_accepts_reliability() -> None:
         PairedOutcome(suite="s", task=f"t{i}", seed=40, baseline_passed=True, candidate_passed=True)
         for i in range(6)
     ]
-    # Identity binding must match for eligibility; build minimal identities.
-    from forge_evals.identity import EvaluationIdentity
-
-    def _ident(harness: str, seed: int, task: str = "t") -> EvaluationIdentity:
-        return EvaluationIdentity(
-            task_id=task,
-            task_version="v",
-            repository_digest="sha256:r",
-            environment_digest="sha256:e",
-            harness_id=harness,
-            harness_commit=f"c:{harness}",
-            harness_config_hash=f"cfg:{harness}",
-            provider="p",
-            model="m",
-            model_version="mv",
-            model_capability_snapshot_hash="sha256:cap",
-            random_seed=seed,
-            sampling_config_hash="sha256:s",
-            sandbox_policy_hash="sha256:sp",
-            network_policy="proxy",
-            budget_hash="sha256:b",
-            tool_schema_hash="sha256:t",
-            instruction_hash="sha256:i",
-            provider_endpoint_hash="sha256:" + "e" * 64,
-            provider_account_hash="sha256:" + "a" * 64,
-        )
 
     baseline_records = []
     candidate_records = []
-    from forge_evals.run_record import RunRecord as RR
 
     for outcome in outcomes:
-        base = RR.new(
+        base = RunRecord.new(
             suite=outcome.suite,
             task=outcome.task,
             harness="base",
@@ -437,7 +412,7 @@ def test_evaluate_paired_promotion_accepts_reliability() -> None:
             holdout_partition="holdout",
             independently_verified=True,
         )
-        cand = RR.new(
+        cand = RunRecord.new(
             suite=outcome.suite,
             task=outcome.task,
             harness="cand",
@@ -482,5 +457,6 @@ def test_evaluate_paired_promotion_accepts_reliability() -> None:
         require_provider_receipts=False,
         require_complete_cohort=False,
     )
-    reliability_gate = next(g for g in result.gates if g.name == "reliability")
+    reliability_gate = next((g for g in result.gates if g.name == "reliability"), None)
+    assert reliability_gate is not None
     assert reliability_gate.status.value == "fail"

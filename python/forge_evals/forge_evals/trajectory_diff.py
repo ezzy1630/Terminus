@@ -168,6 +168,7 @@ _TOKEN_KEYS = (
 _KIND_KEYS = ("fragment_kinds", "kinds", "fragments")
 
 
+# skipcq: PY-R1000
 def summarize_context_manifests(context_manifests: list[dict[str, Any]]) -> list[ManifestSummary]:
     """Reduce a run record's context manifests to per-turn comparable facts.
 

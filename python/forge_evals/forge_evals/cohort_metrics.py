@@ -354,6 +354,7 @@ def _total_tokens(record: RunRecord) -> int | None:
     return total if total > 0 else None
 
 
+# skipcq: PY-R1000
 def cohort_metrics(
     runs: list[RunRecord],
     *,

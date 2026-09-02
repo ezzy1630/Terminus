@@ -83,6 +83,10 @@ class PartitionRegistry:
     def __init__(self, rules: list[PartitionRule]) -> None:
         self._rules = rules
 
+    @property
+    def rules(self) -> list[PartitionRule]:
+        return list(self._rules)
+
     def partition_for(self, suite: str, task: str) -> Partition:
         """The partition class for one (suite, task) cell.
 
@@ -176,6 +180,6 @@ def registry_to_dict(registry: PartitionRegistry) -> dict[str, Any]:
                 "partition": rule.partition.value,
                 "note": rule.note,
             }
-            for rule in registry._rules
+            for rule in registry.rules
         ]
     }
