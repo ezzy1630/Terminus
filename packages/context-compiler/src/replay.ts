@@ -27,6 +27,7 @@ import type {
   ProviderToolSchema,
 } from "@terminus/provider-core";
 import { canonicalJson, computeContentHash, computeStablePrefixHash } from "@terminus/context-ir";
+import { resolveTokenizer } from "./tokenizer.js";
 
 // ──────────────────────── Ablation specification ─────────────────────────────
 
@@ -136,6 +137,7 @@ function isVolatileFragment(fragment: ContextFragment): boolean {
 function ablatedCachePlan(
   input: ReplayInput,
   fragments: readonly ContextFragment[],
+  toolSchemas: readonly ProviderToolSchema[],
 ): ContextCachePlan {
   const originalStableIds = new Set(
     input.manifest.fragments
@@ -176,9 +178,22 @@ function ablatedCachePlan(
     }
   }
 
-  breakpoints.sort((a, b) => a - b);
-
   const modelKey = input.model.modelKey;
+  const toolSchemaTokens = toolSchemas.length === 0
+    ? 0
+    : resolveTokenizer(input.provider.providerId, modelKey)
+      .estimateToolSchemaTokens(toolSchemas);
+  const minimumCacheableTokens = input.provider.caching.minimumTokens ?? 0;
+  const prefixTokens: number[] = [];
+  let runningTokens = 0;
+  for (const fragment of fragments) {
+    runningTokens += fragment.estimatedTokens[modelKey] ?? 0;
+    prefixTokens.push(runningTokens);
+  }
+  const validBreakpoints = [...new Set(breakpoints)]
+    .filter((index) => (prefixTokens[index] ?? 0) + toolSchemaTokens >= minimumCacheableTokens)
+    .sort((a, b) => a - b);
+
   const predictedCachedTokens = stable.reduce(
     (sum, fragment) => sum + BigInt(fragment.estimatedTokens[modelKey] ?? 0),
     0n,
@@ -186,7 +201,7 @@ function ablatedCachePlan(
   return {
     stablePrefixHash: computeStablePrefixHash(stable),
     volatileSuffixBoundary: stable.length,
-    breakpoints,
+    breakpoints: validBreakpoints,
     predictedCachedTokens,
   };
 }
@@ -212,7 +227,7 @@ export async function replayWithAblation(
     fragments = [...fragments, ...ablation.injectFragments];
   }
 
-  const cachePlan = ablatedCachePlan(input, fragments);
+  const cachePlan = ablatedCachePlan(input, fragments, toolSchemas);
 
   const rendered = await input.renderer.render({
     provider: input.provider,
