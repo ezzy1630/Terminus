@@ -286,6 +286,7 @@ class ContextManifestDiff:
         return lines
 
 
+# skipcq: PY-R1000
 def diff_context_manifests(
     baseline_manifests: list[dict[str, Any]],
     candidate_manifests: list[dict[str, Any]],
