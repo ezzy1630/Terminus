@@ -1,9 +1,39 @@
-import type { Uuid7 } from "@terminus/domain";
-import { parseNodeSpec } from "./node-spec.js";
+import type {
+  AcceptanceCriterion,
+  ArtifactRef,
+  Micros,
+  Rfc3339Timestamp,
+  Uuid7,
+  VerificationPlan,
+  VerificationResult,
+} from "@terminus/domain";
+import {
+  ALL_PREDICATE_TYPES,
+  parseNodeSpec,
+  type PredicateType,
+} from "./node-spec.js";
 import { deriveVerificationNodes } from "./plan-derivation.js";
-import { classifyVerificationTier, type VerificationTier } from "./risk-tier.js";
+import {
+  classifyVerificationTier,
+  type VerificationTier,
+} from "./risk-tier.js";
+import {
+  evaluateCompletionGate,
+  type CompletionDenialReason,
+} from "./completion-gate.js";
+import { contentArtifactRef } from "./evidence.js";
+import {
+  createVerifierBinding,
+  stampVerificationResultBinding,
+} from "./run-binding.js";
 
 export const CALIBRATION_SCHEMA_VERSION = 1 as const;
+
+const SPECIAL_EVIDENCE_REQUIREMENTS = new Set([
+  "workspace_revision_binding",
+  "mandatory_predicate",
+  "claim_evidence_binding",
+]);
 
 export interface CalibrationCase {
   readonly id: string;
@@ -57,14 +87,36 @@ function dummyIdSource(): () => Uuid7 {
   };
 }
 
+function requireStringArray(
+  value: unknown,
+  field: string,
+  allowEmpty: boolean,
+): readonly string[] {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) {
+    throw new Error(
+      `${field} must be ${allowEmpty ? "an" : "a non-empty"} array`,
+    );
+  }
+  if (
+    value.some((item) => typeof item !== "string" || item.trim().length === 0)
+  ) {
+    throw new Error(`${field} entries must be non-empty strings`);
+  }
+  return value;
+}
+
 /** Validate the schema and constraints of a calibration catalog. */
-export function validateCalibrationCatalog(raw: unknown): VerificationCalibrationCatalog {
+export function validateCalibrationCatalog(
+  raw: unknown,
+): VerificationCalibrationCatalog {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error("calibration catalog must be an object");
   }
   const obj = raw as Record<string, unknown>;
   if (obj.schema_version !== CALIBRATION_SCHEMA_VERSION) {
-    throw new Error(`unsupported calibration schema_version: ${String(obj.schema_version)}`);
+    throw new Error(
+      `unsupported calibration schema_version: ${String(obj.schema_version)}`,
+    );
   }
   if (!Array.isArray(obj.cases) || obj.cases.length === 0) {
     throw new Error("calibration catalog must declare at least one case");
@@ -76,63 +128,250 @@ export function validateCalibrationCatalog(raw: unknown): VerificationCalibratio
       throw new Error("calibration case must be an object");
     }
     const c = item as Record<string, unknown>;
-    const id = String(c.id);
-    if (!id || seenIds.has(id)) {
-      throw new Error(`invalid or duplicate calibration case id: ${id}`);
+    if (
+      typeof c.id !== "string" ||
+      c.id.trim().length === 0 ||
+      seenIds.has(c.id)
+    ) {
+      throw new Error(
+        `invalid or duplicate calibration case id: ${String(c.id)}`,
+      );
     }
+    const id = c.id;
     seenIds.add(id);
     const tier = c.tier as VerificationTier;
     if (tier !== 0 && tier !== 1 && tier !== 2 && tier !== 3) {
       throw new Error(`${id}: invalid tier ${String(c.tier)}`);
     }
-    if (!Array.isArray(c.changed_files)) {
-      throw new Error(`${id}: changed_files must be an array`);
+    const riskClass = c.risk_class;
+    if (
+      riskClass !== undefined &&
+      riskClass !== "low" &&
+      riskClass !== "normal" &&
+      riskClass !== "high" &&
+      riskClass !== "critical"
+    ) {
+      throw new Error(`${id}: invalid risk_class ${String(riskClass)}`);
     }
-    if (!Array.isArray(c.required_evidence) || c.required_evidence.length === 0) {
-      throw new Error(`${id}: required_evidence must be a non-empty array`);
+    const changedFiles = requireStringArray(
+      c.changed_files,
+      `${id}.changed_files`,
+      true,
+    );
+    const requiredEvidence = requireStringArray(
+      c.required_evidence,
+      `${id}.required_evidence`,
+      false,
+    );
+    for (const evidence of requiredEvidence) {
+      if (
+        !ALL_PREDICATE_TYPES.includes(evidence as PredicateType) &&
+        !SPECIAL_EVIDENCE_REQUIREMENTS.has(evidence)
+      ) {
+        throw new Error(`${id}: unsupported required evidence ${evidence}`);
+      }
     }
-    const validOutcomes = [
+    const validOutcomes: readonly CalibrationCase["expected_outcome"][] = [
       "correct_completion",
       "wrong_completion",
       "stale_evidence_rejected",
       "missing_evidence_rejected",
       "irrelevant_evidence_rejected",
     ];
-    if (!validOutcomes.includes(String(c.expected_outcome))) {
-      throw new Error(`${id}: unrecognized expected_outcome: ${String(c.expected_outcome)}`);
+    if (
+      !validOutcomes.includes(
+        c.expected_outcome as CalibrationCase["expected_outcome"],
+      )
+    ) {
+      throw new Error(
+        `${id}: unrecognized expected_outcome: ${String(c.expected_outcome)}`,
+      );
     }
     cases.push({
       id,
       tier,
-      risk_class: c.risk_class as "low" | "normal" | "high" | "critical" | undefined,
-      changed_files: c.changed_files.map(String),
-      expected_outcome: c.expected_outcome as CalibrationCase["expected_outcome"],
-      required_evidence: c.required_evidence.map(String),
+      risk_class: riskClass as CalibrationCase["risk_class"],
+      changed_files: changedFiles,
+      expected_outcome:
+        c.expected_outcome as CalibrationCase["expected_outcome"],
+      required_evidence: requiredEvidence,
     });
   }
+  return { schema_version: CALIBRATION_SCHEMA_VERSION, cases };
+}
+
+const SOURCE_REVISION = "a".repeat(40);
+const STALE_SOURCE_REVISION = "b".repeat(40);
+const ENVIRONMENT_DIGEST = `sha256:${"c".repeat(64)}`;
+const NOW = "2026-09-02T00:00:00.000Z" as Rfc3339Timestamp;
+const FINAL_CHECKPOINT = contentArtifactRef(
+  new TextEncoder().encode("verification-calibration-checkpoint"),
+  "application/json",
+);
+
+function criterionFor(c: CalibrationCase): AcceptanceCriterion {
+  const verificationHint =
+    c.tier === 0
+      ? null
+      : c.tier === 1
+        ? "predicate: diff_policy"
+        : c.tier === 3
+          ? "predicate: security_scanner"
+          : c.expected_outcome === "wrong_completion"
+            ? "command: calibration-unit-test"
+            : "predicate: file_parses";
   return {
-    schema_version: CALIBRATION_SCHEMA_VERSION,
-    cases,
+    id: `criterion:${c.id}`,
+    statement: `Known-outcome calibration case ${c.id}`,
+    verificationHint,
+    required: true,
   };
 }
 
-/**
- * Execute known-outcome verification calibration.
- *
- * Verifies tier classification, derived plan predicates, and that the harness
- * accepts correct work while rejecting wrong, stale, missing, and irrelevant evidence.
- * Calculates false completion and false block rates.
- */
+function buildCasePlan(c: CalibrationCase): {
+  readonly criterion: AcceptanceCriterion;
+  readonly plan: VerificationPlan;
+} {
+  const idSource = dummyIdSource();
+  const criterion = criterionFor(c);
+  const derivation = deriveVerificationNodes({
+    criteria: [criterion],
+    objective: `calibration:${c.id}`,
+    riskClass: c.risk_class ?? "normal",
+    mode: "admission",
+    signals: {
+      changedFiles: c.changed_files,
+      nativeTestCommands:
+        c.expected_outcome === "wrong_completion"
+          ? ["calibration-unit-test"]
+          : [],
+    },
+    idSource,
+  });
+  const plan: VerificationPlan = {
+    id: idSource(),
+    taskContractId: idSource(),
+    taskContractVersion: 1,
+    sourceRevision: SOURCE_REVISION,
+    nodes: derivation.nodes,
+    edges: derivation.nodes.flatMap((node) =>
+      node.dependsOn.map((from) => ({
+        from,
+        to: node.id,
+        kind: "depends" as const,
+      })),
+    ),
+    completionExpression: derivation.completionExpression,
+    createdAt: NOW,
+  };
+  return { criterion, plan };
+}
+
+function passingResult(
+  plan: VerificationPlan,
+  node: VerificationPlan["nodes"][number],
+  idSource: () => Uuid7,
+): VerificationResult {
+  const binding = createVerifierBinding(plan);
+  return stampVerificationResultBinding(
+    {
+      id: idSource(),
+      planId: plan.id,
+      nodeId: node.id,
+      status: "pass",
+      startedAt: NOW,
+      completedAt: NOW,
+      sourceRevision: SOURCE_REVISION,
+      environmentImageDigest: ENVIRONMENT_DIGEST,
+      commandOrQuery: node.specification,
+      exitCode: 0,
+      structuredObservations: {},
+      artifacts: [
+        contentArtifactRef(
+          new TextEncoder().encode(`calibration:${node.id}:pass`),
+          "application/json",
+        ),
+      ],
+      toolCallId: null,
+      verifierVersion: binding.verifierVersion,
+      reasonIfSkipped: null,
+      attempts: 1,
+    },
+    binding,
+  );
+}
+
+function corruptResultsForCase(
+  c: CalibrationCase,
+  plan: VerificationPlan,
+  results: readonly VerificationResult[],
+): readonly VerificationResult[] {
+  const criterionNode = plan.nodes.find(
+    (node) => node.acceptanceCriterionId !== null,
+  );
+  if (criterionNode === undefined)
+    throw new Error(`${c.id}: derived plan has no criterion node`);
+  switch (c.expected_outcome) {
+    case "correct_completion":
+      return results;
+    case "wrong_completion":
+      return results.map((result) =>
+        result.nodeId === criterionNode.id
+          ? { ...result, status: "fail", exitCode: 1 }
+          : result,
+      );
+    case "stale_evidence_rejected":
+      return results.map((result) =>
+        result.nodeId === criterionNode.id
+          ? { ...result, sourceRevision: STALE_SOURCE_REVISION }
+          : result,
+      );
+    case "missing_evidence_rejected":
+      return results.filter((result) => result.nodeId !== criterionNode.id);
+    case "irrelevant_evidence_rejected": {
+      const unboundArtifact = {
+        ...FINAL_CHECKPOINT,
+        hash: `sha256:${"d".repeat(64)}`,
+      } as ArtifactRef;
+      return results.map((result) =>
+        result.nodeId === criterionNode.id
+          ? { ...result, artifacts: [unboundArtifact] }
+          : result,
+      );
+    }
+  }
+}
+
+function expectedDenial(
+  outcome: CalibrationCase["expected_outcome"],
+): CompletionDenialReason | null {
+  switch (outcome) {
+    case "correct_completion":
+      return null;
+    case "wrong_completion":
+    case "stale_evidence_rejected":
+    case "missing_evidence_rejected":
+      return "binding_invalid";
+    case "irrelevant_evidence_rejected":
+      return "evidence_missing";
+  }
+}
+
+/** Run known-outcome cases through the production completion-admission gate. */
 export function runVerificationCalibration(
   catalog: VerificationCalibrationCatalog,
 ): VerificationCalibrationReport {
   const results: CalibrationCaseResult[] = [];
-  const tierDistribution: Record<VerificationTier, number> = { 0: 0, 1: 0, 2: 0, 3: 0 };
-  let falseCompletions = 0;
-  let falseBlocks = 0;
+  const tierDistribution: Record<VerificationTier, number> = {
+    0: 0,
+    1: 0,
+    2: 0,
+    3: 0,
+  };
 
   for (const c of catalog.cases) {
     tierDistribution[c.tier] += 1;
+    const expectedComplete = c.expected_outcome === "correct_completion";
     const classified = classifyVerificationTier({
       riskClass: c.risk_class ?? "normal",
       changedFiles: c.changed_files,
@@ -142,118 +381,100 @@ export function runVerificationCalibration(
         id: c.id,
         tier: c.tier,
         expectedOutcome: c.expected_outcome,
-        actualOutcome: `tier_mismatch: classified as ${classified.tier}`,
+        actualOutcome: `tier_mismatch:${classified.tier}`,
         passed: false,
         falseCompletion: false,
-        falseBlock: true,
+        falseBlock: expectedComplete,
         diagnostic: `expected tier ${c.tier}, got ${classified.tier}: ${classified.reason}`,
       });
-      falseBlocks += 1;
       continue;
     }
 
-    const plan = deriveVerificationNodes({
-      criteria: c.id === "ordinary-code-wrong" ? [{
-        id: "unit",
-        statement: "Unit tests pass",
-        verificationHint: "command: bun test",
-        required: true,
-      }] : [],
-      objective: `calibration:${c.id}`,
-      riskClass: c.risk_class ?? "normal",
-      mode: "admission",
-      signals: {
-        changedFiles: c.changed_files,
-        nativeTestCommands: c.id === "ordinary-code-wrong" ? ["bun test"] : [],
-      },
-      idSource: dummyIdSource(),
-    });
-
+    const { criterion, plan } = buildCasePlan(c);
     const predicateTypes = new Set(
-      plan.nodes.map((n) => parseNodeSpec(n.specification).predicateType),
+      plan.nodes.map((node) => parseNodeSpec(node.specification).predicateType),
     );
-
-    // Simulate verification execution outcome for this known-outcome case
-    let simulatedAdmitted = false;
-    let actualOutcome = "";
-
-    switch (c.expected_outcome) {
-      case "correct_completion": {
-        // Correct completion requires all plan nodes to pass with valid evidence
-        const hasRequiredNodes = c.required_evidence.every((ev) => {
-          if (ev === "acceptance_query") return predicateTypes.has("acceptance_query");
-          if (ev === "diff_policy") return predicateTypes.has("diff_policy");
-          if (ev === "file_parses") return predicateTypes.has("file_parses");
-          if (ev === "static_diagnostics") return predicateTypes.has("static_diagnostics");
-          if (ev === "security_scanner") return predicateTypes.has("security_scanner");
-          if (ev === "detached_review") return predicateTypes.has("detached_review");
-          return true;
-        });
-        simulatedAdmitted = hasRequiredNodes;
-        actualOutcome = simulatedAdmitted ? "correct_completion" : "failed_prerequisites";
-        break;
-      }
-      case "wrong_completion": {
-        // A test failure blocks admission
-        const testFailed = true;
-        simulatedAdmitted = !testFailed;
-        actualOutcome = simulatedAdmitted ? "wrong_completion" : "blocked_on_failure";
-        break;
-      }
-      case "stale_evidence_rejected": {
-        // Stale revision rejects admission
-        const staleRevision = true;
-        simulatedAdmitted = !staleRevision;
-        actualOutcome = simulatedAdmitted ? "stale_admitted" : "stale_evidence_rejected";
-        break;
-      }
-      case "missing_evidence_rejected": {
-        // Missing mandatory predicate evidence rejects admission
-        const missingEvidence = true;
-        simulatedAdmitted = !missingEvidence;
-        actualOutcome = simulatedAdmitted ? "missing_admitted" : "missing_evidence_rejected";
-        break;
-      }
-      case "irrelevant_evidence_rejected": {
-        // Irrelevant evidence fails claim binding
-        const unboundEvidence = true;
-        simulatedAdmitted = !unboundEvidence;
-        actualOutcome = simulatedAdmitted ? "irrelevant_admitted" : "irrelevant_evidence_rejected";
-        break;
-      }
+    const missingPlanEvidence = c.required_evidence.filter(
+      (evidence) =>
+        !SPECIAL_EVIDENCE_REQUIREMENTS.has(evidence) &&
+        !predicateTypes.has(evidence as PredicateType),
+    );
+    if (missingPlanEvidence.length > 0) {
+      results.push({
+        id: c.id,
+        tier: c.tier,
+        expectedOutcome: c.expected_outcome,
+        actualOutcome: "required_evidence_absent_from_plan",
+        passed: false,
+        falseCompletion: false,
+        falseBlock: expectedComplete,
+        diagnostic: `derived plan lacks: ${missingPlanEvidence.join(", ")}`,
+      });
+      continue;
     }
 
-    const isExpectedComplete = c.expected_outcome === "correct_completion";
-    const casePassed = isExpectedComplete
-      ? simulatedAdmitted
-      : !simulatedAdmitted;
-
-    const caseFalseCompletion = !isExpectedComplete && simulatedAdmitted;
-    const caseFalseBlock = isExpectedComplete && !simulatedAdmitted;
-
-    if (caseFalseCompletion) falseCompletions += 1;
-    if (caseFalseBlock) falseBlocks += 1;
-
+    const idSource = dummyIdSource();
+    const cleanResults = plan.nodes.map((node) =>
+      passingResult(plan, node, idSource),
+    );
+    const observedResults = corruptResultsForCase(c, plan, cleanResults);
+    const resultMap = new Map(
+      observedResults.map((result) => [result.nodeId, result] as const),
+    );
+    const decision = evaluateCompletionGate({
+      taskId: idSource(),
+      contractVersion: 1,
+      plan,
+      criteria: [criterion],
+      results: observedResults,
+      findings: [],
+      sourceRevision: SOURCE_REVISION,
+      environmentImageDigest: ENVIRONMENT_DIGEST,
+      now: NOW,
+      expiresAt: null,
+      invalidatedNodeIds: new Set(),
+      completionExpressionSatisfied: plan.nodes
+        .filter((node) => node.required)
+        .every((node) => resultMap.get(node.id)?.status === "pass"),
+      unresolvedRisks: [],
+      acceptedRisks: [],
+      externalEffects: [],
+      costMicros: 0n as Micros,
+      durationSeconds: 1,
+      finalCheckpoint: FINAL_CHECKPOINT,
+      verifierBinding: createVerifierBinding(plan),
+    });
+    const expectedReason = expectedDenial(c.expected_outcome);
+    const passed =
+      expectedReason === null
+        ? decision.allow
+        : decision.allow === false && decision.reason === expectedReason;
+    const falseCompletion = !expectedComplete && decision.allow;
+    const falseBlock = expectedComplete && !decision.allow;
+    const actualOutcome = decision.allow
+      ? "completion_admitted"
+      : decision.reason;
     results.push({
       id: c.id,
       tier: c.tier,
       expectedOutcome: c.expected_outcome,
-      actualOutcome: isExpectedComplete && simulatedAdmitted
-        ? "correct_completion"
-        : !isExpectedComplete && !simulatedAdmitted
-        ? c.expected_outcome
-        : actualOutcome,
-      passed: casePassed,
-      falseCompletion: caseFalseCompletion,
-      falseBlock: caseFalseBlock,
-      diagnostic: casePassed ? undefined : `mismatch in ${c.id}: actual=${actualOutcome}`,
+      actualOutcome,
+      passed,
+      falseCompletion,
+      falseBlock,
+      diagnostic: passed
+        ? undefined
+        : `expected ${expectedReason ?? "completion_admitted"}, observed ${actualOutcome}`,
     });
   }
 
-  const passedCases = results.filter((r) => r.passed).length;
-  const failedCases = results.length - passedCases;
+  const falseCompletions = results.filter(
+    (result) => result.falseCompletion,
+  ).length;
+  const falseBlocks = results.filter((result) => result.falseBlock).length;
+  const passedCases = results.filter((result) => result.passed).length;
   const totalCases = results.length;
-
+  const failedCases = totalCases - passedCases;
   return {
     totalCases,
     passedCases,

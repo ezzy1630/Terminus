@@ -10,7 +10,10 @@ describe("verification calibration catalog", () => {
   let catalog: VerificationCalibrationCatalog;
 
   beforeAll(async () => {
-    const yamlPath = resolve(import.meta.dir, "../../../evals/verification-calibration.yaml");
+    const yamlPath = resolve(
+      import.meta.dir,
+      "../../../evals/verification-calibration.yaml",
+    );
     const rawText = await Bun.file(yamlPath).text();
     const parsed = Bun.YAML.parse(rawText);
     catalog = validateCalibrationCatalog(parsed);
@@ -47,5 +50,34 @@ describe("verification calibration catalog", () => {
     expect(report.tierDistribution[1]).toBe(1);
     expect(report.tierDistribution[2]).toBe(5);
     expect(report.tierDistribution[3]).toBe(1);
+    expect(
+      report.results.map((result) => [result.id, result.actualOutcome]),
+    ).toEqual([
+      ["unchanged-observable-answer", "completion_admitted"],
+      ["isolated-doc-update", "completion_admitted"],
+      ["ordinary-code-correct", "completion_admitted"],
+      ["ordinary-code-wrong", "binding_invalid"],
+      ["stale-evidence", "binding_invalid"],
+      ["missing-evidence", "binding_invalid"],
+      ["irrelevant-evidence", "evidence_missing"],
+      ["security-change", "completion_admitted"],
+    ]);
+  });
+
+  test("rejects unsupported evidence labels instead of silently accepting them", () => {
+    expect(() =>
+      validateCalibrationCatalog({
+        schema_version: 1,
+        cases: [
+          {
+            id: "unknown-evidence",
+            tier: 0,
+            changed_files: [],
+            expected_outcome: "correct_completion",
+            required_evidence: ["trust_me"],
+          },
+        ],
+      }),
+    ).toThrow("unsupported required evidence");
   });
 });
