@@ -127,6 +127,12 @@ export async function replayContext(
   };
 }
 
+const VOLATILE_WORLD_STATE_FRAGMENT_ID = "runtime:world_state:latest";
+
+function isVolatileFragment(fragment: ContextFragment): boolean {
+  return fragment.id === VOLATILE_WORLD_STATE_FRAGMENT_ID;
+}
+
 function ablatedCachePlan(
   input: ReplayInput,
   fragments: readonly ContextFragment[],
@@ -149,6 +155,29 @@ function ablatedCachePlan(
   const breakpoints = fragments.flatMap((fragment, index) =>
     originalBreakpointIds.has(fragment.id) ? [index] : []
   );
+
+  const hadStableBreakpoint = input.manifest.cachePlan.breakpoints.includes(
+    input.manifest.cachePlan.volatileSuffixBoundary - 1,
+  );
+  if (hadStableBreakpoint && stable.length > 0 && !breakpoints.includes(stable.length - 1)) {
+    breakpoints.push(stable.length - 1);
+  }
+
+  const originalHadPostStableBreakpoint = input.manifest.cachePlan.breakpoints.some(
+    (index) => index >= input.manifest.cachePlan.volatileSuffixBoundary,
+  );
+  if (originalHadPostStableBreakpoint) {
+    let cacheableEnd = fragments.length - 1;
+    while (cacheableEnd >= 0 && isVolatileFragment(fragments[cacheableEnd]!)) {
+      cacheableEnd -= 1;
+    }
+    if (cacheableEnd >= 0 && !breakpoints.includes(cacheableEnd)) {
+      breakpoints.push(cacheableEnd);
+    }
+  }
+
+  breakpoints.sort((a, b) => a - b);
+
   const modelKey = input.model.modelKey;
   const predictedCachedTokens = stable.reduce(
     (sum, fragment) => sum + BigInt(fragment.estimatedTokens[modelKey] ?? 0),

@@ -478,6 +478,26 @@ describe("Context Compiler", () => {
     expect(ablated.rendered.request.cachePlan.stablePrefixHash).not.toBe(
       compiled.manifest.cachePlan.stablePrefixHash,
     );
+
+    const breakpointIdx = compiled.manifest.cachePlan.breakpoints[0];
+    if (breakpointIdx !== undefined) {
+      const breakpointFragmentId = compiled.manifest.fragments[breakpointIdx]?.fragmentId;
+      if (breakpointFragmentId) {
+        const ablatedBreakpoint = await replayWithAblation(
+          {
+            manifest: compiled.manifest,
+            selectedFragments: selected,
+            renderer: new FakeRenderer(),
+            provider: input.provider,
+            model: input.model,
+            epoch: null,
+            signal: null,
+          },
+          { label: "remove-breakpoint", removeFragmentIds: [breakpointFragmentId] },
+        );
+        expect(ablatedBreakpoint.rendered.request.cachePlan.breakpoints.length).toBeGreaterThan(0);
+      }
+    }
     await expect(replayContext({
       manifest: compiled.manifest,
       selectedFragments: selected.slice(1),
