@@ -128,39 +128,65 @@ export interface ModelProfileExitGateResult {
   readonly reports: readonly ModelProfileConformanceReport[];
 }
 
+export interface ModelProfileExpectation {
+  readonly profileId: string;
+  readonly profileVersion: string;
+  readonly providerId: string;
+}
+
 /**
  * Fail closed unless every expected versioned profile has one complete report
  * from the requested evidence class. Caller-supplied booleans cannot satisfy
  * this gate.
  */
 export function runModelProfileExitGate(input: {
-  readonly expectedProfileIds: readonly string[];
+  readonly expectedProfiles: readonly ModelProfileExpectation[];
   readonly requiredEvidenceClass: ConformanceEvidenceClass;
-  readonly reports: readonly ModelProfileConformanceReport[];
+  readonly reports: readonly unknown[];
 }): ModelProfileExitGateResult {
-  const expected = [...new Set(input.expectedProfileIds)];
-  if (expected.length === 0) throw new Error("expectedProfileIds must be non-empty");
+  if (input.expectedProfiles.length === 0) throw new Error("expectedProfiles must be non-empty");
+  const expectedIds = input.expectedProfiles.map((profile) => profile.profileId);
+  if (new Set(expectedIds).size !== expectedIds.length) {
+    throw new Error("expectedProfiles contains duplicate profileId values");
+  }
   const failures: string[] = [];
-  for (const profileId of expected) {
-    const matches = input.reports.filter((report) => report.profileId === profileId);
+  const reports: ModelProfileConformanceReport[] = [];
+  for (const [index, candidate] of input.reports.entries()) {
+    try {
+      reports.push(validateModelProfileConformanceReport(candidate));
+    } catch (error: unknown) {
+      failures.push(
+        `report[${index}]: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  for (const expected of input.expectedProfiles) {
+    for (const [field, value] of Object.entries(expected)) requireText(`expected.${field}`, value);
+    const matches = reports.filter((report) => report.profileId === expected.profileId);
     if (matches.length !== 1) {
-      failures.push(`${profileId}: expected exactly one report, received ${matches.length}`);
+      failures.push(`${expected.profileId}: expected exactly one report, received ${matches.length}`);
       continue;
     }
     const [report] = matches;
-    if (report?.evidenceClass !== input.requiredEvidenceClass) {
-      failures.push(`${profileId}: requires ${input.requiredEvidenceClass} evidence`);
+    if (report?.providerId !== expected.providerId) {
+      failures.push(`${expected.profileId}: provider does not match ${expected.providerId}`);
     }
-    if (report?.passed !== true) failures.push(`${profileId}: conformance checks did not pass`);
+    if (report?.profileVersion !== expected.profileVersion) {
+      failures.push(`${expected.profileId}: profile version does not match ${expected.profileVersion}`);
+    }
+    if (report?.evidenceClass !== input.requiredEvidenceClass) {
+      failures.push(`${expected.profileId}: requires ${input.requiredEvidenceClass} evidence`);
+    }
+    if (report?.passed !== true) failures.push(`${expected.profileId}: conformance checks did not pass`);
   }
-  const unexpected = input.reports.filter((report) => !expected.includes(report.profileId));
+  const unexpected = reports.filter((report) => !expectedIds.includes(report.profileId));
   for (const report of unexpected) failures.push(`${report.profileId}: unexpected profile report`);
   return {
     passed: failures.length === 0,
     requiredEvidenceClass: input.requiredEvidenceClass,
-    expectedProfileIds: expected,
+    expectedProfileIds: expectedIds,
     failures,
-    reports: input.reports,
+    reports,
   };
 }
 
@@ -191,9 +217,42 @@ export function validateModelProfileConformanceReport(
   if (obj.evidenceClass !== "deterministic_adapter" && obj.evidenceClass !== "external_live") {
     throw new Error(`invalid evidenceClass: ${String(obj.evidenceClass)}`);
   }
+  if (Number.isNaN(Date.parse(obj.testedAt as string))) {
+    throw new Error("report.testedAt must be an RFC3339 timestamp");
+  }
+  if (!/^[0-9a-f]{40,64}$/i.test(obj.terminusCommit as string)) {
+    throw new Error("report.terminusCommit must be a full Git revision");
+  }
   if (!Array.isArray(obj.checks)) {
     throw new Error("report.checks must be an array");
   }
+  const checks = obj.checks.map((value, index): ModelProfileCheckResult => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error(`report.checks[${index}] must be an object`);
+    }
+    const check = value as Record<string, unknown>;
+    if (
+      typeof check.checkId !== "string"
+      || !MODEL_PROFILE_CHECK_IDS.includes(check.checkId as ModelProfileCheckId)
+    ) {
+      throw new Error(`report.checks[${index}].checkId is invalid`);
+    }
+    if (check.status !== "passed" && check.status !== "failed" && check.status !== "blocked") {
+      throw new Error(`report.checks[${index}].status is invalid`);
+    }
+    if (typeof check.artifactRef !== "string") {
+      throw new Error(`report.checks[${index}].artifactRef must be a string`);
+    }
+    if (check.diagnostic !== null && typeof check.diagnostic !== "string") {
+      throw new Error(`report.checks[${index}].diagnostic must be a string or null`);
+    }
+    return {
+      checkId: check.checkId as ModelProfileCheckId,
+      status: check.status,
+      artifactRef: check.artifactRef,
+      diagnostic: check.diagnostic,
+    };
+  });
   return buildModelProfileConformanceReport({
     providerId: obj.providerId as string,
     modelSnapshot: obj.modelSnapshot as string,
@@ -203,6 +262,6 @@ export function validateModelProfileConformanceReport(
     evidenceClass: obj.evidenceClass as ConformanceEvidenceClass,
     testedAt: obj.testedAt as string,
     terminusCommit: obj.terminusCommit as string,
-    checks: obj.checks as ModelProfileCheckResult[],
+    checks,
   });
 }

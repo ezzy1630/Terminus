@@ -47,7 +47,11 @@ describe("versioned model-profile conformance", () => {
 
   test("live gate rejects deterministic-only evidence", () => {
     const gate = runModelProfileExitGate({
-      expectedProfileIds: ["openai/gpt-test@responses-v1"],
+      expectedProfiles: [{
+        profileId: "openai/gpt-test@responses-v1",
+        profileVersion: "1",
+        providerId: "openai",
+      }],
       requiredEvidenceClass: "external_live",
       reports: [report("deterministic_adapter")],
     });
@@ -59,7 +63,11 @@ describe("versioned model-profile conformance", () => {
 
   test("passes one complete live report for each expected profile", () => {
     expect(runModelProfileExitGate({
-      expectedProfileIds: ["openai/gpt-test@responses-v1"],
+      expectedProfiles: [{
+        profileId: "openai/gpt-test@responses-v1",
+        profileVersion: "1",
+        providerId: "openai",
+      }],
       requiredEvidenceClass: "external_live",
       reports: [report()],
     }).passed).toBe(true);
@@ -95,5 +103,28 @@ describe("versioned model-profile conformance", () => {
     expect(validated.profileId).toBe(valid.profileId);
     expect(() => validateModelProfileConformanceReport(null)).toThrow();
     expect(() => validateModelProfileConformanceReport({ schemaVersion: 99 })).toThrow();
+  });
+
+  test("the exit gate validates untrusted reports before admission", () => {
+    const forged = {
+      profileId: "openai/gpt-test@responses-v1",
+      profileVersion: "1",
+      providerId: "openai",
+      evidenceClass: "external_live",
+      passed: true,
+      checks: [],
+    };
+    const gate = runModelProfileExitGate({
+      expectedProfiles: [{
+        profileId: "openai/gpt-test@responses-v1",
+        profileVersion: "1",
+        providerId: "openai",
+      }],
+      requiredEvidenceClass: "external_live",
+      reports: [forged],
+    });
+    expect(gate.passed).toBe(false);
+    expect(gate.failures.some((failure) => failure.startsWith("report[0]:"))).toBe(true);
+    expect(gate.reports).toEqual([]);
   });
 });
