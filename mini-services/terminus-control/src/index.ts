@@ -4689,6 +4689,7 @@ const checkpointSequenceStateSchema = z.object({
  * which surfaced to the client as an opaque 500. Normalize before the boundary
  * so the two agree.
  */
+// skipcq: JS-0067
 function canonicalArtifactHash(raw: string): string | null {
   const hexPart = raw.startsWith("artifact://sha256/")
     ? raw.slice("artifact://sha256/".length)
@@ -9205,6 +9206,7 @@ const routes: Route[] = [
     // same event/row transaction without attempting to acquire the lock a
     // second time.
     const effectRecovery = await reconcileUnsettledSideEffects(true);
+    // skipcq: JS-0357
     const providerRecovery = await providerSessionService.reconcileInFlightAttempts(V1_ACTIVE_TURN_STATES, true);
     const candidateBranchRecovery = await reconcileInFlightCandidateBranchAdmissions(
       true,
@@ -12407,7 +12409,7 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
       return update.count;
     },
     readTurnForRecovery: async (turnId: string) => {
-      return tx.turn.findUnique({
+      return await tx.turn.findUnique({
         where: { id: turnId },
         select: { state: true, taskId: true },
       });
@@ -12453,7 +12455,7 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
     return executeGatewayProviderRequest(input.rendered, input.gateway, input.context, input.signal, input.onChunk);
   },
   listInFlightAttempts: async () => {
-    return db.providerAttempt.findMany({
+    return await db.providerAttempt.findMany({
       where: { status: { in: [...IN_FLIGHT_PROVIDER_STATES] } },
       orderBy: [{ startedAt: "asc" }, { id: "asc" }],
       select: {
@@ -15084,21 +15086,19 @@ const toolEpisodeSettlementPorts: ToolEpisodeSettlementPorts = {
   settleEffect: (input, events) => effectSettlementService.settle(input as never, events as never),
 };
 
-function toolArgumentsExcerpt(call: ParsedStandaloneToolCall): string {
-  return toolArgumentsExcerptPort(call);
-}
+const toolArgumentsExcerpt = (call: ParsedStandaloneToolCall): string =>
+  toolArgumentsExcerptPort(call);
 
-function observedSourceVersionsOf(result: ToolResult<unknown>): Record<string, string> {
-  return observedSourceVersionsOfPort(result);
-}
+const observedSourceVersionsOf = (result: ToolResult<unknown>): Record<string, string> =>
+  observedSourceVersionsOfPort(result);
 
-function persistSettledToolResult(input: Parameters<typeof persistSettledToolResultPort>[1]): Promise<import("./services/tool-episode-settlement.js").EngineToolSettlement> {
-  return persistSettledToolResultPort(toolEpisodeSettlementPorts, input);
-}
+const persistSettledToolResult = (
+  input: Parameters<typeof persistSettledToolResultPort>[1],
+): Promise<import("./services/tool-episode-settlement.js").EngineToolSettlement> =>
+  persistSettledToolResultPort(toolEpisodeSettlementPorts, input);
 
-function denyStandaloneTool(input: Parameters<typeof denyStandaloneToolPort>[1]): Promise<string> {
-  return denyStandaloneToolPort(toolEpisodeSettlementPorts, input);
-}
+const denyStandaloneTool = (input: Parameters<typeof denyStandaloneToolPort>[1]): Promise<string> =>
+  denyStandaloneToolPort(toolEpisodeSettlementPorts, input);
 
 const toolApprovalWaiters = new Map<string, (verdict: ToolApprovalVerdict) => void>();
 
@@ -16788,6 +16788,7 @@ function buildEpisodeObservations(
   return observations;
 }
 
+// skipcq: JS-0067
 async function executeTurnTransition(plan: TurnTransitionPlan, tx: Prisma.TransactionClient): Promise<void> {
   const update = await tx.turn.updateMany({
     where: { id: plan.aggregateId, state: { in: [...plan.expectedStates] } },
@@ -16810,6 +16811,7 @@ async function executeTurnTransition(plan: TurnTransitionPlan, tx: Prisma.Transa
  * until a kernel-brokered transport is configured; the missing boundary is
  * reported as a blocked task and never replaced by a synthetic response.
  */
+// skipcq: JS-R1005, JS-0067
 async function agentLoop(turnId: string): Promise<void> {
   const turn = await db.turn.findUnique({
     where: { id: turnId },
@@ -17602,6 +17604,7 @@ async function agentLoop(turnId: string): Promise<void> {
         }),
         signal: abortController.signal,
       }).then((settlement) => {
+        // skipcq: JS-0357
         settlementByProviderCallId.set(toolInput.call.toolCallId, settlement);
       }),
     });
@@ -17732,6 +17735,7 @@ async function agentLoop(turnId: string): Promise<void> {
     // prefix instead of reporting `no_previous_epoch` forever. Attempt N is a
     // full recompile; without this the cache diagnostics are blind.
     let previousCacheEpoch: CacheEpochDebugSnapshot | null = null;
+    // skipcq: JS-R1005
     const compileProviderContext = async () => {
       activeToolSchemas = selectActiveToolSchemas();
       // Optional schemas consume context only after activation. The profile
@@ -18298,6 +18302,7 @@ async function agentLoop(turnId: string): Promise<void> {
       // `totalEstimatedTokens` counts the selected fragments only; the tool
       // schemas are rendered into the same prompt and the provider bills for
       // them, so the comparison the estimator learns from has to include them.
+      // skipcq: JS-0357
       predictedPromptByManifest.set(
         compiled.manifest.id,
         compiled.totalEstimatedTokens
@@ -18605,7 +18610,7 @@ async function agentLoop(turnId: string): Promise<void> {
     // the executor so the maps are injectable and independently instantiable.
     const turnCommandExecutor = new TurnCommandExecutor({
       mutate: mutateAgentState,
-      emit: async (input) => emit(input as EmitInput),
+      emit: (input) => emit(input as EmitInput),
       // prepareTurnForProviderContinuation throws the original CAS-failure
       // error on any miss; the 1 reports the guarded row it updated.
       rearmProviderContinuation: async (rearmTurnId, tx) => {
