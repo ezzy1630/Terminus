@@ -310,36 +310,34 @@ export type StalePlanBindingReason =
   | "environment_changed"
   | "source_revision_changed";
 
-export function stalePlanBindingReason(input: {
+export const stalePlanBindingReason = (input: {
   readonly existingPlan: { readonly sourceRevision: string; readonly environmentDigest: string | null } | null;
   readonly sourceRevision: string;
   readonly environmentDigest: string | null;
-}): StalePlanBindingReason | null {
+}): StalePlanBindingReason | null => {
   if (input.existingPlan === null) return null;
   if (input.existingPlan.environmentDigest === null) return "missing_environment_digest";
   if (input.existingPlan.environmentDigest !== input.environmentDigest) return "environment_changed";
   if (input.existingPlan.sourceRevision !== input.sourceRevision) return "source_revision_changed";
   return null;
-}
+};
 
 /** Whether the restored plan matches the task contract still in force. */
-export function restoredPlanMatchesContract(input: {
+export const restoredPlanMatchesContract = (input: {
   readonly restoredPlan: { readonly taskContractId: string; readonly taskContractVersion: number } | null;
   readonly taskId: string;
   readonly activeContractVersion: number;
-}): boolean {
-  return input.restoredPlan !== null
+}): boolean =>
+  input.restoredPlan !== null
     && input.restoredPlan.taskContractId === input.taskId
     && input.restoredPlan.taskContractVersion === input.activeContractVersion;
-}
 
 /** Whether required-verification evidence exists to admit completion. */
-export function verificationEvaluationPassed(input: {
+export const verificationEvaluationPassed = (input: {
   readonly allRequiredPassed: boolean;
   readonly completionExpressionSatisfied: boolean;
-}): boolean {
-  return input.allRequiredPassed && input.completionExpressionSatisfied;
-}
+}): boolean =>
+  input.allRequiredPassed && input.completionExpressionSatisfied;
 
 /**
  * Which completion-gate failure set drives repair. When required predicates
@@ -347,12 +345,12 @@ export function verificationEvaluationPassed(input: {
  * become repair inputs. The evidence-graph gap, not the change, is the
  * failure.
  */
-export function completionGateRepairInputs(input: {
+export const completionGateRepairInputs = (input: {
   readonly requiredClaimIds: readonly string[];
   readonly admissibleClaimIds: readonly string[];
-}): { readonly missingClaimIds: readonly string[]; readonly failureNodeIds: readonly string[] } {
+}): { readonly missingClaimIds: readonly string[]; readonly failureNodeIds: readonly string[] } => {
   const admissible = new Set(input.admissibleClaimIds);
   const missingClaimIds = input.requiredClaimIds.filter((claimId) => !admissible.has(claimId));
   const failureNodeIds = missingClaimIds.length > 0 ? missingClaimIds : ["completion-gate"];
   return { missingClaimIds, failureNodeIds };
-}
+};

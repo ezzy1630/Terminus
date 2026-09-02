@@ -37,7 +37,7 @@ exclude_patterns = [
   "**/generated/**",
   "packages/terminus-kernel-client/src/generated/**",
   "scripts/**",
-  "mini-services/terminus-control/src/index.ts"
+  "**/terminus-control/src/index.ts"
 ]
 
 [[analyzers]]

@@ -64,7 +64,7 @@ describe("PrismaContextStore cache observation read-back", () => {
         id: "row-1",
         fragmentKey: "fragment-1",
         kind: "authority",
-        contentArtifact: "artifact://sha256/" + "2".repeat(64),
+        contentArtifact: `artifact://sha256/${"2".repeat(64)}`,
         authority: 100,
         renderedPosition: 0,
         estimatedTokens: 12,
@@ -77,7 +77,7 @@ describe("PrismaContextStore cache observation read-back", () => {
 
   test("reads the explicit observed cache count from the durable observation", async () => {
     const store = storeFor({
-      providerCapabilityHash: "sha256:" + "1".repeat(64),
+      providerCapabilityHash: `sha256:${"1".repeat(64)}`,
       observation: {
         cache: {
           predictedCachedTokens: "200",
