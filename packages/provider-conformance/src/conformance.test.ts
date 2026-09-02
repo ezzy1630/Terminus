@@ -411,6 +411,12 @@ describe("Provider conformance: compilation authority (§33.13)", () => {
 // ───────────────────── 14. Exit gate ─────────────────────────────────────────
 
 describe("Exit gate", () => {
+  test("fails closed when no provider results exist", async () => {
+    const gate = await runExitGate({});
+    expect(gate.passed).toBe(false);
+    expect(gate.failedTests).toContain("no provider conformance results supplied");
+  });
+
   test("passes when all providers meet gates", async () => {
     const results: Record<string, ProviderGateResult> = {};
     for (const pid of ["openai","anthropic","google","local"]) {

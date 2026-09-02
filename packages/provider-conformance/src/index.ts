@@ -6,6 +6,20 @@
  */
 export { runExitGate, buildProviderGateResult } from "./exit-gate.js";
 export type { ExitGateResult, ProviderGateResult } from "./exit-gate.js";
+export {
+  MODEL_PROFILE_CHECK_IDS,
+  MODEL_PROFILE_CONFORMANCE_SCHEMA_VERSION,
+  buildModelProfileConformanceReport,
+  runModelProfileExitGate,
+} from "./model-profile.js";
+export type {
+  ConformanceEvidenceClass,
+  ModelProfileCheckId,
+  ModelProfileCheckResult,
+  ModelProfileConformanceReport,
+  ModelProfileExitGateResult,
+  ModelProfileReportInput,
+} from "./model-profile.js";
 
 export { InMemorySnapshotStore } from "./snapshot-store.js";
 export type { VersionedSnapshot, CapabilitySnapshotStore } from "./snapshot-store.js";

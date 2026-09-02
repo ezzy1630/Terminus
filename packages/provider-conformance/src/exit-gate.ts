@@ -29,6 +29,10 @@ export async function runExitGate(
   let passedTests = 0;
   let totalTests = 0;
 
+  if (Object.keys(results).length === 0) {
+    failedTests.push("no provider conformance results supplied");
+  }
+
   for (const [providerId, result] of Object.entries(results)) {
     totalTests += 6;
     if (!result.rendersParseable) {
