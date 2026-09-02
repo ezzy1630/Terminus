@@ -22,6 +22,7 @@ import {
   ev,
   requireConvergence,
   ScheduleRun,
+  TURN_DEADLINE,
 } from "./schedules.js";
 
 /**
@@ -144,12 +145,26 @@ describe("turn lifecycle — regression schedules", () => {
     expect(requireConvergence(run, "compile-retry").finalPhase).toBe("COMPLETED");
   });
 
-  test("8. deadline during compile ends the turn BUDGET_EXHAUSTED", () => {
+  test("8. current deadline during compile ends the turn BUDGET_EXHAUSTED", () => {
     const run = new ScheduleRun();
     spinePrefix(run, 1);
-    run.apply(ev({ type: "DeadlineExpired", deadline: 100 }));
+    // The turn is armed with TURN_DEADLINE; an expiry at or after that
+    // instant is the current deadline and settles the turn.
+    run.apply(ev({ type: "DeadlineExpired", deadline: TURN_DEADLINE + 500 }));
     expect(requireConvergence(run, "deadline-during-compile").finalPhase).toBe("BUDGET_EXHAUSTED");
     expect(run.currentState.terminalReason).toBe("deadline_expired");
+  });
+
+  test("8b. stale deadline redelivery is absorbed without changing state", () => {
+    const run = new ScheduleRun();
+    spinePrefix(run, 1);
+    // An expiry earlier than the armed instant is a stale duplicate from an
+    // injected clock that has not caught up — it must not settle the turn.
+    run.apply(ev({ type: "DeadlineExpired", deadline: TURN_DEADLINE - 500 }));
+    expect(run.lastApplyChangedState).toBe(false);
+    expect(run.phase).toBe("CONTEXT_COMPILING");
+    spineAll(run);
+    expect(requireConvergence(run, "stale-deadline").finalPhase).toBe("COMPLETED");
   });
 
   test("9. cancellation during compile ends the turn ABORTED", () => {
@@ -157,6 +172,24 @@ describe("turn lifecycle — regression schedules", () => {
     spinePrefix(run, 1);
     run.apply(ev({ type: "CancellationRequested", reason: "user_cancelled" }));
     expect(requireConvergence(run, "cancellation-during-compile").finalPhase).toBe("ABORTED");
+    expect(run.currentState.terminalReason).toBe("user_cancelled");
+  });
+
+  test("9b. cancellation during PROVIDER_RUNNING ends the turn ABORTED and spawns no new attempt", () => {
+    const run = new ScheduleRun();
+    spinePrefix(run, 7); // a1 accepted+settled, a2 accepted → PROVIDER_RUNNING
+    expect(run.phase).toBe("PROVIDER_RUNNING");
+    run.apply(ev({ type: "CancellationRequested", reason: "operator_stop" }));
+    expect(requireConvergence(run, "cancellation-during-provider").finalPhase).toBe("ABORTED");
+    // Exactly the attempts that were accepted before the cancellation: the
+    // terminal settlement must not spawn or authorize another provider call.
+    expect(run.currentState.attempts).toHaveLength(2);
+    expect(run.currentState.activeAttemptId).toBeNull();
+    // Redelivering the rest of the spine changes nothing: the terminal
+    // outcome is the authoritative record.
+    const fingerprint = run.fingerprint();
+    spineAll(run);
+    expect(run.fingerprint()).toBe(fingerprint);
   });
 
   test("10. writer-lease change during transition waits explicitly and recovers", () => {
@@ -194,6 +227,43 @@ describe("turn lifecycle — regression schedules", () => {
     expect(run.currentState.pendingCommand?.kind).toBe("PersistArtifacts");
     spineAll(run);
     expect(requireConvergence(run, "publication-interrupted").finalPhase).toBe("COMPLETED");
+  });
+});
+
+describe("turn lifecycle — terminal-outcome immutability under late redelivery", () => {
+  test("a completed turn absorbs late cancellation, deadline, and lease-loss events", () => {
+    const run = new ScheduleRun();
+    spineAll(run);
+    expect(run.phase).toBe("COMPLETED");
+    const fingerprint = run.fingerprint();
+    const lateEvents: Parameters<typeof ev>[0][] = [
+      { type: "CancellationRequested", reason: "late_cancel" },
+      { type: "DeadlineExpired", deadline: TURN_DEADLINE + 10_000 },
+      { type: "WriterLeaseLost" },
+      { type: "RecoveryRequested", reason: "late_probe" },
+    ];
+    for (const partial of lateEvents) {
+      run.apply(ev(partial));
+      expect(run.phase).toBe("COMPLETED");
+      expect(run.currentState.terminalReason).toBe("completion_accepted");
+      expect(run.lastApplyChangedState).toBe(false);
+    }
+    expect(run.fingerprint()).toBe(fingerprint);
+  });
+
+  test("an explicitly waiting turn (lease lost) recovers with exactly its earlier deadline intact", () => {
+    const run = new ScheduleRun();
+    spinePrefix(run, 4);
+    run.apply(ev({ type: "WriterLeaseLost" }));
+    expect(run.currentState.waitReason).toBe("writer_lease_lost");
+    // The waiting state is one valid non-terminal outcome: it names its
+    // reason and nothing else consumes budget while it waits.
+    run.crash();
+    // A restart of a waiting turn re-derives its obligations from the log.
+    expect(run.currentState.leaseLost).toBe(true);
+    run.apply(ev({ type: "WriterLeaseRestored" }));
+    spineAll(run);
+    expect(requireConvergence(run, "wait-then-restore").finalPhase).toBe("COMPLETED");
   });
 });
 

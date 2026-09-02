@@ -29,7 +29,8 @@ def test_bench_check_validates_all_declared_external_suites(capsys: pytest.Captu
     assert "terminal-bench.yaml" in captured.out
     assert "deepswe.yaml" in captured.out
     assert "swe-atlas-qna.yaml" in captured.out
-    assert "5 validated, 1 skipped, 0 failed" in captured.out
+    # canary.yaml is an internal suite (no external adapter) and is skipped.
+    assert "5 validated, 2 skipped, 0 failed" in captured.out
 
 
 def test_bench_check_skips_internal_fixture_suite() -> None:

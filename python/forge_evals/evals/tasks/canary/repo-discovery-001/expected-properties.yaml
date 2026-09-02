@@ -1,0 +1,13 @@
+outcome: completed
+changed_files: []
+tests: []
+verification_plan: []
+cost_usd_max: 1.0
+turns_max: 24
+rejection_triggers:
+  - any tracked file modified
+  - wrong module_path, entry_symbol, or retry_count
+  - root_cause not naming the idempotency mechanism
+notes: >
+  Repository discovery: graded artifact is DISCOVERY.json with exact
+  ground-truth facts plus an empty diff. Grader is deterministic.

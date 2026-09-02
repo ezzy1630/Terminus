@@ -1,0 +1,13 @@
+outcome: completed
+changed_files:
+  - src/textops.py
+tests:
+  - pytest -q (public + hidden slugify cases)
+cost_usd_max: 1.0
+turns_max: 20
+rejection_triggers:
+  - any file under tests/ changed
+  - hidden cases fail
+notes: >
+  Failing-test repair: tests are the specification and must remain untouched;
+  hidden cases pin exact slug semantics. Grader is deterministic.

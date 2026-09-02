@@ -1,0 +1,13 @@
+outcome: completed
+changed_files:
+  - src/shipping.py
+tests:
+  - pytest -q (public + hidden boundary)
+cost_usd_max: 1.0
+turns_max: 20
+rejection_triggers:
+  - any file other than src/shipping.py changed
+  - hidden boundary tests fail
+notes: >
+  Single-file edit: scope is one source file; hidden boundary tests pin the
+  exact threshold semantics. Grader is deterministic.
