@@ -252,7 +252,7 @@ def _reliability_gates(
     return gates
 
 
-def _slice_verdict(resolved_delta: float, ci_low: float | None, ci_high: float | None) -> str:
+def _slice_verdict(_resolved_delta: float, ci_low: float | None, ci_high: float | None) -> str:
     if ci_low is None or ci_high is None:
         return "inconclusive"
     if ci_low > 0:
@@ -262,6 +262,7 @@ def _slice_verdict(resolved_delta: float, ci_low: float | None, ci_high: float |
     return "no_change"
 
 
+# skipcq: PY-R1000
 def compare_cohort_runs(
     baseline_records: list[RunRecord],
     candidate_records: list[RunRecord],

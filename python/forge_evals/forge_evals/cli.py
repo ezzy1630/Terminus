@@ -1231,9 +1231,6 @@ def _canary_live_pair_runner(
     Each arm runs in its own materialized scratch workspace so the two arms
     cannot observe or disturb each other.
     """
-    from dataclasses import replace as dc_replace
-
-    from .runners.harness_runner import Budgets, ModelCapabilitySnapshot, RunRequest
     from .runners.live_runner import (
         LiveRunError,
         materialize_task_workspace,
@@ -1276,9 +1273,9 @@ def _canary_live_pair_runner(
     )
     budgets = Budgets()
     if args.max_steps is not None:
-        budgets = dc_replace(budgets, max_tool_calls=int(args.max_steps))
+        budgets = replace(budgets, max_tool_calls=int(args.max_steps))
     if args.max_tokens is not None:
-        budgets = dc_replace(budgets, max_total_tokens=int(args.max_tokens))
+        budgets = replace(budgets, max_total_tokens=int(args.max_tokens))
 
     def run_pair(spec: Any, seed: int) -> tuple[RunRecord, RunRecord]:
         records: list[RunRecord] = []
@@ -1297,7 +1294,7 @@ def _canary_live_pair_runner(
             )
             workspace = output_dir / "workspaces" / arm / spec.task_id / str(seed)
             materialized = materialize_task_workspace(spec.package_dir, workspace)
-            run_request = dc_replace(
+            run_request = replace(
                 request,
                 task_dir=materialized.workspace,
                 task_package_dir=spec.package_dir,
@@ -1335,15 +1332,6 @@ def _canary_fixture_pair_runner(args: argparse.Namespace) -> Any:
     report) end to end without a provider. The records are fixture-only
     evidence and say so.
     """
-
-    from .evidence import EvidenceClass
-    from .runners.harness_runner import (
-        Budgets,
-        ModelCapabilitySnapshot,
-        RunRequest,
-        make_default_cost,
-    )
-    from .runners.harness_runner import build_evaluation_identity as _build_identity
 
     snapshot = ModelCapabilitySnapshot(
         provider=args.provider,
@@ -1383,7 +1371,7 @@ def _canary_fixture_pair_runner(args: argparse.Namespace) -> Any:
                 random_seed=request.random_seed,
                 model_capability_snapshot=snapshot.to_dict(),
                 budgets=request.budgets.to_dict(),
-                evaluation_identity=_build_identity(
+                evaluation_identity=build_evaluation_identity(
                     request, environment_digest="fixture:canary-env"
                 ),
                 evidence_class=EvidenceClass.FIXTURE_ONLY,

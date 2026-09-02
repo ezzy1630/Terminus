@@ -6,16 +6,16 @@ from src.textops import slugify
 
 
 def test_german_umlauts():
-    assert slugify("Grüße aus München") == "grusse-aus-munchen"
+    assert slugify("Grüße aus München") == "grusse-aus-munchen"  # skipcq: BAN-B101
 
 
 def test_numbers_are_kept():
-    assert slugify("Release 2.0 Notes") == "release-2-0-notes"
+    assert slugify("Release 2.0 Notes") == "release-2-0-notes"  # skipcq: BAN-B101
 
 
 def test_empty_string():
-    assert slugify("") == ""
+    assert slugify("") == ""  # skipcq: BAN-B101
 
 
 def test_only_separators():
-    assert slugify(" --- !!! --- ") == ""
+    assert slugify(" --- !!! --- ") == ""  # skipcq: BAN-B101
