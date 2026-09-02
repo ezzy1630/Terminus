@@ -97,7 +97,10 @@ function cachePlan(): ContextCachePlan {
   };
 }
 
-function input(selected: ContextFragment[]): ManifestBuilderInput {
+function input(
+  selected: ContextFragment[],
+  selectedCachePlan: ContextCachePlan = cachePlan(),
+): ManifestBuilderInput {
   return {
     compilerVersion: "0.1.0",
     policyVersion: "0.1.0",
@@ -106,7 +109,7 @@ function input(selected: ContextFragment[]): ManifestBuilderInput {
     epoch: epoch(),
     selected,
     omitted: [],
-    cachePlan: cachePlan(),
+    cachePlan: selectedCachePlan,
     reserves: {
       output: 100n as TokenCount,
       reasoning: 0n as TokenCount,
@@ -135,6 +138,16 @@ describe("context manifest properties", () => {
   test("manifest builder accepts empty selection", () => {
     const manifest = buildManifest(input([]));
     expect(manifest.fragments).toEqual([]);
+  });
+
+  test("manifest entries preserve cache breakpoint positions", () => {
+    const selected = [fragment("stable", 90), fragment("volatile", 40)];
+    const manifest = buildManifest(input(selected, {
+      ...cachePlan(),
+      breakpoints: [0],
+    }));
+
+    expect(manifest.fragments.map((entry) => entry.cacheBreakpoint)).toEqual([true, false]);
   });
 
   test("garbage JSON decode does not throw when guarded", () => {

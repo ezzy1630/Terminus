@@ -226,9 +226,15 @@ class TerminusHarness:
         )
 
         artifact_inventory = self._collect_task_artifact_inventory(task_id)
-        context_manifests, verification = self._split_artifacts(artifact_inventory.artifacts)
+        artifact_context_manifests, verification = self._split_artifacts(
+            artifact_inventory.artifacts
+        )
         transcript = self._collect_events(task_id)
         events = transcript.events
+        context_manifests = self._collect_context_manifests(
+            events,
+            fallback=artifact_context_manifests,
+        )
         task_detail = self._optional("GET", f"/v1/tasks/{task_id}") or {}
         # The typed turn routes are the source for usage, cost and stop reason.
         # Both are optional: a control plane older than Phase 0-F2 404s them and
@@ -979,6 +985,55 @@ class TerminusHarness:
         """Split the task's artifact inventory into manifests and verification."""
         inventory = self._collect_task_artifact_inventory(task_id)
         return self._split_artifacts(inventory.artifacts)
+
+    def _collect_context_manifests(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        fallback: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Resolve the exact durable manifests named by lifecycle events.
+
+        Artifact inventory entries expose only a hash and purpose. That is
+        insufficient for context attribution, so live runs follow the typed
+        ``context.manifest_persisted`` payload to the manifest read endpoint.
+        If the control plane has no manifest events, retain the legacy
+        inventory projection for backward compatibility.
+        """
+        manifest_ids: list[str] = []
+        for event in events:
+            event_type = event.get("event") or event.get("event_type")
+            if event_type != "context.manifest_persisted":
+                continue
+            payload: Any = event.get("payload")
+            if not isinstance(payload, Mapping):
+                raw = event.get("data")
+                if isinstance(raw, str):
+                    with contextlib.suppress(json.JSONDecodeError):
+                        payload = json.loads(raw)
+            manifest_id = payload.get("manifestId") if isinstance(payload, Mapping) else None
+            if not isinstance(manifest_id, str) or not manifest_id:
+                manifest_id = event.get("aggregate_id")
+            if isinstance(manifest_id, str) and manifest_id and manifest_id not in manifest_ids:
+                manifest_ids.append(manifest_id)
+
+        if not manifest_ids:
+            return fallback
+
+        manifests: list[dict[str, Any]] = []
+        for manifest_id in manifest_ids:
+            try:
+                manifests.append(
+                    self._request(
+                        "GET",
+                        f"/v1/context/manifests/{urllib.parse.quote(manifest_id)}",
+                    )
+                )
+            except TerminusControlError as error:
+                raise TerminusControlError(
+                    f"context manifest {manifest_id} was announced but cannot be read: {error}"
+                ) from error
+        return manifests
 
     @staticmethod
     def _split_artifacts(

@@ -261,6 +261,13 @@ def _selected_tokens(record: RunRecord) -> int | None:
     total = 0
     seen = False
     for manifest in manifests:
+        estimated = manifest.get("estimated_tokens")
+        if isinstance(estimated, dict):
+            value = estimated.get("predictedInput")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                total += int(value)
+                seen = True
+                continue
         for key in (
             "selected_tokens",
             "total_selected_tokens",
@@ -282,16 +289,55 @@ def _cache_prefix_survival(record: RunRecord) -> float | None:
     tokens — the provider reused the previous turn's compiled prefix. Runs
     with fewer than two provider attempts report ``None``.
     """
+    manifests = record.context_manifests or []
+    comparable_manifest_pairs = 0
+    survived_manifest_pairs = 0
+    for previous, current in itertools.pairwise(manifests):
+        previous_hash = _stable_prefix_hash(previous)
+        current_hash = _stable_prefix_hash(current)
+        observed_cached = _observed_cached_tokens(current)
+        if previous_hash is None or current_hash is None or observed_cached is None:
+            continue
+        if previous_hash != current_hash:
+            continue
+        comparable_manifest_pairs += 1
+        if observed_cached > 0:
+            survived_manifest_pairs += 1
+    if comparable_manifest_pairs > 0:
+        return survived_manifest_pairs / comparable_manifest_pairs
+
     attempts = record.attempts or []
     if len(attempts) < 2:
         return None
-    survived = 0
-    for previous, current in itertools.pairwise(attempts):
-        cached_prev = _attempt_int(previous, "cached_input_tokens")
-        cached_current = _attempt_int(current, "cached_input_tokens")
-        if cached_current > 0 and cached_current >= min(cached_prev, cached_current):
-            survived += 1
-    return survived / (len(attempts) - 1)
+    return sum(
+        1
+        for current in attempts[1:]
+        if _attempt_int(current, "cached_input_tokens") > 0
+    ) / (len(attempts) - 1)
+
+
+def _stable_prefix_hash(manifest: dict[str, Any]) -> str | None:
+    cache_plan = manifest.get("cache_plan") or manifest.get("cachePlan")
+    if not isinstance(cache_plan, dict):
+        return None
+    value = cache_plan.get("stablePrefixHash") or cache_plan.get("stable_prefix_hash")
+    return value if isinstance(value, str) and value else None
+
+
+def _observed_cached_tokens(manifest: dict[str, Any]) -> int | None:
+    experiment = manifest.get("experiment")
+    if not isinstance(experiment, dict):
+        return None
+    observation = experiment.get("observation")
+    if not isinstance(observation, dict):
+        return None
+    cache = observation.get("cache")
+    if not isinstance(cache, dict):
+        return None
+    value = cache.get("observedCachedTokens")
+    if value is None:
+        value = cache.get("observed_cached_tokens")
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
 def _attempt_int(attempt: dict[str, Any] | Any, key: str) -> int:
@@ -492,11 +538,15 @@ def cohort_metrics(
         note="summed over the run's persisted context manifests",
     )
     metrics.cells["cache_prefix_survival"] = _numeric_cell(
-        [r for r in runs if len(r.attempts or []) >= 2],
+        [
+            r
+            for r in runs
+            if len(r.attempts or []) >= 2 or len(r.context_manifests or []) >= 2
+        ],
         lambda r: (lambda v: v if v is not None else None)(_cache_prefix_survival(r)),
         metric="cache_prefix_survival",
         confidence=confidence,
-        note="share of consecutive attempt pairs where the provider reused the cached prefix",
+        note="share of comparable stable-prefix pairs with observed provider cache reuse",
     )
     metrics.cells["repair_turns_per_run"] = _numeric_cell(
         [r for r in runs if r.repair_turns],

@@ -142,6 +142,32 @@ def test_cohort_metrics_full_record() -> None:
     assert cells["resolved_task_rate"].ci_low is not None
 
 
+def test_cohort_metrics_reads_canonical_manifest_tokens_and_cache_observations() -> None:
+    record = _record("canary", "task", 1, "candidate", passed=True)
+    record.context_manifests = [
+        {
+            "estimated_tokens": {"predictedInput": 700},
+            "cache_plan": {"stablePrefixHash": "sha256:same"},
+            "experiment": {"observation": {"cache": {"observedCachedTokens": 0}}},
+        },
+        {
+            "estimated_tokens": {"predictedInput": 900},
+            "cache_plan": {"stablePrefixHash": "sha256:same"},
+            "experiment": {"observation": {"cache": {"observedCachedTokens": 650}}},
+        },
+        {
+            "estimated_tokens": {"predictedInput": 600},
+            "cache_plan": {"stablePrefixHash": "sha256:same"},
+            "experiment": {"observation": {"cache": {"observedCachedTokens": 0}}},
+        },
+    ]
+
+    cells = cohort_metrics([record], slice_name="canonical").cells
+
+    assert cells["context_selected_tokens"].value == 2200
+    assert cells["cache_prefix_survival"].value == 0.5
+
+
 def test_cohort_metrics_detects_false_completion_and_false_block() -> None:
     runs = [
         _record("canary", "t1", 1, "terminus-live", passed=True, admitted=False),

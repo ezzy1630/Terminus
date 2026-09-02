@@ -300,6 +300,11 @@ export class PrismaContextStore implements ContextStore {
     const observedCachedTokens = readObservedCachedTokens(experimentRecord);
     const estimatedTokens = parseJson<Record<string, unknown>>(row.estimatedTokensJson, {});
     const cachePlan = parseJson<Record<string, unknown>>(row.cachePlanJson, {});
+    const cacheBreakpoints = new Set(
+      Array.isArray(cachePlan.breakpoints)
+        ? cachePlan.breakpoints.filter(isFiniteNonNegativeInteger)
+        : [],
+    );
     if (row.epochId === null) {
       throw new Error(`context manifest ${row.id} has no durable context epoch`);
     }
@@ -323,7 +328,7 @@ export class PrismaContextStore implements ContextStore {
           artifactHash: uriToHash(fragment.contentArtifact),
           estimatedTokens: fragment.estimatedTokens,
           required: fragment.authority >= 80,
-          cacheBreakpoint: false,
+          cacheBreakpoint: cacheBreakpoints.has(fragment.renderedPosition ?? -1),
         })),
       omitted: readOmissions(row.experimentJson),
       cachePlan: {
@@ -331,9 +336,7 @@ export class PrismaContextStore implements ContextStore {
           ? cachePlan.stablePrefixHash as ContentHash
           : EMPTY_CONTENT_HASH,
         volatileSuffixBoundary: finiteNonNegativeInteger(cachePlan.volatileSuffixBoundary),
-        breakpoints: Array.isArray(cachePlan.breakpoints)
-          ? cachePlan.breakpoints.filter(isFiniteNonNegativeInteger)
-          : [],
+        breakpoints: [...cacheBreakpoints],
         predictedCachedTokens: bigintField(cachePlan, "predictedCachedTokens") as ContextManifest["predictedCachedTokens"],
       },
       outputReserveTokens: bigintField(estimatedTokens, "output") as ContextManifest["outputReserveTokens"],

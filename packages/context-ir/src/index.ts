@@ -332,7 +332,7 @@ export function buildManifest(input: ManifestBuilderInput): Omit<ContextManifest
       artifactHash: frag.contentRef.hash,
       estimatedTokens: frag.estimatedTokens[input.model] ?? 0,
       required: frag.authority >= 80,
-      cacheBreakpoint: false,
+      cacheBreakpoint: input.cachePlan.breakpoints.includes(idx),
     }),
   );
   const manifest = {

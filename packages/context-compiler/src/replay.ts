@@ -26,7 +26,7 @@ import type {
   ModelCapabilitySnapshot,
   ProviderToolSchema,
 } from "@terminus/provider-core";
-import { canonicalJson, computeContentHash } from "@terminus/context-ir";
+import { canonicalJson, computeContentHash, computeStablePrefixHash } from "@terminus/context-ir";
 
 // ──────────────────────── Ablation specification ─────────────────────────────
 
@@ -127,6 +127,41 @@ export async function replayContext(
   };
 }
 
+function ablatedCachePlan(
+  input: ReplayInput,
+  fragments: readonly ContextFragment[],
+): ContextCachePlan {
+  const originalStableIds = new Set(
+    input.manifest.fragments
+      .slice(0, input.manifest.cachePlan.volatileSuffixBoundary)
+      .map((entry) => entry.fragmentId),
+  );
+  const stable: ContextFragment[] = [];
+  for (const fragment of fragments) {
+    if (!originalStableIds.has(fragment.id)) break;
+    stable.push(fragment);
+  }
+  const originalBreakpointIds = new Set(
+    input.manifest.cachePlan.breakpoints
+      .map((index) => input.manifest.fragments[index]?.fragmentId)
+      .filter((id): id is string => id !== undefined),
+  );
+  const breakpoints = fragments.flatMap((fragment, index) =>
+    originalBreakpointIds.has(fragment.id) ? [index] : []
+  );
+  const modelKey = input.model.modelKey;
+  const predictedCachedTokens = stable.reduce(
+    (sum, fragment) => sum + BigInt(fragment.estimatedTokens[modelKey] ?? 0),
+    0n,
+  ) as TokenCount;
+  return {
+    stablePrefixHash: computeStablePrefixHash(stable),
+    volatileSuffixBoundary: stable.length,
+    breakpoints,
+    predictedCachedTokens,
+  };
+}
+
 /**
  * Replay with an ablation: remove specified fragments, optionally inject
  * replacements, then re-render.
@@ -148,12 +183,7 @@ export async function replayWithAblation(
     fragments = [...fragments, ...ablation.injectFragments];
   }
 
-  const cachePlan: ContextCachePlan = {
-    stablePrefixHash: input.manifest.cachePlan.stablePrefixHash,
-    volatileSuffixBoundary: input.manifest.cachePlan.volatileSuffixBoundary,
-    breakpoints: [...input.manifest.cachePlan.breakpoints],
-    predictedCachedTokens: input.manifest.predictedCachedTokens,
-  };
+  const cachePlan = ablatedCachePlan(input, fragments);
 
   const rendered = await input.renderer.render({
     provider: input.provider,

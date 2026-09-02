@@ -180,14 +180,35 @@ def summarize_context_manifests(context_manifests: list[dict[str, Any]]) -> list
         selected_tokens: int | None = None
         for key in _TOKEN_KEYS:
             value = manifest.get(key)
-            if isinstance(value, (int, float)):
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
                 selected_tokens = int(value)
                 break
+        if selected_tokens is None:
+            estimated = manifest.get("estimated_tokens")
+            if isinstance(estimated, dict):
+                value = estimated.get("predictedInput")
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    selected_tokens = int(value)
         fragment_kinds: tuple[str, ...] = ()
         for key in _KIND_KEYS:
             value = manifest.get(key)
             if isinstance(value, list):
-                fragment_kinds = tuple(str(item) for item in value)
+                if key == "fragments" and all(isinstance(item, dict) for item in value):
+                    selected = [item for item in value if item.get("selected") is not False]
+                    fragment_kinds = tuple(
+                        str(item["kind"])
+                        for item in sorted(
+                            selected,
+                            key=lambda item: (
+                                item.get("rendered_position")
+                                if isinstance(item.get("rendered_position"), int)
+                                else 2**31
+                            ),
+                        )
+                        if isinstance(item.get("kind"), str)
+                    )
+                else:
+                    fragment_kinds = tuple(str(item) for item in value)
                 break
         summaries.append(
             ManifestSummary(

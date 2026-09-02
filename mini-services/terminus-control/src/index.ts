@@ -7396,6 +7396,7 @@ const routes: Route[] = [
       compiler_version: m.compilerVersion, policy_version: m.policyVersion,
       epoch_id: m.epochId, provider_key: m.providerKey, model_key: m.modelKey,
       rendered_request_hash: m.renderedRequestHash,
+      manifest_artifact_hash: canonicalArtifactHash(m.manifestArtifact),
       estimated_tokens: JSON.parse(m.estimatedTokensJson),
       cache_plan: JSON.parse(m.cachePlanJson),
       experiment: JSON.parse(m.experimentJson),
@@ -18223,12 +18224,27 @@ async function agentLoop(turnId: string): Promise<void> {
         "context-epoch-baseline",
         { taskId: task.id, turnId, workspaceId: workspace.id },
       );
+      const durableManifest = await db.contextManifest.findUnique({
+        where: { id: compiled.manifest.id },
+        select: { manifestArtifact: true },
+      });
+      const manifestArtifactHash = durableManifest === null
+        ? null
+        : canonicalArtifactHash(durableManifest.manifestArtifact);
+      if (manifestArtifactHash === null) {
+        throw new Error(`context manifest ${compiled.manifest.id} has no canonical artifact hash`);
+      }
       await mutateAgentState(() => emit({
         eventType: "context.manifest_persisted",
         aggregateType: "context_manifest",
         aggregateId: compiled.manifest.id,
         correlationId: turn.taskId ?? undefined,
         payload: {
+          manifestId: compiled.manifest.id,
+          epochId: contextEpoch.epochId,
+          providerAttemptId: compiled.manifest.providerAttemptId,
+          artifactHash: manifestArtifactHash,
+          predictedCachedTokens: Number(compiled.manifest.predictedCachedTokens),
           turn_id: turnId,
           fragment_count: compiled.manifest.fragments.length,
           provider: selectedProvider.providerId,

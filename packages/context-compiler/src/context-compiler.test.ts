@@ -475,6 +475,9 @@ describe("Context Compiler", () => {
     );
     expect(ablated.fragmentCount).toBe(replayed.fragmentCount - 1);
     expect(ablated.renderedRequestHash).not.toBe(replayed.renderedRequestHash);
+    expect(ablated.rendered.request.cachePlan.stablePrefixHash).not.toBe(
+      compiled.manifest.cachePlan.stablePrefixHash,
+    );
     await expect(replayContext({
       manifest: compiled.manifest,
       selectedFragments: selected.slice(1),

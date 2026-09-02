@@ -252,6 +252,29 @@ def test_manifest_diff_token_deltas_and_fragment_kinds() -> None:
     assert diff.candidate_selected_tokens == 2400
 
 
+def test_manifest_diff_reads_canonical_manifest_shape() -> None:
+    baseline = [{
+        "estimated_tokens": {"predictedInput": 1000},
+        "fragments": [
+            {"kind": "task", "selected": True, "rendered_position": 1},
+            {"kind": "system", "selected": True, "rendered_position": 0},
+            {"kind": "discarded", "selected": False, "rendered_position": 2},
+        ],
+    }]
+    candidate = [{
+        "estimated_tokens": {"predictedInput": 800},
+        "fragments": [
+            {"kind": "system", "selected": True, "rendered_position": 0},
+        ],
+    }]
+
+    diff = diff_context_manifests(baseline, candidate)
+
+    assert diff.selected_token_deltas == (-200,)
+    assert diff.fragment_kinds_removed == (("task",),)
+    assert diff.fragment_kinds_added == ((),)
+
+
 def test_trajectory_diff_over_record_dicts() -> None:
     baseline = _record(
         "t",
