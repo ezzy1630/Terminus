@@ -2,11 +2,10 @@ baseline:
   id: terminus-minimal
   version: 1
   description: |
-    Terminus minimal shell baseline (SPEC §18.1, §41.2). Uses only the
-    minimal always-visible ACI (read, search, edit, exec, job,
-    diagnostics, capability) with no auxiliary agents, no memory, no
-    compaction. Used as the lower-bound reference for harness-controlled
-    comparison.
+    Executable Terminus minimal control profile. This file keeps its legacy
+    forge-minimal filename, but its id, version, tools, and feature flags bind
+    the runtime profile in agent/minimal-profile.ts.
+  status: executable_default
   harness: terminus
   harness_commit: 0000000000000000000000000000000000000000
   configuration:
@@ -28,7 +27,7 @@ baseline:
         validate_checkpoint: false
       external_compression: {enabled: false}
     aci:
-      default_tools: [read, search, patch, exec, job, inspect, capability]
+      default_tools: [read, patch, write, exec, exec_poll, grep, glob]
     routing:
       mode: deterministic
       max_provider_attempts_per_turn: 1
@@ -36,7 +35,7 @@ baseline:
   expected_behavior:
     - no delegation, no scout, no reviewer
     - no memory retrieval
-    - no compaction (fails closed when context fills)
+    - no compaction
     - single provider attempt per turn
   use_in_cohorts:
     - tiny-bugfix

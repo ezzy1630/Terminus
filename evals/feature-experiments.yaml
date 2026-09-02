@@ -1,0 +1,159 @@
+schema_version: 1
+control_profile:
+  id: terminus-minimal
+  version: "1"
+  status: executable_default
+  tool_ids: [read, patch, write, exec, exec_poll, grep, glob]
+  assignments:
+    semantic_retrieval: false
+    model_routing: false
+    subagents: false
+    memory: false
+    evidence_graph: true
+    adaptive_tool_disclosure: false
+    compaction: false
+
+features:
+  - id: semantic_retrieval
+    hypothesis: Semantic retrieval improves repository navigation on tasks whose solution spans distant symbols.
+    target_task_archetypes: [cross_module_change, unfamiliar_repository]
+    expected_measurable_benefit: Increase resolved-task rate without increasing wrong-file edits.
+    cost_budget: {max_relative_tokens: 1.10, max_relative_wall_time: 1.15}
+    reliability_budget: {max_false_completion_delta: 0.0, max_stuck_state_delta: 0.0}
+    deletion_or_demotion_condition: Demote when the preregistered holdout shows no resolved-task gain or breaches either budget.
+    current_decision: default_off_pending_evidence
+  - id: model_routing
+    hypothesis: Deterministic task-aware routing reduces cost on simple work without lowering resolution quality.
+    target_task_archetypes: [tiny_bugfix, routine_maintenance, high_risk_change]
+    expected_measurable_benefit: Reduce cost per resolved task while preserving paired task outcomes.
+    cost_budget: {max_relative_tokens: 1.00, max_relative_wall_time: 1.10}
+    reliability_budget: {max_false_completion_delta: 0.0, max_stuck_state_delta: 0.0}
+    deletion_or_demotion_condition: Keep routing disabled when any risk slice regresses or savings are not statistically supported.
+    current_decision: default_off_pending_evidence
+  - id: subagents
+    hypothesis: Bounded read-only delegation improves discovery on broad tasks without destabilizing the writer loop.
+    target_task_archetypes: [repository_audit, cross_module_change]
+    expected_measurable_benefit: Increase resolved-task rate and reduce tool calls in broad discovery tasks.
+    cost_budget: {max_relative_tokens: 1.35, max_relative_wall_time: 1.25}
+    reliability_budget: {max_false_completion_delta: 0.0, max_stuck_state_delta: 0.0}
+    deletion_or_demotion_condition: Disable when gains do not cover the token budget or delegation introduces stranded work.
+    current_decision: default_off_pending_evidence
+  - id: memory
+    hypothesis: Exact same-task recall reduces repeated discovery in multi-turn maintenance tasks.
+    target_task_archetypes: [multi_turn_repair, repeated_repository_task]
+    expected_measurable_benefit: Reduce repeated reads and wall time with no cross-task contamination.
+    cost_budget: {max_relative_tokens: 1.05, max_relative_wall_time: 1.05}
+    reliability_budget: {max_false_completion_delta: 0.0, max_stuck_state_delta: 0.0}
+    deletion_or_demotion_condition: Disable on contamination, stale recall, or absent efficiency gain.
+    current_decision: default_off_pending_evidence
+  - id: evidence_graph
+    hypothesis: Claim-to-artifact binding reduces unsupported completion declarations on mutation tasks.
+    target_task_archetypes: [code_change, high_risk_change]
+    expected_measurable_benefit: Reduce verification false completions without materially increasing false blocks.
+    cost_budget: {max_relative_tokens: 1.05, max_relative_wall_time: 1.15}
+    reliability_budget: {max_false_completion_delta: -0.01, max_false_block_delta: 0.01}
+    deletion_or_demotion_condition: Simplify the graph when an equally safe verifier achieves lower false-block or latency rates.
+    current_decision: protected_core_requires_simplification_evidence
+  - id: adaptive_tool_disclosure
+    hypothesis: Declaring optional tools only after activation reduces prompt load without impairing tool discovery.
+    target_task_archetypes: [tiny_bugfix, tool_heavy_change]
+    expected_measurable_benefit: Reduce selected context tokens with unchanged resolved-task rate.
+    cost_budget: {max_relative_tokens: 0.95, max_relative_wall_time: 1.05}
+    reliability_budget: {max_false_completion_delta: 0.0, max_stuck_state_delta: 0.0}
+    deletion_or_demotion_condition: Revert when required tools are undiscoverable or token savings are not measurable.
+    current_decision: default_off_pending_evidence
+  - id: compaction
+    hypothesis: Evidence-preserving compaction allows long tasks to complete without losing required constraints.
+    target_task_archetypes: [long_horizon_change, repair_loop]
+    expected_measurable_benefit: Reduce context exhaustion while preserving acceptance evidence and cache reuse.
+    cost_budget: {max_relative_tokens: 1.10, max_relative_wall_time: 1.15}
+    reliability_budget: {max_false_completion_delta: 0.0, max_stuck_state_delta: -0.01}
+    deletion_or_demotion_condition: Disable when checkpoint validation fails or held-out long tasks do not improve.
+    current_decision: default_off_pending_evidence
+
+paired_experiments:
+  - id: compiler_full_vs_reduced
+    feature_id: semantic_retrieval
+    task_archetypes: [cross_module_change, unfamiliar_repository]
+    baseline: {context_compiler: reduced}
+    candidate: {context_compiler: full}
+  - id: compiler_raw_conversation_vs_full
+    feature_id: semantic_retrieval
+    task_archetypes: [tiny_bugfix, cross_module_change]
+    baseline: {context_compiler: raw_conversation_tools}
+    candidate: {context_compiler: full}
+  - id: compiler_authority_rules_vs_full
+    feature_id: semantic_retrieval
+    task_archetypes: [tiny_bugfix, unfamiliar_repository]
+    baseline: {context_compiler: authority_repository_rules}
+    candidate: {context_compiler: full}
+  - id: compiler_lexical_vs_full
+    feature_id: semantic_retrieval
+    task_archetypes: [cross_module_change, unfamiliar_repository]
+    baseline: {context_compiler: lexical_only}
+    candidate: {context_compiler: full}
+  - id: compiler_structural_vs_full
+    feature_id: semantic_retrieval
+    task_archetypes: [cross_module_change, unfamiliar_repository]
+    baseline: {context_compiler: structural_only}
+    candidate: {context_compiler: full}
+  - id: evidence_gap_off_vs_on
+    feature_id: evidence_graph
+    task_archetypes: [cross_module_change, high_risk_change]
+    baseline: {evidence_gap_expansion: false}
+    candidate: {evidence_gap_expansion: true}
+  - id: semantic_retrieval_off_vs_on
+    feature_id: semantic_retrieval
+    task_archetypes: [cross_module_change, unfamiliar_repository]
+    baseline: {semantic_retrieval: false}
+    candidate: {semantic_retrieval: true}
+  - id: compaction_off_vs_current
+    feature_id: compaction
+    task_archetypes: [long_horizon_change, repair_loop]
+    baseline: {compaction: false}
+    candidate: {compaction: current}
+  - id: contract_compact_vs_fragmented
+    feature_id: evidence_graph
+    task_archetypes: [ordinary_code, high_risk_change]
+    baseline: {contract_layout: separate_contract_criteria}
+    candidate: {contract_layout: compact_task_contract}
+  - id: tools_static_vs_adaptive
+    feature_id: adaptive_tool_disclosure
+    task_archetypes: [tiny_bugfix, tool_heavy_change]
+    baseline: {tool_disclosure: static}
+    candidate: {tool_disclosure: adaptive}
+  - id: verification_tier1_vs_tier2
+    feature_id: evidence_graph
+    task_archetypes: [docs_change, ordinary_code]
+    baseline: {verification_tier: 1}
+    candidate: {verification_tier: 2}
+  - id: router_off_vs_on
+    feature_id: model_routing
+    task_archetypes: [tiny_bugfix, routine_maintenance, high_risk_change]
+    baseline: {model_routing: false}
+    candidate: {model_routing: true}
+  - id: memory_off_vs_on
+    feature_id: memory
+    task_archetypes: [multi_turn_repair, repeated_repository_task]
+    baseline: {memory: false}
+    candidate: {memory: true}
+  - id: subagents_off_vs_on
+    feature_id: subagents
+    task_archetypes: [repository_audit, cross_module_change]
+    baseline: {subagents: false}
+    candidate: {subagents: true}
+  - id: planning_off_vs_on
+    feature_id: subagents
+    task_archetypes: [cross_module_change, high_risk_change]
+    baseline: {explicit_planning: false}
+    candidate: {explicit_planning: true}
+  - id: cache_layout_dense_vs_stable_prefix
+    feature_id: compaction
+    task_archetypes: [long_horizon_change, repair_loop]
+    baseline: {cache_layout: dense}
+    candidate: {cache_layout: stable_prefix}
+  - id: prompt_generic_vs_model_family
+    feature_id: adaptive_tool_disclosure
+    task_archetypes: [tiny_bugfix, tool_heavy_change]
+    baseline: {prompt_renderer: generic}
+    candidate: {prompt_renderer: model_family_specific}
