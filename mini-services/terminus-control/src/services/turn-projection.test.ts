@@ -73,20 +73,38 @@ describe("TurnProjection", () => {
   test("derives explicit waiting reason for non-terminal states", () => {
     expect(deriveWaitingReason("PENDING")).toBe("turn_pending");
     expect(deriveWaitingReason("CONTEXT_COMPILING")).toBe("compiling_context");
-    expect(deriveWaitingReason("MODEL_RUNNING")).toBe("waiting_for_model");
-    expect(deriveWaitingReason("TOOL_RUNNING")).toBe("executing_tools");
+    expect(deriveWaitingReason("PROVIDER_RUNNING")).toBe("waiting_for_provider");
+    expect(deriveWaitingReason("RESPONSE_VALIDATING")).toBe("validating_provider_response");
+    expect(deriveWaitingReason("TOOL_SETTLEMENT")).toBe("settling_tool_effects");
     expect(deriveWaitingReason("VERIFYING")).toBe("verifying");
-    expect(deriveWaitingReason("WAITING_FOR_LEASE")).toBe("waiting_for_lease");
+    expect(deriveWaitingReason("REPAIR_PENDING")).toBe("repair_pending");
+    expect(deriveWaitingReason("REPAIRING")).toBe("repairing");
+    expect(deriveWaitingReason("VERIFIED")).toBe("verification_complete");
+    expect(deriveWaitingReason("FINALIZING")).toBe("finalizing");
+    expect(deriveWaitingReason("USER_ACTION_REQUIRED")).toBe("waiting_for_user");
+    expect(deriveWaitingReason("ABORTING")).toBe("aborting");
     expect(deriveWaitingReason("COMPLETED")).toBeNull();
   });
 
-  test("exposes recovery pending when state is RECOVERING or flagged", () => {
-    const turn = mockTurn({ state: "RECOVERING" });
+  test("exposes reconciliation after an interrupted provider attempt", () => {
+    const turn = mockTurn({
+      state: "INTERRUPTED",
+      terminalErrorJson: JSON.stringify({
+        reason: "provider_attempt_in_flight_on_process_restart",
+        reconciliation_required: true,
+      }),
+    });
     const projected = projectTurn(turn, []);
 
-    expect(projected.state).toBe("RECOVERING");
+    expect(projected.state).toBe("INTERRUPTED");
     expect(projected.recovery_pending).toBe(true);
-    expect(projected.waiting_reason).toBe("recovering_interrupted_work");
+    expect(projected.waiting_reason).toBe("provider_reconciliation_required");
+  });
+
+  test("does not label an ordinary interrupted turn as provider recovery", () => {
+    const projected = projectTurn(mockTurn({ state: "INTERRUPTED" }), []);
+    expect(projected.recovery_pending).toBe(false);
+    expect(projected.waiting_reason).toBeNull();
   });
 
   test("projects provider attempts wire format", () => {

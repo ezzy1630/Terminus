@@ -90,26 +90,42 @@ export function deriveWaitingReason(
   if (extra?.waitingReason !== undefined && extra.waitingReason !== null) {
     return extra.waitingReason;
   }
+  if (extra?.recoveryPending === true) return "provider_reconciliation_required";
   switch (state) {
     case "PENDING":
       return "turn_pending";
     case "CONTEXT_COMPILING":
       return "compiling_context";
-    case "MODEL_RUNNING":
-      return "waiting_for_model";
-    case "TOOL_RUNNING":
-      return "executing_tools";
+    case "PROVIDER_RUNNING":
+      return "waiting_for_provider";
+    case "RESPONSE_VALIDATING":
+      return "validating_provider_response";
+    case "TOOL_SETTLEMENT":
+      return "settling_tool_effects";
     case "VERIFYING":
       return "verifying";
-    case "WAITING_FOR_INPUT":
+    case "REPAIR_PENDING":
+      return "repair_pending";
+    case "REPAIRING":
+      return "repairing";
+    case "VERIFIED":
+      return "verification_complete";
+    case "FINALIZING":
+      return "finalizing";
+    case "USER_ACTION_REQUIRED":
       return "waiting_for_user";
-    case "WAITING_FOR_LEASE":
-      return "waiting_for_lease";
-    case "RECOVERING":
-      return "recovering_interrupted_work";
+    case "ABORTING":
+      return "aborting";
     default:
       return null;
   }
+}
+
+function terminalErrorRequiresReconciliation(terminalError: unknown): boolean {
+  return typeof terminalError === "object"
+    && terminalError !== null
+    && !Array.isArray(terminalError)
+    && (terminalError as Record<string, unknown>)["reconciliation_required"] === true;
 }
 
 export function projectTurn(
@@ -128,8 +144,12 @@ export function projectTurn(
 
   const costMicros = sumAttemptCostMicros(attempts);
   const requestedBudget = parsePersistedTurnBudget(turn.requestedBudgetJson);
-  const waitingReason = deriveWaitingReason(turn.state, extra);
-  const recoveryPending = extra?.recoveryPending ?? turn.state === "RECOVERING";
+  const recoveryPending = extra?.recoveryPending
+    ?? (turn.state === "INTERRUPTED" && terminalErrorRequiresReconciliation(terminalError));
+  const waitingReason = deriveWaitingReason(turn.state, {
+    ...extra,
+    recoveryPending,
+  });
 
   return {
     id: turn.id,
