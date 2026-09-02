@@ -289,17 +289,18 @@ canary-live baseline commit="working-tree":
 # arm, from the SAME model-fixed cohort. Partition enforcement (blocked
 # cells fail closed; holdout cells must be stamped) is part of the report.
 # Usage:
-#   just cohort-compare evals/results/cohort/nightly-baseline evals/results/cohort/nightly-candidate
+#   just cohort-compare evals/results/cohort/baseline evals/results/cohort/candidate
 cohort-compare baseline candidate:
     cd python && uv run terminus-eval cohort-compare \
       --baseline "{{baseline}}" --candidate "{{candidate}}" \
       --output evals/results/cohort/latest
 
-# Scheduled live cohort run (one arm). Requires a live control plane and
-# provider credentials; fails closed without them. The produced runs dir is
-# one input of `just cohort-compare`. SEEDS should be >= 5 so bootstrap
-# intervals are meaningful (the local exit gate enforces 5+ per cell).
-eval-nightly-cohort seeds="5":
+# Scheduled live cohort run (one arm). Requires a live control plane, provider
+# credentials, and the exact commit served by that control plane; fails closed
+# without them. The produced runs dir is one input of `just cohort-compare`.
+# SEEDS should be >= 5 so bootstrap intervals are meaningful (the local exit
+# gate enforces 5+ per cell).
+eval-nightly-cohort commit seeds="5":
     #!/usr/bin/env bash
     set -euo pipefail
     : "${TERMINUS_CONTROL_URL:?TERMINUS_CONTROL_URL is required for a live cohort run}"
@@ -313,6 +314,7 @@ eval-nightly-cohort seeds="5":
       uv run terminus-eval run \
         --suite "${suite%%/*}" --task "$task" --task-dir "$task_dir" \
         --harness terminus-live --provider "$TERMINUS_LIVE_PROVIDER" --model "$TERMINUS_LIVE_MODEL" \
+        --harness-commit "{{commit}}" \
         ${TERMINUS_LIVE_EFFORT:+--effort "$TERMINUS_LIVE_EFFORT"} \
         --seeds {{seeds}} \
         --output-dir "evals/results/cohort/${TERMINUS_ARM:-candidate}"
