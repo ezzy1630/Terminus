@@ -204,7 +204,7 @@ export async function persistSettledToolResult(
   );
   const projectedResult = fullResultBytes <= MAX_TOOL_MODEL_RESULT_BYTES
     ? modelVisibleRecord
-    : {
+    : z.record(z.string(), z.unknown()).parse(canonicalJson({
         ...modelVisibleRecord,
         data: null,
         summary: `${input.result.summary} Full result: ${fullResultArtifact.uri}`,
@@ -213,7 +213,7 @@ export async function persistSettledToolResult(
           reason: `tool result exceeded ${MAX_TOOL_MODEL_RESULT_BYTES} model bytes`,
           continuation: fullResultArtifact.uri,
         },
-      };
+      }));
   const resultTranscriptText = canonicalJson(providerToolResultTranscript(input.call, projectedResult));
   if (new TextEncoder().encode(resultTranscriptText).byteLength > MAX_TOOL_MODEL_RESULT_BYTES) {
     throw new Error("bounded tool result transcript still exceeds the model-result limit");

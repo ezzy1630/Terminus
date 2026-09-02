@@ -583,8 +583,8 @@ export function classifyTerminalTurn(input: TerminalClassificationInput): Termin
               ? "turn.interrupted"
               : "turn.failed";
   const code = stopEnvelope?.code
-    ?? (stopKind === "budget_stop" || stopKind === "budget_exhausted" ? "BUDGET_EXHAUSTED"
-      : stopKind === "policy_stop" || stopKind === "policy_denied" ? "POLICY_DENIED"
+    ?? (stopKind === "budget_stop" ? "BUDGET_EXHAUSTED"
+      : stopKind === "policy_stop" ? "POLICY_DENIED"
         : stopKind === "blocked" ? "PROVIDER_BLOCKED"
           : stopKind === "needs_user_input" ? "USER_INPUT_REQUIRED"
             : stopKind === "interrupted" ? "CANCELLED"

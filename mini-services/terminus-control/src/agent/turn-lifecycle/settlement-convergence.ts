@@ -45,22 +45,20 @@ export interface TurnRecoveryMarker {
  * state the settlement decision was made from. A count of 0 is a lost race
  * (interrupt/abort/recovery won), never a success signal.
  */
-export function terminalSettlementUpdate(input: {
+export const terminalSettlementUpdate = (input: {
   readonly expectedState: string;
   readonly terminalState: string;
   readonly terminalErrorJson: string;
 }): {
   readonly whereState: string;
   readonly data: { readonly terminalState: string; readonly terminalErrorJson: string };
-} {
-  return {
-    whereState: input.expectedState,
-    data: {
-      terminalState: input.terminalState,
-      terminalErrorJson: input.terminalErrorJson,
-    },
-  };
-}
+} => ({
+  whereState: input.expectedState,
+  data: {
+    terminalState: input.terminalState,
+    terminalErrorJson: input.terminalErrorJson,
+  },
+});
 
 /**
  * Interpret the outcome of the terminal CAS write.
@@ -69,9 +67,8 @@ export function terminalSettlementUpdate(input: {
  * - `count === 0`: someone else moved the row. That is convergence, not
  *   failure — the winner settled the turn.
  */
-export function interpretTerminalCas(count: number): "won" | "lost_race_converged" {
-  return count === 1 ? "won" : "lost_race_converged";
-}
+export const interpretTerminalCas = (count: number): "won" | "lost_race_converged" =>
+  count === 1 ? "won" : "lost_race_converged";
 
 /**
  * Interpret the outcome of the idempotent recovery-marker write.
@@ -80,13 +77,13 @@ export function interpretTerminalCas(count: number): "won" | "lost_race_converge
  * both "win" the same idempotent insert shape; anything but exactly one row
  * is reported for an explicit durable reconciliation event.
  */
-export function interpretRecoveryMarkerWrite(
+export const interpretRecoveryMarkerWrite = (
   count: number,
-): "recorded" | "already_recorded" | "needs_durable_reconciliation" {
+): "recorded" | "already_recorded" | "needs_durable_reconciliation" => {
   if (count === 1) return "recorded";
   if (count === 0) return "already_recorded";
   return "needs_durable_reconciliation";
-}
+};
 
 /**
  * Whether a settlement fault leaves the loop provably unable to record the
