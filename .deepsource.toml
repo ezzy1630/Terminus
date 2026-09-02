@@ -36,7 +36,8 @@ exclude_patterns = [
   "python/forge_evals/evals/**",
   "**/generated/**",
   "packages/terminus-kernel-client/src/generated/**",
-  "scripts/**"
+  "scripts/**",
+  "mini-services/terminus-control/src/index.ts"
 ]
 
 [[analyzers]]

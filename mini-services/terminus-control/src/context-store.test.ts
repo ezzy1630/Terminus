@@ -14,13 +14,13 @@ import type {
 
 const MANIFEST_ID = "00000000-0000-7000-8000-000000000001";
 
-function storeFor(
+const storeFor = (
   experiment: Readonly<Record<string, unknown>>,
   options: {
     readonly breakpoints?: readonly number[];
     readonly fragments?: readonly Record<string, unknown>[];
   } = {},
-): PrismaContextStore {
+): PrismaContextStore => {
   const row = {
     id: MANIFEST_ID,
     providerAttemptId: null,
@@ -31,7 +31,7 @@ function storeFor(
     experimentJson: JSON.stringify(experiment),
     estimatedTokensJson: JSON.stringify({ output: "10", reasoning: "0", toolResult: "0", recovery: "0" }),
     cachePlanJson: JSON.stringify({
-      stablePrefixHash: "sha256:" + "0".repeat(64),
+      stablePrefixHash: `sha256:${"0".repeat(64)}`,
       volatileSuffixBoundary: 0,
       breakpoints: options.breakpoints ?? [],
       predictedCachedTokens: "200",
