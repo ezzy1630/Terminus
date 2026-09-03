@@ -18,16 +18,16 @@ describe("turn command executor", () => {
     const emitted: { eventType: string; payload: unknown }[] = [];
     let casResult = 1;
     const executor = new TurnCommandExecutor({
-      mutate: async (op) => op(),
+      mutate: (op) => Promise.resolve(op()),
       emit: async (input, mutation) => {
         emitted.push({ eventType: input.eventType, payload: input.payload });
         // The real bus publishes the event atomically with its mutation.
         if (mutation !== undefined) await mutation({});
         return input;
       },
-      rearmProviderContinuation: async () => {
-        if (casResult !== 1) throw new Error("turn t1 changed before provider continuation");
-        return casResult;
+      rearmProviderContinuation: () => {
+        if (casResult !== 1) return Promise.reject(new Error("turn t1 changed before provider continuation"));
+        return Promise.resolve(casResult);
       },
     });
 
@@ -57,14 +57,14 @@ describe("turn command executor", () => {
 
   test("executor instances do not share attempt state", () => {
     const first = new TurnCommandExecutor({
-      mutate: async (op) => op(),
-      emit: async (input) => input,
-      rearmProviderContinuation: async () => 1,
+      mutate: (op) => Promise.resolve(op()),
+      emit: (input) => Promise.resolve(input),
+      rearmProviderContinuation: () => Promise.resolve(1),
     });
     const second = new TurnCommandExecutor({
-      mutate: async (op) => op(),
-      emit: async (input) => input,
-      rearmProviderContinuation: async () => 1,
+      mutate: (op) => Promise.resolve(op()),
+      emit: (input) => Promise.resolve(input),
+      rearmProviderContinuation: () => Promise.resolve(1),
     });
     first.ledger.predictedCacheByAttempt.set("a1", 100n);
     expect(second.ledger.predictedCacheByAttempt.has("a1")).toBe(false);

@@ -7,49 +7,45 @@ import {
   type TurnProjectionRow,
 } from "./turn-projection.js";
 
-function mockTurn(overrides: Partial<TurnProjectionRow> = {}): TurnProjectionRow {
-  return {
-    id: "turn-1",
-    threadId: "thread-1",
-    taskId: "task-1",
-    sequence: 1,
-    state: "COMPLETED",
-    initiatingActor: "user",
-    startedAt: new Date("2026-09-02T10:00:00Z"),
-    completedAt: new Date("2026-09-02T10:01:00Z"),
-    selectedModel: "test-model",
-    selectedReasoningEffort: "high",
-    selectedProviderAccountId: null,
-    requestedBudgetJson: null,
-    terminalErrorJson: null,
-    ...overrides,
-  };
-}
+const mockTurn = (overrides: Partial<TurnProjectionRow> = {}): TurnProjectionRow => ({
+  id: "turn-1",
+  threadId: "thread-1",
+  taskId: "task-1",
+  sequence: 1,
+  state: "COMPLETED",
+  initiatingActor: "user",
+  startedAt: new Date("2026-09-02T10:00:00Z"),
+  completedAt: new Date("2026-09-02T10:01:00Z"),
+  selectedModel: "test-model",
+  selectedReasoningEffort: "high",
+  selectedProviderAccountId: null,
+  requestedBudgetJson: null,
+  terminalErrorJson: null,
+  ...overrides,
+});
 
-function mockAttempt(overrides: Partial<ProviderAttemptProjectionRow> = {}): ProviderAttemptProjectionRow {
-  return {
-    id: "attempt-1",
-    attemptNumber: 1,
-    modelKey: "test-model",
-    providerId: "local",
-    status: "succeeded",
-    usageJson: JSON.stringify({
-      inputTokens: 100,
-      outputTokens: 50,
-      latencyMs: 500,
-    }),
-    finishReason: "stop",
-    providerRequestId: "req-1",
-    providerReportedCostMicros: 1000n,
-    computedCostMicros: 1000n,
-    costSource: "provider",
-    requestArtifact: "artifact://sha256/1111",
-    responseArtifact: "artifact://sha256/2222",
-    startedAt: new Date("2026-09-02T10:00:10Z"),
-    completedAt: new Date("2026-09-02T10:00:20Z"),
-    ...overrides,
-  };
-}
+const mockAttempt = (overrides: Partial<ProviderAttemptProjectionRow> = {}): ProviderAttemptProjectionRow => ({
+  id: "attempt-1",
+  attemptNumber: 1,
+  modelKey: "test-model",
+  providerId: "local",
+  status: "succeeded",
+  usageJson: JSON.stringify({
+    inputTokens: 100,
+    outputTokens: 50,
+    latencyMs: 500,
+  }),
+  finishReason: "stop",
+  providerRequestId: "req-1",
+  providerReportedCostMicros: 1000n,
+  computedCostMicros: 1000n,
+  costSource: "provider",
+  requestArtifact: "artifact://sha256/1111",
+  responseArtifact: "artifact://sha256/2222",
+  startedAt: new Date("2026-09-02T10:00:10Z"),
+  completedAt: new Date("2026-09-02T10:00:20Z"),
+  ...overrides,
+});
 
 describe("TurnProjection", () => {
   test("projects completed turn with summed usage and cost", () => {

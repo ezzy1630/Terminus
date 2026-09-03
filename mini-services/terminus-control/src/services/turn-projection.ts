@@ -83,10 +83,10 @@ export interface PublicAttemptProjection {
   readonly completed_at: string | null;
 }
 
-export function deriveWaitingReason(
+export const deriveWaitingReason = (
   state: string,
   extra?: TurnProjectionState,
-): string | null {
+): string | null => {
   if (extra?.waitingReason !== undefined && extra.waitingReason !== null) {
     return extra.waitingReason;
   }
@@ -119,20 +119,19 @@ export function deriveWaitingReason(
     default:
       return null;
   }
-}
+};
 
-function terminalErrorRequiresReconciliation(terminalError: unknown): boolean {
-  return typeof terminalError === "object"
+const terminalErrorRequiresReconciliation = (terminalError: unknown): boolean =>
+  typeof terminalError === "object"
     && terminalError !== null
     && !Array.isArray(terminalError)
     && (terminalError as Record<string, unknown>)["reconciliation_required"] === true;
-}
 
-export function projectTurn(
+export const projectTurn = (
   turn: TurnProjectionRow,
   attempts: readonly ProviderAttemptProjectionRow[],
   extra?: TurnProjectionState,
-): PublicTurnProjection {
+): PublicTurnProjection => {
   let terminalError: unknown = null;
   if (turn.terminalErrorJson !== null && turn.terminalErrorJson !== undefined && turn.terminalErrorJson !== "") {
     try {
@@ -175,12 +174,12 @@ export function projectTurn(
     waiting_reason: waitingReason,
     recovery_pending: recoveryPending,
   };
-}
+};
 
-export function projectAttempts(
+export const projectAttempts = (
   attempts: readonly ProviderAttemptProjectionRow[],
-): readonly PublicAttemptProjection[] {
-  return attempts.map((attempt) => ({
+): readonly PublicAttemptProjection[] =>
+  attempts.map((attempt) => ({
     provider_attempt_id: attempt.id,
     attempt_number: attempt.attemptNumber,
     model: attempt.modelKey,
@@ -197,4 +196,3 @@ export function projectAttempts(
     started_at: attempt.startedAt.toISOString(),
     completed_at: attempt.completedAt?.toISOString() ?? null,
   }));
-}

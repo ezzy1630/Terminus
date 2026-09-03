@@ -310,114 +310,104 @@ export interface TurnTransitionPlan {
 }
 
 /** Plan the PENDING/REPAIRING → CONTEXT_COMPILING entry. */
-export function planEnterContextCompiling(input: {
+export const planEnterContextCompiling = (input: {
   readonly turnId: string;
   readonly taskId: string | null;
   readonly resumedFrom: "PENDING" | "REPAIRING";
-}): TurnTransitionPlan {
-  return {
-    eventType: "turn.context_compiling",
-    aggregateType: "turn",
-    aggregateId: input.turnId,
-    correlationId: input.taskId,
-    payload: { phase: "context_compiling", resumed_from: input.resumedFrom },
-    expectedStates: [input.resumedFrom],
-    nextState: "CONTEXT_COMPILING",
-    setStartedAt: input.resumedFrom === "PENDING",
-    setCompletedAt: false,
-    terminalErrorJson: null,
-    conflictError: `turn ${input.turnId} changed before context compilation`,
-  };
-}
+}): TurnTransitionPlan => ({
+  eventType: "turn.context_compiling",
+  aggregateType: "turn",
+  aggregateId: input.turnId,
+  correlationId: input.taskId,
+  payload: { phase: "context_compiling", resumed_from: input.resumedFrom },
+  expectedStates: [input.resumedFrom],
+  nextState: "CONTEXT_COMPILING",
+  setStartedAt: input.resumedFrom === "PENDING",
+  setCompletedAt: false,
+  terminalErrorJson: null,
+  conflictError: `turn ${input.turnId} changed before context compilation`,
+});
 
 /** Plan the RESPONSE_VALIDATING → TOOL_SETTLEMENT entry (first call only). */
-export function planEnterToolSettlement(input: {
+export const planEnterToolSettlement = (input: {
   readonly turnId: string;
   readonly taskId: string;
   readonly providerAttemptId: string;
   readonly toolCallCount: number;
-}): TurnTransitionPlan {
-  return {
-    eventType: "turn.tool_settlement",
-    aggregateType: "turn",
-    aggregateId: input.turnId,
-    correlationId: input.taskId,
-    payload: { provider_attempt_id: input.providerAttemptId, tool_calls: input.toolCallCount },
-    expectedStates: ["RESPONSE_VALIDATING"],
-    nextState: "TOOL_SETTLEMENT",
-    setStartedAt: false,
-    setCompletedAt: false,
-    terminalErrorJson: null,
-    conflictError: `turn ${input.turnId} changed before tool settlement`,
-  };
-}
+}): TurnTransitionPlan => ({
+  eventType: "turn.tool_settlement",
+  aggregateType: "turn",
+  aggregateId: input.turnId,
+  correlationId: input.taskId,
+  payload: { provider_attempt_id: input.providerAttemptId, tool_calls: input.toolCallCount },
+  expectedStates: ["RESPONSE_VALIDATING"],
+  nextState: "TOOL_SETTLEMENT",
+  setStartedAt: false,
+  setCompletedAt: false,
+  terminalErrorJson: null,
+  conflictError: `turn ${input.turnId} changed before tool settlement`,
+});
 
 /**
  * Plan the TOOL_SETTLEMENT → CONTEXT_COMPILING re-entry after every tool
  * call of one provider response has settled. The engine re-arms this
  * boundary each loop iteration, so recovery after a restart is idempotent.
  */
-export function planReenterContextCompiling(input: {
+export const planReenterContextCompiling = (input: {
   readonly turnId: string;
   readonly taskId: string;
-}): TurnTransitionPlan {
-  return {
-    eventType: "turn.context_compiling",
-    aggregateType: "turn",
-    aggregateId: input.turnId,
-    correlationId: input.taskId,
-    payload: { phase: "context_compiling", reason: "tool_calls_settled" },
-    expectedStates: ["TOOL_SETTLEMENT"],
-    nextState: "CONTEXT_COMPILING",
-    setStartedAt: false,
-    setCompletedAt: false,
-    terminalErrorJson: null,
-    conflictError: `turn ${input.turnId} changed before context recompilation`,
-  };
-}
+}): TurnTransitionPlan => ({
+  eventType: "turn.context_compiling",
+  aggregateType: "turn",
+  aggregateId: input.turnId,
+  correlationId: input.taskId,
+  payload: { phase: "context_compiling", reason: "tool_calls_settled" },
+  expectedStates: ["TOOL_SETTLEMENT"],
+  nextState: "CONTEXT_COMPILING",
+  setStartedAt: false,
+  setCompletedAt: false,
+  terminalErrorJson: null,
+  conflictError: `turn ${input.turnId} changed before context recompilation`,
+});
 
 /** Plan the RESPONSE_VALIDATING → VERIFYING entry. */
-export function planEnterVerifying(input: {
+export const planEnterVerifying = (input: {
   readonly turnId: string;
   readonly taskId: string;
   readonly proposalArtifact: string;
-}): TurnTransitionPlan {
-  return {
-    eventType: "turn.verifying",
-    aggregateType: "turn",
-    aggregateId: input.turnId,
-    correlationId: input.taskId,
-    payload: { phase: "VERIFY", proposal_artifact: input.proposalArtifact },
-    expectedStates: ["RESPONSE_VALIDATING"],
-    nextState: "VERIFYING",
-    setStartedAt: false,
-    setCompletedAt: false,
-    terminalErrorJson: null,
-    conflictError: `turn ${input.turnId} changed before verification`,
-  };
-}
+}): TurnTransitionPlan => ({
+  eventType: "turn.verifying",
+  aggregateType: "turn",
+  aggregateId: input.turnId,
+  correlationId: input.taskId,
+  payload: { phase: "VERIFY", proposal_artifact: input.proposalArtifact },
+  expectedStates: ["RESPONSE_VALIDATING"],
+  nextState: "VERIFYING",
+  setStartedAt: false,
+  setCompletedAt: false,
+  terminalErrorJson: null,
+  conflictError: `turn ${input.turnId} changed before verification`,
+});
 
 /** Plan the RESPONSE_VALIDATING|VERIFIED → FINALIZING entry. */
-export function planEnterFinalizing(input: {
+export const planEnterFinalizing = (input: {
   readonly turnId: string;
   readonly taskId: string | null;
   readonly after: "verification_admitted" | "verification_not_applicable" | "verification_unavailable" | "taskless_turn";
   readonly expectedState: "RESPONSE_VALIDATING" | "VERIFIED";
-}): TurnTransitionPlan {
-  return {
-    eventType: "turn.finalizing",
-    aggregateType: "turn",
-    aggregateId: input.turnId,
-    correlationId: input.taskId,
-    payload: { phase: "finalizing", after: input.after },
-    expectedStates: [input.expectedState],
-    nextState: "FINALIZING",
-    setStartedAt: false,
-    setCompletedAt: false,
-    terminalErrorJson: null,
-    conflictError: `turn ${input.turnId} changed before finalizing`,
-  };
-}
+}): TurnTransitionPlan => ({
+  eventType: "turn.finalizing",
+  aggregateType: "turn",
+  aggregateId: input.turnId,
+  correlationId: input.taskId,
+  payload: { phase: "finalizing", after: input.after },
+  expectedStates: [input.expectedState],
+  nextState: "FINALIZING",
+  setStartedAt: false,
+  setCompletedAt: false,
+  terminalErrorJson: null,
+  conflictError: `turn ${input.turnId} changed before finalizing`,
+});
 
 /** Verification outcome the turn completion record must reflect. */
 export type TurnCompletionVerification =
@@ -440,82 +430,74 @@ export interface TurnCompletedPayload {
 }
 
 /** Event emitted with a successful completion settlement. */
-export function turnCompletedEvent(input: {
+export const turnCompletedEvent = (input: {
   readonly turnId: string;
   readonly taskId: string | null;
   readonly payload: TurnCompletedPayload;
   readonly responseArtifactUri: string;
-}): { readonly eventType: "turn.completed"; readonly aggregateType: "turn"; readonly aggregateId: string; readonly correlationId: string | null; readonly payload: TurnCompletedPayload; readonly artifactRefs: readonly string[] } {
-  return {
-    eventType: "turn.completed",
-    aggregateType: "turn",
-    aggregateId: input.turnId,
-    correlationId: input.taskId,
-    payload: input.payload,
-    artifactRefs: [input.responseArtifactUri],
-  };
-}
+}): { readonly eventType: "turn.completed"; readonly aggregateType: "turn"; readonly aggregateId: string; readonly correlationId: string | null; readonly payload: TurnCompletedPayload; readonly artifactRefs: readonly string[] } => ({
+  eventType: "turn.completed",
+  aggregateType: "turn",
+  aggregateId: input.turnId,
+  correlationId: input.taskId,
+  payload: input.payload,
+  artifactRefs: [input.responseArtifactUri],
+});
 
 /** Plan the FINALIZING → COMPLETED settlement. */
-export function planComplete(input: {
+export const planComplete = (input: {
   readonly turnId: string;
-}): TurnTransitionPlan {
-  return {
-    eventType: "turn.completed",
-    aggregateType: "turn",
-    aggregateId: input.turnId,
-    correlationId: null,
-    payload: {},
-    expectedStates: ["FINALIZING"],
-    nextState: "COMPLETED",
-    setStartedAt: false,
-    setCompletedAt: true,
-    terminalErrorJson: null,
-    conflictError: `turn ${input.turnId} changed before completion settlement`,
-  };
-}
+}): TurnTransitionPlan => ({
+  eventType: "turn.completed",
+  aggregateType: "turn",
+  aggregateId: input.turnId,
+  correlationId: null,
+  payload: {},
+  expectedStates: ["FINALIZING"],
+  nextState: "COMPLETED",
+  setStartedAt: false,
+  setCompletedAt: true,
+  terminalErrorJson: null,
+  conflictError: `turn ${input.turnId} changed before completion settlement`,
+});
 
 /** Plan the VERIFYING → FAILED verification settlement. */
-export function planFailVerification(input: {
+export const planFailVerification = (input: {
   readonly turnId: string;
   readonly taskId: string | null;
   readonly reason: Readonly<Record<string, unknown>>;
-}): TurnTransitionPlan {
-  return {
-    eventType: "turn.failed",
-    aggregateType: "turn",
-    aggregateId: input.turnId,
-    correlationId: input.taskId,
-    payload: { reason: "verification_failed", ...input.reason },
-    expectedStates: ["VERIFYING"],
-    nextState: "FAILED",
-    setStartedAt: false,
-    setCompletedAt: true,
-    terminalErrorJson: JSON.stringify({ reason: "verification_failed", ...input.reason }),
-    conflictError: `turn ${input.turnId} changed during verification failure settlement`,
-  };
-}
+}): TurnTransitionPlan => ({
+  eventType: "turn.failed",
+  aggregateType: "turn",
+  aggregateId: input.turnId,
+  correlationId: input.taskId,
+  payload: { reason: "verification_failed", ...input.reason },
+  expectedStates: ["VERIFYING"],
+  nextState: "FAILED",
+  setStartedAt: false,
+  setCompletedAt: true,
+  terminalErrorJson: JSON.stringify({ reason: "verification_failed", ...input.reason }),
+  conflictError: `turn ${input.turnId} changed during verification failure settlement`,
+});
 
 /** Plan the VERIFYING → REPAIR_PENDING handoff to the repair controller. */
-export function planEnterRepairPending(input: {
+export const planEnterRepairPending = (input: {
   readonly turnId: string;
   readonly taskId: string;
   readonly payload: Readonly<Record<string, unknown>>;
-}): TurnTransitionPlan {
-  return {
-    eventType: "turn.repair_pending",
-    aggregateType: "turn",
-    aggregateId: input.turnId,
-    correlationId: input.taskId,
-    payload: input.payload,
-    expectedStates: ["VERIFYING"],
-    nextState: "REPAIR_PENDING",
-    setStartedAt: false,
-    setCompletedAt: false,
-    terminalErrorJson: null,
-    conflictError: `turn ${input.turnId} changed before repair scheduling`,
-  };
-}
+}): TurnTransitionPlan => ({
+  eventType: "turn.repair_pending",
+  aggregateType: "turn",
+  aggregateId: input.turnId,
+  correlationId: input.taskId,
+  payload: input.payload,
+  expectedStates: ["VERIFYING"],
+  nextState: "REPAIR_PENDING",
+  setStartedAt: false,
+  setCompletedAt: false,
+  terminalErrorJson: null,
+  conflictError: `turn ${input.turnId} changed before repair scheduling`,
+});
 
 /** Result of classifying a loop stop or thrown condition into a terminal. */
 export interface TerminalTurnClassification {
@@ -544,15 +526,16 @@ export interface TerminalClassificationInput {
 }
 
 /**
- * Map a loop stop (or the error that escaped the loop) onto the terminal
- * turn state, event, reason, and code. Pure: same input, same output.
+ * Map any loop terminal condition into its durable state, semantic event,
+ * error code, machine reason, and task-level disposition.
  *
  * Precedence mirrors the original inline chains exactly — engine stops
  * first, then typed errors (provider transport, policy, budget, ambiguous
  * settlement), then the generic loop failure. `turnFailureDisposition`
  * supplies the task-level consequence so the two vocabularies cannot drift.
  */
-export function classifyTerminalTurn(input: TerminalClassificationInput): TerminalTurnClassification {
+// skipcq: JS-R1005
+export const classifyTerminalTurn = (input: TerminalClassificationInput): TerminalTurnClassification => {
   const { stopKind } = input;
   const stopEnvelope = input.stopEnvelope;
   const ambiguous = input.ambiguousToolSettlement;
@@ -627,32 +610,30 @@ export function classifyTerminalTurn(input: TerminalClassificationInput): Termin
               ? "FAILED_VERIFICATION"
               : null;
   return { state, eventType, reason, code, ambiguousToolSettlement: ambiguous, evidenceOutcome };
-}
+};
 
 /**
  * The failure envelope published on the terminal event. Note the original
  * shape: `message` rides at the top level while `details` stays nested.
  */
-export function terminalTurnFailurePayload(
+export const terminalTurnFailurePayload = (
   classification: TerminalTurnClassification,
   envelope: LoopErrorEnvelope | null,
-): Readonly<Record<string, unknown>> {
-  return {
-    code: classification.code,
-    category: envelope?.category ?? null,
-    message: envelope?.message ?? null,
-    reason: classification.reason,
-    retryable: envelope?.retryable ?? false,
-    details: envelope?.details ?? null,
-  };
-}
+): Readonly<Record<string, unknown>> => ({
+  code: classification.code,
+  category: envelope?.category ?? null,
+  message: envelope?.message ?? null,
+  reason: classification.reason,
+  retryable: envelope?.retryable ?? false,
+  details: envelope?.details ?? null,
+});
 
 /**
  * Task-row data for a terminal stop: hard stops write the terminal status;
  * steerable failures return the task to ACTIVE/IMPLEMENT with no completedAt
  * or terminal reason, or the task becomes unsteerable.
  */
-export function taskRowDataForTerminalStop(input: {
+export const taskRowDataForTerminalStop = (input: {
   readonly taskStaysActive: boolean;
   readonly taskTerminalStatus: string | null;
   readonly failedTaskStatus: string;
@@ -668,7 +649,7 @@ export function taskRowDataForTerminalStop(input: {
   readonly phase: string;
   readonly completedAt: Date | null;
   readonly terminalReasonJson: string | null;
-} {
+} => {
   if (input.taskStaysActive) {
     return {
       status: "ACTIVE",
@@ -688,7 +669,7 @@ export function taskRowDataForTerminalStop(input: {
       details: input.failure.details,
     }),
   };
-}
+};
 
 /** Write model for one terminal settlement's guarded writes. */
 export interface TerminalSettlementPlan {
@@ -732,14 +713,14 @@ export const IMMUTABLE_TURN_STATES: readonly string[] = [
  * event-plus-rows transaction; the task-side consequence is planned by
  * `turnFailureDisposition` and applied by the same executor.
  */
-export function planTerminalTurnSettlement(input: {
+export const planTerminalTurnSettlement = (input: {
   readonly turnId: string;
   readonly classification: TerminalTurnClassification;
   /** Envelope of the typed engine stop, when the stop carried one. */
   readonly stopEnvelope: LoopErrorEnvelope | null;
   /** Envelope the loop classifier produced for a raw error. */
   readonly classifiedEnvelope: LoopErrorEnvelope;
-}): TerminalSettlementPlan {
+}): TerminalSettlementPlan => {
   const envelope = input.stopEnvelope;
   const classified = input.classifiedEnvelope;
   const message = envelope?.message ?? classified.message;
@@ -773,7 +754,7 @@ export function planTerminalTurnSettlement(input: {
       details,
     }),
   };
-}
+};
 
 // ─────────────── Provider-continuation re-arm (engine boundary) ─────────────
 //
@@ -783,24 +764,22 @@ export function planTerminalTurnSettlement(input: {
 // the coordinator.
 
 /** Plan the RESPONSE_VALIDATING → CONTEXT_COMPILING provider continuation. */
-export function planProviderContinuation(input: {
+export const planProviderContinuation = (input: {
   readonly turnId: string;
   readonly taskId: string;
-}): TurnTransitionPlan {
-  return {
-    eventType: "turn.context_compiling",
-    aggregateType: "turn",
-    aggregateId: input.turnId,
-    correlationId: input.taskId,
-    payload: { phase: "context_compiling", reason: "provider_continuation" },
-    expectedStates: ["RESPONSE_VALIDATING"],
-    nextState: "CONTEXT_COMPILING",
-    setStartedAt: false,
-    setCompletedAt: false,
-    terminalErrorJson: null,
-    conflictError: `turn ${input.turnId} changed before provider continuation`,
-  };
-}
+}): TurnTransitionPlan => ({
+  eventType: "turn.context_compiling",
+  aggregateType: "turn",
+  aggregateId: input.turnId,
+  correlationId: input.taskId,
+  payload: { phase: "context_compiling", reason: "provider_continuation" },
+  expectedStates: ["RESPONSE_VALIDATING"],
+  nextState: "CONTEXT_COMPILING",
+  setStartedAt: false,
+  setCompletedAt: false,
+  terminalErrorJson: null,
+  conflictError: `turn ${input.turnId} changed before provider continuation`,
+});
 
 /** The per-attempt bookkeeping a turn's executor accumulates. */
 export interface TurnAttemptLedger {
@@ -818,16 +797,14 @@ export interface TurnAttemptLedger {
   readonly toolSettlementEnteredFor: Set<string>;
 }
 
-export function createTurnAttemptLedger(): TurnAttemptLedger {
-  return {
-    declaredToolSchemasByAttempt: new Map(),
-    manifestIdByAttempt: new Map(),
-    predictedCacheByAttempt: new Map(),
-    predictedPromptByManifest: new Map(),
-    settlementByProviderCallId: new Map(),
-    toolSettlementEnteredFor: new Set(),
-  };
-}
+export const createTurnAttemptLedger = (): TurnAttemptLedger => ({
+  declaredToolSchemasByAttempt: new Map(),
+  manifestIdByAttempt: new Map(),
+  predictedCacheByAttempt: new Map(),
+  predictedPromptByManifest: new Map(),
+  settlementByProviderCallId: new Map(),
+  toolSettlementEnteredFor: new Set(),
+});
 
 /** Ports the executor needs to run one compiled attempt's commands. */
 export interface TurnCommandExecutorPorts {

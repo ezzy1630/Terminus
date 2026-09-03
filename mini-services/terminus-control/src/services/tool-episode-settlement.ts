@@ -64,7 +64,7 @@ export interface StandaloneToolSettlementInput {
     readonly hypothesisId?: string | null | undefined;
     readonly criterionIds?: readonly string[] | undefined;
     readonly objectiveStep?: string | null | undefined;
-  }) | undefined;
+  });
   readonly signal?: AbortSignal | null;
   /** The loop already rejected this call; settle the correction, run nothing. */
   // skipcq: JS-T1001
@@ -155,6 +155,7 @@ export const toolArgumentsExcerpt = (call: ParsedStandaloneToolCall): string => 
     : `${codePoints.slice(0, TOOL_ARGUMENTS_EXCERPT_MAX_CHARS - 1).join("")}…`;
 };
 /** `path → sha256` observations a settled result proves, bounded and clean. */
+// skipcq: JS-R1005
 export const observedSourceVersionsOf = (result: ToolResult<unknown>): Record<string, string> => {
   const sources: Record<string, string> = {};
   if (result.status !== "success" && result.status !== "partial") return sources;

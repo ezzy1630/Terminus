@@ -24,23 +24,22 @@ export interface ProviderAttemptIdentity {
   readonly providerIdempotencyKey: string;
 }
 
-function requireNonEmpty(name: string, value: string): string {
+const requireNonEmpty = (name: string, value: string): string => {
   if (value.trim() === "") throw new Error(`provider attempt identity ${name} must not be empty`);
   return value;
-}
+};
 
-export function providerAttemptIdempotencyKey(attemptId: string): string {
-  return `provider-attempt:${requireNonEmpty("attemptId", attemptId)}`;
-}
+export const providerAttemptIdempotencyKey = (attemptId: string): string =>
+  `provider-attempt:${requireNonEmpty("attemptId", attemptId)}`;
 
 /**
  * Derive identity only from durable, canonical inputs. The request artifact
  * hash is the content identity of the exact request bytes; hashing this
  * record avoids copying provider bodies into the operational database.
  */
-export function deriveProviderAttemptIdentity(
+export const deriveProviderAttemptIdentity = (
   input: ProviderAttemptIdentityInput,
-): ProviderAttemptIdentity {
+): ProviderAttemptIdentity => {
   const attemptId = requireNonEmpty("attemptId", input.attemptId);
   const identity = {
     schema: "terminus.provider-attempt-identity.v1",
@@ -57,4 +56,4 @@ export function deriveProviderAttemptIdentity(
     requestFingerprint: computeContentHash(canonicalJson(identity)),
     providerIdempotencyKey: providerAttemptIdempotencyKey(attemptId),
   };
-}
+};

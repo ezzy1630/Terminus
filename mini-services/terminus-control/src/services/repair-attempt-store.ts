@@ -27,25 +27,20 @@ export type RepairAttemptClaimDecision =
         | "lease_held_by_current_owner";
     };
 
-export function repairAttemptLeaseKey(attemptId: string): string {
-  return `terminus-repair-attempt:${attemptId}`;
-}
+export const repairAttemptLeaseKey = (attemptId: string): string =>
+  `terminus-repair-attempt:${attemptId}`;
 
-export function isRepairAttemptTerminal(state: string): state is RepairAttemptTerminalState {
-  return REPAIR_ATTEMPT_TERMINAL_STATES.includes(state as RepairAttemptTerminalState);
-}
+export const isRepairAttemptTerminal = (state: string): state is RepairAttemptTerminalState =>
+  REPAIR_ATTEMPT_TERMINAL_STATES.includes(state as RepairAttemptTerminalState);
 
-export function isRepairAttemptActive(state: string): boolean {
-  return REPAIR_ATTEMPT_ACTIVE_STATES.includes(state as (typeof REPAIR_ATTEMPT_ACTIVE_STATES)[number]);
-}
+export const isRepairAttemptActive = (state: string): boolean =>
+  REPAIR_ATTEMPT_ACTIVE_STATES.includes(state as (typeof REPAIR_ATTEMPT_ACTIVE_STATES)[number]);
 
-export function shouldDeferRepairParentRecovery(input: {
+export const shouldDeferRepairParentRecovery = (input: {
   readonly turnState: string;
   readonly hasActiveAttempt: boolean;
   readonly hasContinuation: boolean;
-}): boolean {
-  return input.turnState === "VERIFYING" && input.hasActiveAttempt && !input.hasContinuation;
-}
+}): boolean => input.turnState === "VERIFYING" && input.hasActiveAttempt && !input.hasContinuation;
 
 /**
  * Decide whether a persisted repair continuation may be claimed. A live lease
@@ -53,13 +48,13 @@ export function shouldDeferRepairParentRecovery(input: {
  * scheduler pass from starting a second agent loop before the in-process run
  * registry has been updated.
  */
-export function decideRepairAttemptClaim(input: {
+export const decideRepairAttemptClaim = (input: {
   readonly state: string;
   readonly repairTurnId: string | null;
   readonly lease: RepairLeaseSnapshot | null;
   readonly ownerInstance: string;
   readonly now: Date;
-}): RepairAttemptClaimDecision {
+}): RepairAttemptClaimDecision => {
   if (isRepairAttemptTerminal(input.state)) return { claimable: false, reason: "terminal" };
   if (input.repairTurnId === null) {
     return { claimable: false, reason: "missing_continuation" };
@@ -76,14 +71,14 @@ export function decideRepairAttemptClaim(input: {
     claimable: true,
     fencingToken: (input.lease?.fencingToken ?? 0) + 1,
   };
-}
+};
 
-export function repairAttemptStateForTurn(input: {
+export const repairAttemptStateForTurn = (input: {
   readonly turnState: string;
   readonly taskStatus: string | null;
   readonly hasSuccess: boolean;
   readonly hasNextAttempt: boolean;
-}): { readonly state: RepairAttemptTerminalState; readonly reason: string } {
+}): { readonly state: RepairAttemptTerminalState; readonly reason: string } => {
   if (input.hasSuccess || input.turnState === "COMPLETED" || input.taskStatus === "COMPLETED") {
     return { state: "SUCCEEDED", reason: "repair_turn_completed" };
   }
@@ -97,4 +92,4 @@ export function repairAttemptStateForTurn(input: {
     return { state: "ABORTED", reason: "repair_turn_aborted" };
   }
   return { state: "FAILED", reason: "repair_turn_terminal_without_completion" };
-}
+};

@@ -79,7 +79,7 @@ export interface TaskProjectionDependencies<TTransaction> {
   readonly bridge: TaskProjectionBridge<TTransaction>;
 }
 
-export function parseAllowedScope(value: unknown): V1AllowedScopeProjection {
+export const parseAllowedScope = (value: unknown): V1AllowedScopeProjection => {
   const raw = value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
@@ -91,12 +91,12 @@ export function parseAllowedScope(value: unknown): V1AllowedScopeProjection {
     write_paths: strings(raw.write_paths ?? raw.writePaths),
     external_systems: strings(raw.external_systems ?? raw.externalSystems),
   };
-}
+};
 
-export function scopeExpansionResources(
+export const scopeExpansionResources = (
   previous: V1AllowedScopeProjection,
   next: V1AllowedScopeProjection,
-): readonly string[] {
+): readonly string[] => {
   const additions = (prefix: string, before: readonly string[], after: readonly string[]): readonly string[] => {
     const known = new Set(before);
     return after.filter((value) => !known.has(value)).map((value) => `${prefix}:${value}`);
@@ -106,18 +106,18 @@ export function scopeExpansionResources(
     ...additions("write", previous.write_paths, next.write_paths),
     ...additions("external", previous.external_systems, next.external_systems),
   ];
-}
+};
 
-export function v2PathScopeProjection(contract: TaskContractV2): V1AllowedScopeProjection {
+export const v2PathScopeProjection = (contract: TaskContractV2): V1AllowedScopeProjection => {
   const scope = contract.scope.pathScope;
   return {
     read_paths: scope?.readPaths ?? [],
     write_paths: scope?.writePaths ?? [],
     external_systems: scope?.externalSystems ?? [],
   };
-}
+};
 
-function v1TaskStatusToV2(status: string): TaskV2["status"] {
+const v1TaskStatusToV2 = (status: string): TaskV2["status"] => {
   switch (status) {
     case "DRAFT": return "DRAFT";
     case "ACTIVE": return "RUNNING";
@@ -133,13 +133,13 @@ function v1TaskStatusToV2(status: string): TaskV2["status"] {
       return "FAILED";
     default: return "BLOCKED";
   }
-}
+};
 
-function v2TaskStatusToV1(status: TaskV2["status"]): {
+const v2TaskStatusToV1 = (status: TaskV2["status"]): {
   readonly status: string;
   readonly phase: string;
   readonly completedAt: Date | null;
-} {
+} => {
   switch (status) {
     case "DRAFT":
     case "READY": return { status: "DRAFT", phase: "INTAKE", completedAt: null };
@@ -155,9 +155,9 @@ function v2TaskStatusToV1(status: TaskV2["status"]): {
     case "PARTIAL":
     case "FAILED": return { status: "FAILED", phase: "COMPLETE", completedAt: new Date() };
   }
-}
+};
 
-function statusesAgree(v1Status: string, v2Status: TaskV2["status"]): boolean {
+const statusesAgree = (v1Status: string, v2Status: TaskV2["status"]): boolean => {
   switch (v1Status) {
     case "DRAFT": return v2Status === "DRAFT" || v2Status === "READY";
     case "ACTIVE": return v2Status === "RUNNING";
@@ -172,17 +172,17 @@ function statusesAgree(v1Status: string, v2Status: TaskV2["status"]): boolean {
     case "POLICY_DENIED": return v2Status === "FAILED" || v2Status === "PARTIAL";
     default: return false;
   }
-}
+};
 
-function parseJson<T>(value: string, fallback: T): T {
+const parseJson = <T>(value: string, fallback: T): T => {
   try {
     return JSON.parse(value) as T;
   } catch {
     return fallback;
   }
-}
+};
 
-function jsonSafe(value: unknown): unknown {
+const jsonSafe = (value: unknown): unknown => {
   if (typeof value === "bigint") return value.toString();
   if (Array.isArray(value)) return value.map(jsonSafe);
   if (value instanceof Date) return value.toISOString();
@@ -194,22 +194,21 @@ function jsonSafe(value: unknown): unknown {
     return safe;
   }
   return value;
-}
+};
 
-function numberOr(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
+const numberOr = (value: unknown, fallback: number): number =>
+  typeof value === "number" && Number.isFinite(value) ? value : fallback;
 
-function bigintOr(value: unknown, fallback: bigint): bigint {
+const bigintOr = (value: unknown, fallback: bigint): bigint => {
   if (typeof value === "bigint" && value >= 0n) return value;
   if (typeof value === "string" && /^\d+$/.test(value)) return BigInt(value);
   if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
     return BigInt(value);
   }
   return fallback;
-}
+};
 
-function normalizeRetainedContract(value: unknown): unknown {
+const normalizeRetainedContract = (value: unknown): unknown => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
   const contract = value as Record<string, unknown>;
   const constraints = contract.constraints;
@@ -224,7 +223,7 @@ function normalizeRetainedContract(value: unknown): unknown {
       costMicros: bigintOr(constraintRecord.costMicros, -1n),
     },
   };
-}
+};
 
 /**
  * Projects committed v1 task rows into the durable v2 event stream and keeps
