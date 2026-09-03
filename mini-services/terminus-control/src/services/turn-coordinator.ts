@@ -426,6 +426,7 @@ export interface TurnCompletedPayload {
   readonly summaryTruncated: boolean;
   readonly continuation: string | null;
   readonly reasoning: string | null;
+  // skipcq: JS-T1001
   readonly recovered?: true | undefined;
 }
 
@@ -857,7 +858,6 @@ export class TurnCommandExecutor {
       if (updated !== 1) {
         throw new Error(`turn ${input.turnId} changed before provider continuation`);
       }
-      void transaction;
     }));
   }
 }

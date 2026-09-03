@@ -48,6 +48,7 @@ export const shouldDeferRepairParentRecovery = (input: {
  * scheduler pass from starting a second agent loop before the in-process run
  * registry has been updated.
  */
+// skipcq: JS-R1005
 export const decideRepairAttemptClaim = (input: {
   readonly state: string;
   readonly repairTurnId: string | null;
@@ -73,6 +74,7 @@ export const decideRepairAttemptClaim = (input: {
   };
 };
 
+// skipcq: JS-R1005
 export const repairAttemptStateForTurn = (input: {
   readonly turnState: string;
   readonly taskStatus: string | null;

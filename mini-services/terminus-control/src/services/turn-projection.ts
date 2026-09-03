@@ -20,7 +20,9 @@ import type { TurnRow } from "./turn-coordinator.js";
 
 export type TurnRequestBudgetWire = NonNullable<ReturnType<typeof turnRequestBudgetWire>>;
 export interface TurnProjectionRow extends TurnRow {
+  // skipcq: JS-T1001
   readonly requestedBudgetJson?: string | null | undefined;
+  // skipcq: JS-T1001
   readonly terminalErrorJson?: string | null | undefined;
 }
 
@@ -40,7 +42,9 @@ export interface ProviderAttemptProjectionRow extends AttemptCostRow {
 }
 
 export interface TurnProjectionState {
+  // skipcq: JS-T1001
   readonly waitingReason?: string | null | undefined;
+  // skipcq: JS-T1001
   readonly recoveryPending?: boolean | undefined;
 }
 
