@@ -20,11 +20,11 @@ describe("tool episode settlement core", () => {
     const settled = observedSourceVersionsOf(result({
       status: "success",
       sourceVersions: {
-        "src/a.ts": "sha256:" + "a".repeat(64),
-        "": "sha256:" + "b".repeat(64), // empty path dropped
-        [("x".repeat(4_100))]: "sha256:" + "c".repeat(64), // oversized path dropped
+        "src/a.ts": `sha256:${"a".repeat(64)}`,
+        "": `sha256:${"b".repeat(64)}`, // empty path dropped
+        [("x".repeat(4_100))]: `sha256:${"c".repeat(64)}`, // oversized path dropped
         "src/b.ts": "not-a-hash", // malformed hash dropped
-        "src/c.ts": "sha256:" + "z".repeat(64), // non-hex dropped
+        "src/c.ts": `sha256:${"z".repeat(64)}`, // non-hex dropped
       },
     }));
     expect(Object.keys(settled)).toEqual(["src/a.ts"]);
@@ -71,7 +71,7 @@ describe("tool episode settlement core", () => {
       sessionId: "s1",
       workspaceId: "w1",
       contractVersion: 1,
-      contractHash: "sha256:" + "0".repeat(64),
+      contractHash: `sha256:${"0".repeat(64)}`,
       artifactClient: {} as never,
       observedSources: {} as never,
       capabilitySession: {} as never,

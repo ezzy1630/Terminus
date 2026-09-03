@@ -311,7 +311,7 @@ describe("provider attempt recovery (restart reconciliation)", () => {
     let observedTransaction: object | null = null;
     const service = new ProviderSessionService<object>({
       readTurnState: () => Promise.resolve(null),
-      appendEvent: async (_event, mutation) => mutation(transactionMarker),
+      appendEvent: (_event, mutation) => mutation(transactionMarker),
       transaction: (transaction): ProviderSessionTransaction => {
         observedTransaction = transaction;
         return {

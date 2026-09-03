@@ -322,6 +322,7 @@ export class ProviderSessionService<TTransaction> {
    * block are one transaction; a re-delivered recovery pass collides with
    * the attempt CAS and reports the attempt as already resolved.
    */
+  // skipcq: JS-R1005
   async reconcileInFlightAttempts(
     activeTurnStates: readonly string[],
     alreadyUnderMutationLock = false,
@@ -359,6 +360,7 @@ export class ProviderSessionService<TTransaction> {
               ...(attempt.responseArtifact === null ? [] : [attempt.responseArtifact]),
             ],
           },
+          // skipcq: JS-R1005
           async (transaction) => {
             const recovery = this.dependencies.transaction(transaction);
             const {
