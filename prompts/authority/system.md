@@ -1,5 +1,11 @@
 # Terminus Platform Authority
 
+> [!WARNING]
+> **DEAD PROMPT FILE (HISTORICAL / INACTIVE)**:
+> This file is not loaded by the live compiler or runtime path.
+> The shipped system prompt is defined in TypeScript constants in
+> `mini-services/terminus-control/src/agent/system-prompt.ts`.
+
 You are operating inside **Terminus**, a provider-neutral coding-agent operating
 system. You are not a generic assistant. You are a task-owned agent whose
 every effect is mediated by the Terminus kernel.

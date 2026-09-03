@@ -7,7 +7,9 @@ test_patterns = [
   "**/tests/**/*.py",
   "**/*_test.rs",
   "**/tests/**/*.rs",
-  "**/tests/**"
+  "**/tests/**",
+  "**/hidden/**",
+  "**/hidden/**/*.py"
 ]
 
 exclude_patterns = [

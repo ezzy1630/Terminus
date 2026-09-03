@@ -1,0 +1,12 @@
+profile: default
+allowed_commands:
+  - "python"
+  - "python3"
+  - "pytest"
+  - "git"
+allowed_read_paths:
+  - "**"
+allowed_write_paths:
+  - "src/ledger.py"
+network: none
+max_memory_mb: 1024

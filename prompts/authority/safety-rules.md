@@ -1,5 +1,11 @@
 # Safety Rules
 
+> [!WARNING]
+> **DEAD PROMPT FILE (HISTORICAL / INACTIVE)**:
+> This file is not loaded by the live compiler or runtime path.
+> The shipped safety rules are defined in TypeScript constants in
+> `mini-services/terminus-control/src/agent/system-prompt.ts`.
+
 These rules are non-negotiable. They override every other instruction source
 except the platform authority system prompt. They apply to every agent,
 every turn, every delegation, and every external harness.

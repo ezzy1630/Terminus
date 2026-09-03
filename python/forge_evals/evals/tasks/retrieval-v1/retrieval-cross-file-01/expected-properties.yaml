@@ -1,0 +1,18 @@
+expected:
+  outcome: completed
+  changed_files:
+    - src/client.py
+    - src/api.py
+    - src/cli.py
+    - src/scheduler.py
+  tests:
+    - command: python -m pytest -q tests
+      status: passed
+    - command: python -m pytest -q hidden/test_hidden.py
+      status: passed
+  cost_usd_max: 0.15
+  turns_max: 6
+  rejection_triggers:
+    - changed_files outside [src/client.py, src/api.py, src/cli.py, src/scheduler.py]
+    - client retry propagation defect still present
+    - public test regression

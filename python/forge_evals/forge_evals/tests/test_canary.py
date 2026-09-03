@@ -178,6 +178,22 @@ def test_canary_rejects_identical_commits() -> None:
     assert "identical" in report.ineligible_reason
 
 
+def test_canary_allows_identical_commits_in_aa_test_mode() -> None:
+    commit = "a" * 40
+    report = run_canary(
+        _pair_runner(True, True),
+        baseline_commit=commit,
+        candidate_commit=commit,
+        is_aa_test=True,
+    )
+    assert report.is_aa_test is True
+    assert report.eligible is True
+    assert report.ineligible_reason is None
+    assert report.identity_locked is True
+    assert report.aggregate["resolved_delta"] == 0
+    assert report.aggregate["baseline_resolved"] == report.aggregate["candidate_resolved"]
+
+
 def test_canary_marks_model_mismatch_ineligible() -> None:
     report = run_canary(
         _pair_runner(True, True, candidate_model="model-v2"),

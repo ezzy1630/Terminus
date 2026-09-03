@@ -442,3 +442,6 @@ function sortJson(value: unknown): unknown {
   }
   return value;
 }
+
+export * from "./bm25.js";
+

@@ -1,0 +1,31 @@
+suite: retrieval-v1
+task: retrieval-cross-file-01
+cohort: retrieval-v1
+title: Cross-file feature — ApiClient retry parameter propagation across call sites
+source_commit: fixture-retrieval-cross-file-01-v1
+image_digest: local:python-3.12-pytest-8
+timeout: 600
+budget:
+  max_cost_usd: 1.0
+  max_wall_seconds: 600
+  max_tool_calls: 50
+  max_turns: 20
+allowed_network: []
+secrets: {}
+grader_version: 1.0.0
+rationale: >
+  Retrieval archetype 3: Cross-file task requiring references or dependencies.
+  Updating ApiClient.request in src/client.py requires finding and updating all call sites
+  across src/api.py, src/cli.py, and src/scheduler.py.
+acceptance_criteria:
+  - id: tests-pass
+    statement: the full test suite passes including hidden cross-file integration checks
+    verification_hint: "command: python -m pytest -q"
+  - id: scope
+    statement: src/client.py and caller files were updated consistently
+    verification_hint: "command: git status --porcelain"
+grader:
+  entrypoint: grader/run.py
+  protocol: json_stdio
+  timeout_seconds: 60
+risk_class: normal

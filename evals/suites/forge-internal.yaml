@@ -8,7 +8,7 @@ suite:
     evals/tasks/.
   source: internal
   license: proprietary
-  task_count: 12
+  task_count: 4
   default_timeout_seconds: 600
   default_budget:
     model_micros: 1500000

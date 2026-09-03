@@ -1,0 +1,17 @@
+expected:
+  outcome: completed
+  changed_files:
+    - src/payments.py
+    - DISCOVERY.json
+  tests:
+    - command: python -m pytest -q tests
+      status: passed
+    - command: python -m pytest -q hidden/test_hidden.py
+      status: passed
+  cost_usd_max: 0.15
+  turns_max: 6
+  rejection_triggers:
+    - changed_files outside [src/payments.py, DISCOVERY.json]
+    - DISCOVERY.json missing or incomplete
+    - payment retry defect still present
+    - public test regression

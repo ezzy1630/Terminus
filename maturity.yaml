@@ -64,7 +64,7 @@ components:
   - { id: terminus-egress, kind: rust-crate, path: crates/terminus-egress, tier: experimental,
       basis: "L4 broker real (DNS/IP/port/scheme/bytes); no L7 intent semantics yet (audit 4.7)" }
   - { id: terminus-code-intel, kind: rust-crate, path: crates/terminus-code-intel, tier: experimental,
-      basis: "Tree-sitter symbol index with basic tests" }
+      basis: "heuristic symbol index with basic tests" }
   - { id: terminus-extension-runtime, kind: rust-crate, path: crates/terminus-extension-runtime, tier: stub,
       basis: "WASI execution is unavailable without Wasmtime; invocation fails closed with an unavailable error" }
   - { id: terminus-git, kind: rust-crate, path: crates/terminus-git, tier: experimental,

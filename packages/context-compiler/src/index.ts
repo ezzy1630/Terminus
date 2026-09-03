@@ -158,6 +158,14 @@ export type {
   RetrievalSelectionMetrics,
 } from "./retrieval-metrics.js";
 
+export * from "./bm25.js";
+import {
+  tokenizeForBm25,
+  computeDocumentFrequencies,
+  computeAvgDocTokens,
+  scoreDocumentBm25,
+} from "./bm25.js";
+
 export {
   buildHandoffBundle,
   formatHandoffBundle,
@@ -2380,7 +2388,9 @@ export class LexicalRetrieval implements RetrievalPipeline {
       content: this.index.get(p) ?? "",
       version: this.index.versions?.[p] ?? null,
     }));
-    const df = computeDocumentFrequencies(docs.map((d) => d.content));
+    const tokenizedDocs = docs.map((d) => tokenizeForBm25(d.content));
+    const df = computeDocumentFrequencies(tokenizedDocs);
+    const avgDocTokens = computeAvgDocTokens(tokenizedDocs);
     const N = Math.max(1, docs.length);
     const results: RetrievalResult[] = [];
     const seenFragmentIds = new Set<string>();
@@ -2410,27 +2420,20 @@ export class LexicalRetrieval implements RetrievalPipeline {
         }
         continue;
       }
-      // 2. Lexical BM25-style scoring.
-      const qTokens = tokenize(q.text);
+      // 2. Lexical BM25-style scoring with token-length normalization.
+      const qTokens = tokenizeForBm25(q.text);
       if (qTokens.length === 0) continue;
       const scored = docs
-        .map((d) => {
-          const tfMap = termFrequencies(d.content);
-          let score = 0;
-          for (const term of qTokens) {
-            const tf = tfMap.get(term) ?? 0;
-            if (tf === 0) continue;
-            const docFreq = df.get(term) ?? 0;
-            const idf = Math.log(1 + (N - docFreq + 0.5) / (docFreq + 0.5));
-            const k1 = 1.5;
-            const b = 0.75;
-            const dl = d.content.length;
-            const avgdl = avgDocLength(docs);
-            const denom = tf + k1 * (1 - b + b * (dl / Math.max(1, avgdl)));
-            score += idf * (tf * (k1 + 1)) / Math.max(1, denom);
-          }
-          return { doc: d, score };
-        })
+        .map((d, idx) => ({
+          doc: d,
+          score: scoreDocumentBm25({
+            queryTokens: qTokens,
+            docTokens: tokenizedDocs[idx]!,
+            docFrequencies: df,
+            corpusSize: N,
+            avgDocTokens,
+          }),
+        }))
         .filter((s) => s.score > 0)
         .sort((a, b) => b.score - a.score)
         .slice(0, 5);
@@ -2541,42 +2544,7 @@ export class LexicalRetrieval implements RetrievalPipeline {
   }
 }
 
-/** Tokenize a string for BM25 scoring. */
-function tokenize(text: string): readonly string[] {
-  return text
-    .toLowerCase()
-    .split(/[^a-z0-9_]+/)
-    .filter((t) => t.length > 1);
-}
 
-/** Compute term frequencies for a document. */
-function termFrequencies(content: string): Map<string, number> {
-  const map = new Map<string, number>();
-  for (const t of tokenize(content)) {
-    map.set(t, (map.get(t) ?? 0) + 1);
-  }
-  return map;
-}
-
-/** Compute document frequencies across a corpus. */
-function computeDocumentFrequencies(docs: readonly string[]): Map<string, number> {
-  const map = new Map<string, number>();
-  for (const d of docs) {
-    const seen = new Set<string>();
-    for (const t of tokenize(d)) {
-      if (seen.has(t)) continue;
-      seen.add(t);
-      map.set(t, (map.get(t) ?? 0) + 1);
-    }
-  }
-  return map;
-}
-
-/** Average document length (in characters) across a corpus. */
-function avgDocLength(docs: readonly { readonly content: string }[]): number {
-  if (docs.length === 0) return 1;
-  return docs.reduce((s, d) => s + d.content.length, 0) / docs.length;
-}
 
 /** Extract a snippet around the first matching token in the content. */
 function extractSnippet(content: string, queryTokens: readonly string[], windowSize: number): string {
