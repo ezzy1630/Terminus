@@ -18,7 +18,8 @@ const LOW_RISK_PATH = /(^|\/)(docs?|examples?|tests?|fixtures?)(\/|$)|\.(md|mdx|
  * observed mutation surface. Ambiguous mutations are ordinary code (Tier 2),
  * never Tier 1.
  */
-export function classifyVerificationTier(input: VerificationTierInput): VerificationTierDecision {
+// skipcq: JS-R1005
+export const classifyVerificationTier = (input: VerificationTierInput): VerificationTierDecision => {
   const paths = [...new Set(input.changedFiles.filter((path) => path.trim().length > 0))];
   if (paths.length === 0) {
     return { tier: 0, reason: "no workspace mutation was observed" };

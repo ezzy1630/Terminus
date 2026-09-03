@@ -501,14 +501,15 @@ export const resolvePredicateCommand = (
   };
 };
 
-async function runKernelPredicate(
+// skipcq: JS-R1005
+const runKernelPredicate = async (
   clients: KernelUdsClients,
   baseContext: RequestContext,
   workspaceId: string,
   request: Parameters<PredicateCommandRunner["run"]>[0],
   catalog: VerificationRunnerCatalog,
   workspaceRoot: string | null = null,
-): Promise<PredicateCommandOutcome> {
+): Promise<PredicateCommandOutcome> => {
   if (request.signal?.aborted) {
     throw new Error("verification predicate aborted before kernel start");
   }

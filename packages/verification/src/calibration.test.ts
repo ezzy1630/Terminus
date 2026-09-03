@@ -23,7 +23,7 @@ describe("verification calibration catalog", () => {
     expect(catalog.schema_version).toBe(1);
     expect(catalog.cases.length).toBe(8);
 
-    const ids = catalog.cases.map((c) => c.id);
+    const ids = catalog.cases.map((caseItem) => caseItem.id);
     expect(ids).toContain("unchanged-observable-answer");
     expect(ids).toContain("isolated-doc-update");
     expect(ids).toContain("ordinary-code-correct");
