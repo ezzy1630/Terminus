@@ -97,33 +97,6 @@ interface KernelCommandOutcome {
   readonly stderr: string;
 }
 
-/**
- * Run verification commands through the kernel ProcessService. The control
- * plane never receives a direct process-spawn escape hatch.
- */
-export function createKernelPredicateRunner(
-  clients: KernelUdsClients,
-  baseContext: RequestContext,
-  workspaceId: string,
-  /**
-   * Repository-derived commands (H3). Read lazily so the runner picks up the
-   * signals discovered during the turn it is verifying. When it resolves to an
-   * empty catalog every derived predicate reports `skipped`, never `fail`.
-   */
-  runnerCatalog: () => VerificationRunnerCatalog = () => ({}),
-  /**
-   * Host path of the workspace, so the repository's own tool directories
-   * (`.venv/bin`, `node_modules/.bin`) resolve exactly as they do for the
-   * agent's `exec`. Without it `python -m pytest` ran the host interpreter,
-   * which has no pytest, and every derived check failed for the wrong reason.
-   */
-  workspaceRoot: string | null = null,
-): PredicateCommandRunner {
-  return {
-    run: (request) => runKernelPredicate(clients, baseContext, workspaceId, request, runnerCatalog(), workspaceRoot),
-  };
-}
-
 export async function resolveKernelEnvironmentDigest(
   clients: KernelUdsClients,
   signal?: AbortSignal | null,
@@ -550,7 +523,21 @@ const runKernelPredicate = async (
       timeoutMs: request.timeoutMs,
     },
   };
-}
+};
+
+/**
+ * Run verification commands through the kernel ProcessService. The control
+ * plane never receives a direct process-spawn escape hatch.
+ */
+export const createKernelPredicateRunner = (
+  clients: KernelUdsClients,
+  baseContext: RequestContext,
+  workspaceId: string,
+  runnerCatalog: () => VerificationRunnerCatalog = () => ({}),
+  workspaceRoot: string | null = null,
+): PredicateCommandRunner => ({
+  run: (request) => runKernelPredicate(clients, baseContext, workspaceId, request, runnerCatalog(), workspaceRoot),
+});
 
 function nodeCommandResolution(
   node: VerificationNode,

@@ -351,6 +351,7 @@ const corruptResultsForCase = (
   }
 };
 
+// skipcq: JS-R1005
 const expectedDenial = (
   outcome: CalibrationCase["expected_outcome"],
 ): CompletionDenialReason | null => {

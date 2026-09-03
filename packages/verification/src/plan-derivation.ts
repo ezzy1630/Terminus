@@ -121,30 +121,30 @@ const GENERATED_PATTERN = /(^|[/_.-])generated([/_.-]|$)|\.gen\.[^.]+$/i;
 const UI_PATTERN = /(^|[/_.-])(app|apps|components|pages|ui|views)([/_.-]|$)|\.(css|html|scss|tsx|jsx|vue)$/i;
 const SECURITY_PATTERN = /(auth|credential|secret|sandbox|permission|policy|security|token)/i;
 
-function uniqueSorted(values: readonly string[]): readonly string[] {
-  return [...new Set(values.filter((value) => value.trim().length > 0))].sort();
-}
+const uniqueSorted = (values: readonly string[]): readonly string[] =>
+  [...new Set(values.filter((value) => value.trim().length > 0))].sort();
 
-function extensionOf(path: string): string {
+const extensionOf = (path: string): string => {
   const dot = path.lastIndexOf(".");
   return dot < 0 ? "" : path.slice(dot).toLowerCase();
-}
+};
 
-function slug(value: string): string {
+const slug = (value: string): string => {
   const result = value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   return result.length > 0 ? result.slice(0, 48) : "check";
-}
+};
 
-function firstPaths(signals: VerificationDerivationSignals): readonly string[] {
+const firstPaths = (signals: VerificationDerivationSignals): readonly string[] => {
   const paths = uniqueSorted(signals.changedFiles);
   return paths.length > 0 ? paths : ["."];
-}
+};
 
-function predicateFromHint(hint: string, hasUiPaths: boolean): {
+// skipcq: JS-R1005
+const predicateFromHint = (hint: string, hasUiPaths: boolean): {
   readonly predicateType: PredicateTypeName;
   readonly command: string | undefined;
   readonly reason: string;
-} {
+} => {
   const normalized = hint.trim().toLowerCase();
   const commandMatch = /^(?:command|test|run):\s*(.+)$/i.exec(hint.trim());
   if (commandMatch?.[1] !== undefined) {
@@ -224,23 +224,23 @@ const TEST_CLASS_PREDICATES: ReadonlySet<string> = new Set([
   PredicateType.PERFORMANCE_THRESHOLD,
 ]);
 
-export function timeoutFor(
+export const timeoutFor = (
   predicateType: PredicateTypeName,
   budgetSeconds?: number | undefined,
-): number {
+): number => {
   const testClass = TEST_CLASS_PREDICATES.has(predicateType);
   const floor = testClass ? TEST_PREDICATE_TIMEOUT_FLOOR_MS : STATIC_PREDICATE_TIMEOUT_FLOOR_MS;
   const ceiling = testClass ? TEST_PREDICATE_TIMEOUT_CEILING_MS : STATIC_PREDICATE_TIMEOUT_CEILING_MS;
   if (budgetSeconds === undefined || !Number.isFinite(budgetSeconds) || budgetSeconds <= 0) return floor;
   return Math.min(ceiling, Math.max(floor, Math.round(budgetSeconds * 1_000)));
-}
+};
 
-function makeNode(
+const makeNode = (
   input: VerificationPlanDerivationInput,
   draft: NodeDraft,
   rationale: Map<string, readonly string[]>,
   verificationTier: VerificationTier,
-): VerificationNode {
+): VerificationNode => {
   const id = `${slug(draft.label)}_${input.idSource()}`;
   const observation = {
     derivationVersion: "terminus.verification.plan.v1",
@@ -287,9 +287,10 @@ function makeNode(
     retryPolicy: { maxAttempts: 1, backoffMs: 0, flakeIdentity: null },
     acceptanceCriterionId: draft.criterionId,
   };
-}
+};
 
-function auxiliaryDrafts(
+// skipcq: JS-R1005
+const auxiliaryDrafts = (
   input: VerificationPlanDerivationInput,
   paths: readonly string[],
   signals: {
@@ -303,7 +304,7 @@ function auxiliaryDrafts(
     readonly hasSecurity: boolean;
   },
   tier: VerificationTier,
-): readonly NodeDraft[] {
+): readonly NodeDraft[] => {
   const required = input.mode === "admission";
   const isTier1 = tier === 1;
   const drafts: NodeDraft[] = [];
@@ -434,9 +435,10 @@ function auxiliaryDrafts(
   return drafts;
 }
 
-export function deriveVerificationNodes(
+// skipcq: JS-R1005
+export const deriveVerificationNodes = (
   input: VerificationPlanDerivationInput,
-): VerificationPlanDerivation {
+): VerificationPlanDerivation => {
   const changedFiles = uniqueSorted(input.signals.changedFiles);
   const projectFiles = uniqueSorted(input.signals.projectFiles ?? []);
   const paths = firstPaths(input.signals);
@@ -569,4 +571,4 @@ export function deriveVerificationNodes(
     completionExpression: expressionIds.join(" && "),
     rationale,
   };
-}
+};
