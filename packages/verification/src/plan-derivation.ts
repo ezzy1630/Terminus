@@ -224,6 +224,7 @@ const TEST_CLASS_PREDICATES: ReadonlySet<string> = new Set([
   PredicateType.PERFORMANCE_THRESHOLD,
 ]);
 
+// skipcq: JS-R1005
 export const timeoutFor = (
   predicateType: PredicateTypeName,
   budgetSeconds?: number | undefined,
@@ -235,6 +236,7 @@ export const timeoutFor = (
   return Math.min(ceiling, Math.max(floor, Math.round(budgetSeconds * 1_000)));
 };
 
+// skipcq: JS-R1005
 const makeNode = (
   input: VerificationPlanDerivationInput,
   draft: NodeDraft,
