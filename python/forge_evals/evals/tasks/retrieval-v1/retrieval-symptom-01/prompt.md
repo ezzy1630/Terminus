@@ -14,3 +14,4 @@ Investigate the codebase to diagnose and resolve this bug:
    }
    ```
 5. Ensure all existing and new tests pass with `python -m pytest -q`.
+6. Only modify `src/payments.py` and write `DISCOVERY.json`. Do not edit tests or any other files.

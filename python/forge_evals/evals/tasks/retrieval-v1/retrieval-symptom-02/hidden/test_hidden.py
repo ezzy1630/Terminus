@@ -15,11 +15,13 @@ def test_batch_with_comments_and_whitespace():
     
     """
     items = parse_batch_items(input_text)
-    assert items == [
+    expected = [
         {"item_id": 101, "quantity": 5},
         {"item_id": 102, "quantity": 12},
         {"item_id": 103, "quantity": 99},
     ]
+    if items != expected:
+        raise AssertionError(f"Expected {expected}, got {items}")
 
 
 def test_all_empty_or_comments():
@@ -28,4 +30,5 @@ def test_all_empty_or_comments():
     # Nothing else
     
     """
-    assert parse_batch_items(input_text) == []
+    if parse_batch_items(input_text) != []:
+        raise AssertionError("Expected empty list for empty/comments input")

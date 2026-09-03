@@ -1,15 +1,17 @@
 """Deterministic grader for retrieval-v1/retrieval-symptom-01.
 
 Verifies:
-1. DISCOVERY.json correctly identifies src/payments.py and charge_with_retry
-2. Full test suite (public + hidden timeout retry test) passes (returncode == 0)
-3. Scope: only src/payments.py and DISCOVERY.json changed
+1. DISCOVERY.json correctly identifies src/payments.py, charge_with_retry, and non-empty root_cause
+2. Hidden retry tests pass (run first to prevent tampering)
+3. Public tests pass (returncode == 0)
+4. Scope: only src/payments.py and DISCOVERY.json changed
 Does not check for "PASS" in stdout.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +23,7 @@ def _run(workdir: Path, *args: str) -> tuple[bool, str]:
         cwd=workdir,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=60,
         check=False,
     )
     output = (result.stdout + result.stderr).strip()
@@ -29,19 +31,50 @@ def _run(workdir: Path, *args: str) -> tuple[bool, str]:
 
 
 def _changed_files(workdir: Path) -> set[str]:
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
+    git_bin = shutil.which("git") or "git"
+    # Check working tree (uncommitted/staged)
+    status_proc = subprocess.run(
+        [git_bin, "status", "--porcelain"],
         cwd=workdir,
         capture_output=True,
         text=True,
         timeout=20,
         check=False,
     )
-    return {
+    status_files = {
         line[3:].strip()
-        for line in result.stdout.splitlines()
+        for line in status_proc.stdout.splitlines()
         if len(line) >= 3 and not line[3:].strip().startswith("hidden/")
     }
+
+    # Check committed changes against initial/base commit
+    log_proc = subprocess.run(
+        [git_bin, "log", "--reverse", "--format=%H"],
+        cwd=workdir,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    commits = [line.strip() for line in log_proc.stdout.splitlines() if line.strip()]
+    diff_files: set[str] = set()
+    if commits:
+        base_commit = commits[0]
+        diff_proc = subprocess.run(
+            [git_bin, "diff", "--name-only", base_commit, "HEAD"],
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        diff_files = {
+            line.strip()
+            for line in diff_proc.stdout.splitlines()
+            if line.strip() and not line.strip().startswith("hidden/")
+        }
+
+    return status_files | diff_files
 
 
 def main() -> int:
@@ -59,26 +92,30 @@ def main() -> int:
                 data = json.load(f)
             offending = str(data.get("offending_file", "")).strip().lstrip("./")
             func = str(data.get("function_name", "")).strip()
-            if offending == "src/payments.py" and func == "charge_with_retry":
+            root_cause = str(data.get("root_cause", "")).strip()
+            if offending == "src/payments.py" and func == "charge_with_retry" and len(root_cause) >= 5:
                 discovery_ok = True
-                discovery_msg = f"valid discovery: {offending} -> {func}"
+                discovery_msg = f"valid discovery: {offending} -> {func} (root cause: {root_cause[:40]}...)"
             else:
-                discovery_msg = f"mismatched discovery fields: offending={offending}, func={func}"
+                discovery_msg = (
+                    f"mismatched discovery fields: offending={offending}, func={func}, "
+                    f"root_cause_len={len(root_cause)}"
+                )
         except Exception as e:
             discovery_msg = f"failed to parse DISCOVERY.json: {e}"
     checks.append(("DISCOVERY.json valid", discovery_ok, discovery_msg))
 
-    # 2. Run public tests
-    pub_ok, pub_out = _run(workdir, "-m", "pytest", "-q", "tests")
-    checks.append(("public tests pass", pub_ok, pub_out))
-
-    # 3. Run hidden tests if present
+    # 2. Run hidden tests first to prevent candidate code tampering
     hidden_test = workdir / "hidden" / "test_hidden.py"
     if hidden_test.exists():
         hidden_ok, hidden_out = _run(workdir, "-m", "pytest", "-q", str(hidden_test))
         checks.append(("hidden retry tests pass", hidden_ok, hidden_out))
     else:
         checks.append(("hidden retry tests pass", False, "hidden test file missing"))
+
+    # 3. Run public tests
+    pub_ok, pub_out = _run(workdir, "-m", "pytest", "-q", "tests")
+    checks.append(("public tests pass", pub_ok, pub_out))
 
     # 4. Scope verification
     changed = _changed_files(workdir)

@@ -38,13 +38,13 @@ describe("Retrieval Pipeline & Chunked Lexical Candidate", () => {
   describe("Lexical Chunk Index Cache & Invalidation", () => {
     it("caches index by workspace and revision, invalidating when revision changes", async () => {
       let readCount = 0;
-      const fakeReader = async ({ path }: { path: string }) => {
+      const fakeReader = ({ path }: { path: string }) => {
         readCount++;
-        return {
+        return Promise.resolve({
           content: `export function helper_${path}() { return 42; }`,
           fileSha256: "sha256:file1",
           totalLines: 1,
-        };
+        });
       };
 
       const index1 = await getOrBuildLexicalChunkIndex(
@@ -124,23 +124,23 @@ describe("Retrieval Pipeline & Chunked Lexical Candidate", () => {
 
     const mockClients: KernelUdsClients = {
       codeIntel: {
-        Search: async (req) => {
+        Search: (req) => {
           if (req.query === "calculateShipping") {
-            return {
+            return Promise.resolve({
               results: [{ path: "src/shipping.py", line: 10, symbol: "calculateShipping", method: "exact_path_symbol" }],
               truncated: false,
-            };
+            });
           }
-          return { results: [], truncated: false };
+          return Promise.resolve({ results: [], truncated: false });
         },
       },
       files: {
-        Read: async (req) => {
-          const content = `def calculateShipping(weight):\n    if weight > 50:\n        return 0\n    return 10\n`;
-          return {
+        Read: () => {
+          const content = "def calculateShipping(weight):\n    if weight > 50:\n        return 0\n    return 10\n";
+          return Promise.resolve({
             modelProjectionUtf8: new TextEncoder().encode(content),
             sourceVersion: { sha256: "sha256:shipping123" },
-          };
+          });
         },
       },
     };
@@ -148,7 +148,7 @@ describe("Retrieval Pipeline & Chunked Lexical Candidate", () => {
     it("minimal profile runs exact symbol and repository map without lexical candidate", async () => {
       const pipeline = kernelRetrievalPipeline({
         clients: mockClients,
-        buildContext: async () => fakeContext,
+        buildContext: () => Promise.resolve(fakeContext),
         observedAt: "2026-09-02T20:00:00Z" as any,
         modelKey: "test-model" as any,
         sessionId: "sess-1",
@@ -181,7 +181,7 @@ describe("Retrieval Pipeline & Chunked Lexical Candidate", () => {
     it("adaptive profile activates chunked lexical BM25 candidate for natural language queries", async () => {
       const pipeline = kernelRetrievalPipeline({
         clients: mockClients,
-        buildContext: async () => fakeContext,
+        buildContext: () => Promise.resolve(fakeContext),
         observedAt: "2026-09-02T20:00:00Z" as any,
         modelKey: "test-model" as any,
         sessionId: "sess-1",

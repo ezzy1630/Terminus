@@ -13,3 +13,4 @@ In `src/client.py`:
 
 3. Ensure all call sites and the client are updated consistently.
 4. Verify all tests pass with `python -m pytest -q`.
+5. Only modify `src/client.py`, `src/api.py`, `src/cli.py`, and `src/scheduler.py`. Do not modify tests or other files.

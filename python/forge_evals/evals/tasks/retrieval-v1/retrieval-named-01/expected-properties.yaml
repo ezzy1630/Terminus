@@ -1,11 +1,15 @@
-properties:
-  - id: P-RETRIEVAL-NAMED-01-PASS
-    description: "The pytest suite passes completely, including hidden boundary checks."
-    target_metric: "resolved"
-    direction: "maximize"
-    threshold: 1.0
-  - id: P-RETRIEVAL-NAMED-01-SCOPE
-    description: "Only src/shipping.py is modified by the agent."
-    target_metric: "scope_retained"
-    direction: "maximize"
-    threshold: 1.0
+expected:
+  outcome: completed
+  changed_files:
+    - src/shipping.py
+  tests:
+    - command: python -m pytest -q tests
+      status: passed
+    - command: python -m pytest -q hidden/test_hidden.py
+      status: passed
+  cost_usd_max: 0.10
+  turns_max: 5
+  rejection_triggers:
+    - changed_files outside [src/shipping.py]
+    - shipping threshold bug still present
+    - public test regression

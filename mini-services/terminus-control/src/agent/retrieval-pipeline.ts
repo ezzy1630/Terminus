@@ -5,13 +5,13 @@
  * - Extracted from terminus-control index.ts
  * - Exact-symbol lookup via kernel CodeIntelligenceRpc
  * - Chunked lexical BM25 candidate (overlap-aware, token-normalized, kernel-read)
- * - Cache keyed by workspace and repository-map revision
- * - Fail-soft error handling
+ * - Cache keyed by workspace and repository-map revision (bounded LRU, in-flight dedup)
+ * - Fail-soft error handling with guaranteed latency recording
  * - Comprehensive per-turn telemetry collection
  * - Strict profile gating: lexical retrieval active only in adaptive profile
  */
 
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type {
   ContextFragment,
   ModelKey,
@@ -27,8 +27,6 @@ import {
   computeAvgDocTokens,
 } from "@terminus/context-ir";
 import type {
-  CompileInput,
-  EvidenceGap,
   RetrievalMethod,
   RetrievalPipeline,
   RetrievalQuery,
@@ -76,11 +74,11 @@ export class RetrievalTelemetryCollector {
   private readonly hydratedFiles = new Set<string>();
   private totalBytesRead = 0;
   private totalTokensRead = 0;
-  private admittedFragments = new Set<string>();
+  private readonly admittedFragments = new Set<string>();
   private latencyMs = 0;
   private failures = 0;
   private readonly retrievedFilesSet = new Set<string>();
-  private changedOrVerified = new Set<string>();
+  private readonly changedOrVerified = new Set<string>();
 
   recordQuery(query: RetrievalQuery): void {
     this.queriesList.push({
@@ -108,8 +106,11 @@ export class RetrievalTelemetryCollector {
     this.totalTokensRead += tokens;
   }
 
-  recordAdmittedFragment(fragmentId: string): void {
+  recordAdmittedFragment(fragmentId: string, path?: string): void {
     this.admittedFragments.add(fragmentId);
+    if (path && path.length > 0) {
+      this.retrievedFilesSet.add(path);
+    }
   }
 
   recordAdmittedFragments(fragmentIds: readonly string[]): void {
@@ -169,23 +170,26 @@ export interface LexicalChunkIndex {
   readonly avgDocTokens: number;
 }
 
-// Global cache for workspace lexical chunk indices: key = `${workspaceId}:${revision}`
+// Bounded LRU cache for workspace lexical chunk indices: key = `${workspaceId}:${revision}`
+const MAX_CACHED_INDICES = 16;
 const LEXICAL_INDEX_CACHE = new Map<string, LexicalChunkIndex>();
+const IN_FLIGHT_INDEX_BUILDS = new Map<string, Promise<LexicalChunkIndex>>();
 
-export function clearLexicalIndexCache(): void {
+export const clearLexicalIndexCache = (): void => {
   LEXICAL_INDEX_CACHE.clear();
-}
+  IN_FLIGHT_INDEX_BUILDS.clear();
+};
 
 /**
  * Split source code into bounded, overlap-aware chunks.
  */
-export function chunkSourceLines(
+export const chunkSourceLines = (
   path: string,
   content: string,
   sourceSha256: string | null,
   chunkLines = 60,
   overlapLines = 15,
-): readonly SourceChunk[] {
+): readonly SourceChunk[] => {
   const lines = content.split("\n");
   if (lines.length === 0 || content.trim().length === 0) return [];
 
@@ -210,59 +214,80 @@ export function chunkSourceLines(
   }
 
   return chunks;
-}
+};
 
 /**
  * Build or retrieve cached lexical chunk index for a workspace revision.
  * Reads files through the kernel WorkspaceFileReader exclusively.
+ * Deduplicates in-flight builds and bounds memory to MAX_CACHED_INDICES.
  */
-export async function getOrBuildLexicalChunkIndex(
+export const getOrBuildLexicalChunkIndex = async (
   workspaceId: string,
   revision: string,
   candidatePaths: readonly string[],
   fileReader: WorkspaceFileReader,
   maxFilesToIndex = 30,
-): Promise<LexicalChunkIndex> {
+): Promise<LexicalChunkIndex> => {
   const cacheKey = `${workspaceId}:${revision}`;
   const existing = LEXICAL_INDEX_CACHE.get(cacheKey);
   if (existing !== undefined) {
     return existing;
   }
 
-  const chunks: SourceChunk[] = [];
-  const pathsToIndex = candidatePaths.slice(0, maxFilesToIndex);
-
-  for (const path of pathsToIndex) {
-    try {
-      const readResult = await fileReader({
-        path,
-        startLine: 1,
-        endLine: 400, // index first 400 lines of top candidate files
-      });
-      if (readResult.content !== null && readResult.content.length > 0) {
-        const fileChunks = chunkSourceLines(path, readResult.content, readResult.fileSha256);
-        chunks.push(...fileChunks);
-      }
-    } catch {
-      // Fail-soft: skip unreadable files
-    }
+  const inFlight = IN_FLIGHT_INDEX_BUILDS.get(cacheKey);
+  if (inFlight !== undefined) {
+    return inFlight;
   }
 
-  const tokenizedDocs = chunks.map((c) => c.tokens);
-  const docFrequencies = computeDocumentFrequencies(tokenizedDocs);
-  const avgDocTokens = computeAvgDocTokens(tokenizedDocs);
+  const buildPromise = (async () => {
+    const chunks: SourceChunk[] = [];
+    const pathsToIndex = candidatePaths.slice(0, maxFilesToIndex);
 
-  const index: LexicalChunkIndex = {
-    workspaceId,
-    revision,
-    chunks,
-    docFrequencies,
-    avgDocTokens,
-  };
+    for (const path of pathsToIndex) {
+      try {
+        const readResult = await fileReader({
+          path,
+          startLine: 1,
+          endLine: 400, // index first 400 lines of top candidate files
+        });
+        if (readResult.content !== null && readResult.content.length > 0) {
+          const fileChunks = chunkSourceLines(path, readResult.content, readResult.fileSha256);
+          chunks.push(...fileChunks);
+        }
+      } catch {
+        // Fail-soft: skip unreadable files
+      }
+    }
 
-  LEXICAL_INDEX_CACHE.set(cacheKey, index);
-  return index;
-}
+    const tokenizedDocs = chunks.map((c) => c.tokens);
+    const docFrequencies = computeDocumentFrequencies(tokenizedDocs);
+    const avgDocTokens = computeAvgDocTokens(tokenizedDocs);
+
+    const index: LexicalChunkIndex = {
+      workspaceId,
+      revision,
+      chunks,
+      docFrequencies,
+      avgDocTokens,
+    };
+
+    if (LEXICAL_INDEX_CACHE.size >= MAX_CACHED_INDICES) {
+      const oldestKey = LEXICAL_INDEX_CACHE.keys().next().value;
+      if (oldestKey !== undefined) {
+        LEXICAL_INDEX_CACHE.delete(oldestKey);
+      }
+    }
+    LEXICAL_INDEX_CACHE.set(cacheKey, index);
+    return index;
+  })();
+
+  IN_FLIGHT_INDEX_BUILDS.set(cacheKey, buildPromise);
+  try {
+    return await buildPromise;
+  } finally {
+    IN_FLIGHT_INDEX_BUILDS.delete(cacheKey);
+  }
+};
 
 export interface KernelRetrievalPipelineOptions {
   readonly clients: KernelUdsClients;
@@ -278,28 +303,157 @@ export interface KernelRetrievalPipelineOptions {
   readonly telemetry?: RetrievalTelemetryCollector;
 }
 
-export function mapRetrievalMethod(method: string): RetrievalMethod {
-  switch (method) {
-    case "tree_sitter":
-    case "lsp":
-    case "graph":
-      return method === "graph" ? "dependency_graph" : method;
-    case "lexical_bm25":
-      return method;
-    case "exact_path_symbol":
-      return method;
-    default:
-      return "lexical_bm25";
+export const mapRetrievalMethod = (method: string): RetrievalMethod => {
+  if (method === "exact_path_symbol" || method === "lexical_bm25") {
+    return method;
   }
-}
+  if (method === "graph") {
+    return "dependency_graph";
+  }
+  if (method === "tree_sitter" || method === "lsp") {
+    return method;
+  }
+  return "lexical_bm25";
+};
+
+/** Build an exact-symbol context fragment from a hydrated search hit. */
+const buildExactSymbolFragment = (
+  id: string,
+  hit: { readonly path: string; readonly line: number; readonly symbol: string | null; readonly method: string },
+  hydratedSpan: { readonly fragmentText?: string; readonly fileSha256?: string | null } | null,
+  observedAt: Rfc3339Timestamp,
+  sessionId: string,
+  taskId: string,
+  modelKey: ModelKey,
+  query: RetrievalQuery,
+): ContextFragment => {
+  const text = hydratedSpan?.fragmentText ?? [
+    "# Code intelligence result",
+    `path: ${hit.path}`,
+    `line: ${hit.line}`,
+    `symbol: ${hit.symbol}`,
+    `index method: ${hit.method}`,
+    "(source span unavailable — request read for implementation)",
+  ].join("\n");
+  const hash = computeContentHash(text);
+  return {
+    id,
+    kind: "code",
+    contentRef: {
+      hash,
+      uri: `artifact://sha256/${hash.slice("sha256:".length)}` as ContextFragment["contentRef"]["uri"],
+      mediaType: "text/plain",
+      bytes: BigInt(new TextEncoder().encode(text).byteLength) as ContextFragment["contentRef"]["bytes"],
+    },
+    textContent: text,
+    source: {
+      uri: `workspace://${hit.path}`,
+      producer: "terminus-kernel-code-intel",
+      producerVersion: "v1",
+      observedAt,
+      observedBy: "kernel",
+      evidenceRefs: [],
+    },
+    sourceVersion: null,
+    authority: 55,
+    priority: 55,
+    trust: "derived",
+    confidentiality: "workspace",
+    injectionRisk: "low",
+    exactness: "recoverable_by_reference",
+    scope: {
+      workspaceId: null,
+      sessionId: sessionId as ContextFragment["scope"]["sessionId"],
+      taskId: taskId as ContextFragment["scope"]["taskId"],
+      pathPatterns: [hit.path],
+    },
+    freshness: { observedAt, sourceVersion: null, stale: false, staleReason: null },
+    dependencies: [],
+    invalidation: [{ kind: "file_changed", selector: hit.path }],
+    estimatedTokens: { [modelKey]: Math.max(1, Math.ceil(text.length / 4)) },
+    selectionFeatures: {
+      relevance: query.suggestedMethods.includes(mapRetrievalMethod(hit.method)) ? 0.9 : 0.6,
+      novelty: 0.7,
+      coverage: 0.8,
+      uncertaintyReduction: 0.7,
+      riskReduction: 0.5,
+      modelCompatibility: 1,
+      redundancyPenalty: 0,
+      injectionPenalty: 0,
+    },
+  };
+};
+
+/** Build a lexical chunk context fragment from scored chunk. */
+const buildLexicalChunkFragment = (
+  chunkId: string,
+  chunk: SourceChunk,
+  score: number,
+  observedAt: Rfc3339Timestamp,
+  sessionId: string,
+  taskId: string,
+  modelKey: ModelKey,
+): ContextFragment => {
+  const text = [
+    `# Lexical BM25 match (${chunk.path}:${chunk.startLine}-${chunk.endLine})`,
+    chunk.content,
+  ].join("\n");
+  const hash = computeContentHash(text);
+  return {
+    id: chunkId,
+    kind: "code",
+    contentRef: {
+      hash,
+      uri: `artifact://sha256/${hash.slice("sha256:".length)}` as ContextFragment["contentRef"]["uri"],
+      mediaType: "text/plain",
+      bytes: BigInt(new TextEncoder().encode(text).byteLength) as ContextFragment["contentRef"]["bytes"],
+    },
+    textContent: text,
+    source: {
+      uri: `workspace://${chunk.path}`,
+      producer: "terminus-control-lexical-retrieval",
+      producerVersion: "v1",
+      observedAt,
+      observedBy: "control",
+      evidenceRefs: [],
+    },
+    sourceVersion: chunk.sourceSha256,
+    authority: 50,
+    priority: 50,
+    trust: "derived",
+    confidentiality: "workspace",
+    injectionRisk: "low",
+    exactness: "exact",
+    scope: {
+      workspaceId: null,
+      sessionId: sessionId as ContextFragment["scope"]["sessionId"],
+      taskId: taskId as ContextFragment["scope"]["taskId"],
+      pathPatterns: [chunk.path],
+    },
+    freshness: { observedAt, sourceVersion: chunk.sourceSha256, stale: false, staleReason: null },
+    dependencies: [],
+    invalidation: [{ kind: "file_changed", selector: chunk.path }],
+    estimatedTokens: { [modelKey]: Math.max(1, Math.ceil(text.length / 4)) },
+    selectionFeatures: {
+      relevance: Math.min(0.95, 0.5 + score * 0.1),
+      novelty: 0.8,
+      coverage: 0.75,
+      uncertaintyReduction: 0.7,
+      riskReduction: 0.5,
+      modelCompatibility: 1,
+      redundancyPenalty: 0,
+      injectionPenalty: 0,
+    },
+  };
+};
 
 /**
  * Creates the kernel retrieval pipeline with per-turn telemetry and optional
  * chunked lexical retrieval candidate in adaptive profile mode.
  */
-export function kernelRetrievalPipeline(
+export const kernelRetrievalPipeline = (
   options: KernelRetrievalPipelineOptions,
-): RetrievalPipeline & { readonly telemetry: RetrievalTelemetryCollector } {
+): RetrievalPipeline & { readonly telemetry: RetrievalTelemetryCollector } => {
   const {
     clients,
     buildContext,
@@ -340,6 +494,9 @@ export function kernelRetrievalPipeline(
         maxBytes: 48 * 1_024,
         expectedSha256: "",
       });
+      if (read.truncated) {
+        telemetry.recordFailure();
+      }
       const decoded = new TextDecoder("utf-8", { fatal: false }).decode(read.modelProjectionUtf8);
       const byteCount = read.modelProjectionUtf8.byteLength;
       const tokenCount = Math.max(1, Math.ceil(decoded.length / 4));
@@ -358,8 +515,16 @@ export function kernelRetrievalPipeline(
   const repositoryMapFragment = repositoryMap === null || repositoryMap.entries.length === 0
     ? null
     : (() => {
+        // Prioritize allowed task scope paths before slicing to budget
+        const scopeMatchedEntries = repositoryMap.entries.filter((entry) =>
+          allowedScope.writePaths.some((wp) => entry.path.startsWith(wp.replace(/\/?\*\*?$/, "")))
+          || allowedScope.readPaths.some((rp) => entry.path.startsWith(rp.replace(/\/?\*\*?$/, ""))),
+        );
+        const otherEntries = repositoryMap.entries.filter((entry) => !scopeMatchedEntries.includes(entry));
+        const prioritizedEntries = [...scopeMatchedEntries, ...otherEntries];
+
         const selection = selectTaskScopedRepositoryMap(
-          repositoryMap.entries
+          prioritizedEntries
             .slice(0, 200 * 8)
             .map((entry) => ({ path: entry.path, symbols: entry.symbols })),
           { readPaths: allowedScope.readPaths, writePaths: allowedScope.writePaths },
@@ -428,244 +593,175 @@ export function kernelRetrievalPipeline(
         return fragment;
       })();
 
+  const executeExactLookup = async (
+    query: RetrievalQuery,
+    seen: Set<string>,
+    results: RetrievalResult[],
+  ): Promise<void> => {
+    let recordedTruncation = false;
+    try {
+      const baseContext = await buildContext();
+      telemetry.recordMethod("exact_path_symbol");
+      const response = await clients.codeIntel.Search({
+        context: {
+          ...baseContext,
+          requestId: randomUUID(),
+          idempotencyKey: `code-search:${randomUUID()}`,
+        },
+        workspaceId,
+        query: query.text,
+        limit: 5,
+      });
+
+      if (response.truncated) {
+        recordedTruncation = true;
+        telemetry.recordFailure();
+        throw new Error(
+          `code-intelligence retrieval truncated for query ${JSON.stringify(query.text)}${response.continuation === undefined ? " without a continuation token" : "; continuation RPC is unavailable"}`,
+        );
+      }
+
+      const hits = response.results;
+      telemetry.recordHits(hits.length, hits.length > 0);
+
+      for (const hit of hits) {
+        const id = `kernel-code:${hit.path}:${hit.line}:${hit.symbol}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+
+        const searchHit: SearchHit = {
+          path: hit.path,
+          line: hit.line,
+          symbol: typeof hit.symbol === "string" && hit.symbol.length > 0 ? hit.symbol : null,
+          method: hit.method,
+        };
+        const hydratedSpan = await hydrateSearchHit(searchHit, fileReader);
+        const fragment = buildExactSymbolFragment(
+          id,
+          hit,
+          hydratedSpan,
+          observedAt,
+          sessionId,
+          taskId,
+          modelKey,
+          query,
+        );
+        telemetry.recordAdmittedFragment(fragment.id, hit.path);
+        results.push({
+          fragment,
+          method: mapRetrievalMethod(hit.method),
+          rawScore: 1,
+          rerankedScore: 1,
+          sourceVersion: hydratedSpan?.fileSha256 ?? null,
+          reason: query.reason,
+        });
+      }
+    } catch (error) {
+      if (!recordedTruncation) {
+        telemetry.recordFailure();
+      }
+      if (profileMode === "minimal") {
+        throw error;
+      }
+    }
+  };
+
+  const executeLexicalLookup = async (
+    query: RetrievalQuery,
+    seen: Set<string>,
+    results: RetrievalResult[],
+  ): Promise<void> => {
+    if (profileMode !== "adaptive" || repositoryMap === null) return;
+    telemetry.recordMethod("lexical_bm25");
+    try {
+      const candidatePaths = [
+        ...allowedScope.writePaths,
+        ...allowedScope.readPaths,
+        ...repositoryMap.entries.map((e) => e.path),
+      ];
+      const uniquePaths = [...new Set(candidatePaths)];
+      const lexicalIndex = await getOrBuildLexicalChunkIndex(
+        workspaceId,
+        repositoryMap.indexRevision,
+        uniquePaths,
+        fileReader,
+      );
+
+      const qTokens = tokenizeForBm25(query.text);
+      if (qTokens.length === 0 || lexicalIndex.chunks.length === 0) return;
+
+      const scoredChunks = lexicalIndex.chunks
+        .map((chunk) => ({
+          chunk,
+          score: scoreDocumentBm25({
+            queryTokens: qTokens,
+            docTokens: chunk.tokens,
+            docFrequencies: lexicalIndex.docFrequencies,
+            corpusSize: lexicalIndex.chunks.length,
+            avgDocTokens: lexicalIndex.avgDocTokens,
+          }),
+        }))
+        .filter((entry) => entry.score > 0.05)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3);
+
+      for (const { chunk, score } of scoredChunks) {
+        const chunkId = `lexical-chunk:${chunk.path}:${chunk.startLine}-${chunk.endLine}`;
+        if (seen.has(chunkId)) continue;
+        seen.add(chunkId);
+
+        const fragment = buildLexicalChunkFragment(
+          chunkId,
+          chunk,
+          score,
+          observedAt,
+          sessionId,
+          taskId,
+          modelKey,
+        );
+        telemetry.recordAdmittedFragment(fragment.id, chunk.path);
+        results.push({
+          fragment,
+          method: "lexical_bm25",
+          rawScore: score,
+          rerankedScore: score,
+          sourceVersion: chunk.sourceSha256,
+          reason: `lexical BM25 match for query: ${query.reason}`,
+        });
+      }
+    } catch {
+      telemetry.recordFailure();
+    }
+  };
+
   const retrieve = async (queries: readonly RetrievalQuery[]): Promise<readonly RetrievalResult[]> => {
     const startTime = performance.now();
-    // Repository map fragment is labeled as exact_path_symbol (stopped labeling as semantic)
-    const results: RetrievalResult[] = repositoryMapFragment === null
-      ? []
-      : [{
-          fragment: repositoryMapFragment,
-          method: "exact_path_symbol",
-          rawScore: 0.8,
-          rerankedScore: 0.8,
-          sourceVersion: repositoryMapFragment.sourceVersion,
-          reason: "kernel repository map",
-        }];
+    const results: RetrievalResult[] = [];
+    if (repositoryMapFragment !== null) {
+      telemetry.recordAdmittedFragment(repositoryMapFragment.id);
+      results.push({
+        fragment: repositoryMapFragment,
+        method: "exact_path_symbol",
+        rawScore: 0.8,
+        rerankedScore: 0.8,
+        sourceVersion: repositoryMapFragment.sourceVersion,
+        reason: "kernel repository map",
+      });
+    }
 
     const seen = new Set<string>();
 
-    for (const query of queries) {
-      telemetry.recordQuery(query);
-
-      // 1. Exact-symbol lookup via kernel CodeIntelligenceRpc
-      try {
-        const baseContext = await buildContext();
-        telemetry.recordMethod("exact_path_symbol");
-        const response = await clients.codeIntel.Search({
-          context: {
-            ...baseContext,
-            requestId: randomUUID(),
-            idempotencyKey: `code-search:${randomUUID()}`,
-          },
-          workspaceId,
-          query: query.text,
-          limit: 5,
-        });
-
-        if (response.truncated) {
-          telemetry.recordFailure();
-          throw new Error(
-            `code-intelligence retrieval truncated for query ${JSON.stringify(query.text)}${response.continuation === undefined ? " without a continuation token" : "; continuation RPC is unavailable"}`,
-          );
-        }
-
-        const hits = response.results;
-        telemetry.recordHits(hits.length, hits.length > 0);
-
-        for (const hit of hits) {
-          const id = `kernel-code:${hit.path}:${hit.line}:${hit.symbol}`;
-          if (seen.has(id)) continue;
-          seen.add(id);
-
-          const searchHit: SearchHit = {
-            path: hit.path,
-            line: hit.line,
-            symbol: typeof hit.symbol === "string" && hit.symbol.length > 0 ? hit.symbol : null,
-            method: hit.method,
-          };
-          const hydratedSpan = await hydrateSearchHit(searchHit, fileReader);
-          const text = hydratedSpan?.fragmentText ?? [
-            `# Code intelligence result`,
-            `path: ${hit.path}`,
-            `line: ${hit.line}`,
-            `symbol: ${hit.symbol}`,
-            `index method: ${hit.method}`,
-            `(source span unavailable — request read for implementation)`,
-          ].join("\n");
-          const hash = computeContentHash(text);
-          const fragment: ContextFragment = {
-            id,
-            kind: "code",
-            contentRef: {
-              hash,
-              uri: `artifact://sha256/${hash.slice("sha256:".length)}` as ContextFragment["contentRef"]["uri"],
-              mediaType: "text/plain",
-              bytes: BigInt(new TextEncoder().encode(text).byteLength) as ContextFragment["contentRef"]["bytes"],
-            },
-            textContent: text,
-            source: {
-              uri: `workspace://${hit.path}`,
-              producer: "terminus-kernel-code-intel",
-              producerVersion: "v1",
-              observedAt,
-              observedBy: "kernel",
-              evidenceRefs: [],
-            },
-            sourceVersion: null,
-            authority: 55,
-            priority: 55,
-            trust: "derived",
-            confidentiality: "workspace",
-            injectionRisk: "low",
-            exactness: "recoverable_by_reference",
-            scope: {
-              workspaceId: null,
-              sessionId: sessionId as ContextFragment["scope"]["sessionId"],
-              taskId: taskId as ContextFragment["scope"]["taskId"],
-              pathPatterns: [hit.path],
-            },
-            freshness: { observedAt, sourceVersion: null, stale: false, staleReason: null },
-            dependencies: [],
-            invalidation: [{ kind: "file_changed", selector: hit.path }],
-            estimatedTokens: { [modelKey]: Math.max(1, Math.ceil(text.length / 4)) },
-            selectionFeatures: {
-              relevance: query.suggestedMethods.includes(mapRetrievalMethod(hit.method)) ? 0.9 : 0.6,
-              novelty: 0.7,
-              coverage: 0.8,
-              uncertaintyReduction: 0.7,
-              riskReduction: 0.5,
-              modelCompatibility: 1,
-              redundancyPenalty: 0,
-              injectionPenalty: 0,
-            },
-          };
-          results.push({
-            fragment,
-            method: mapRetrievalMethod(hit.method),
-            rawScore: 1,
-            rerankedScore: 1,
-            sourceVersion: hydratedSpan?.fileSha256 ?? null,
-            reason: query.reason,
-          });
-        }
-      } catch (error) {
-        telemetry.recordFailure();
-        if (profileMode === "minimal") {
-          throw error;
-        }
+    try {
+      for (const query of queries) {
+        telemetry.recordQuery(query);
+        await executeExactLookup(query, seen, results);
+        await executeLexicalLookup(query, seen, results);
       }
-
-      // 2. Candidate: Chunked lexical BM25 retrieval (ACTIVE ONLY IN ADAPTIVE PROFILE)
-      if (profileMode === "adaptive" && repositoryMap !== null) {
-        telemetry.recordMethod("lexical_bm25");
-        try {
-          const candidatePaths = [
-            ...allowedScope.writePaths,
-            ...allowedScope.readPaths,
-            ...repositoryMap.entries.map((e) => e.path),
-          ];
-          const uniquePaths = [...new Set(candidatePaths)];
-          const lexicalIndex = await getOrBuildLexicalChunkIndex(
-            workspaceId,
-            repositoryMap.indexRevision,
-            uniquePaths,
-            fileReader,
-          );
-
-          const qTokens = tokenizeForBm25(query.text);
-          if (qTokens.length > 0 && lexicalIndex.chunks.length > 0) {
-            const scoredChunks = lexicalIndex.chunks
-              .map((chunk) => {
-                const score = scoreDocumentBm25({
-                  queryTokens: qTokens,
-                  docTokens: chunk.tokens,
-                  docFrequencies: lexicalIndex.docFrequencies,
-                  corpusSize: lexicalIndex.chunks.length,
-                  avgDocTokens: lexicalIndex.avgDocTokens,
-                });
-                return { chunk, score };
-              })
-              .filter((entry) => entry.score > 0.05)
-              .sort((a, b) => b.score - a.score)
-              .slice(0, 3); // top 3 lexical chunks per query
-
-            for (const { chunk, score } of scoredChunks) {
-              const chunkId = `lexical-chunk:${chunk.path}:${chunk.startLine}-${chunk.endLine}`;
-              if (seen.has(chunkId)) continue;
-              seen.add(chunkId);
-
-              const text = [
-                `# Lexical BM25 match (${chunk.path}:${chunk.startLine}-${chunk.endLine})`,
-                chunk.content,
-              ].join("\n");
-              const hash = computeContentHash(text);
-              const fragment: ContextFragment = {
-                id: chunkId,
-                kind: "code",
-                contentRef: {
-                  hash,
-                  uri: `artifact://sha256/${hash.slice("sha256:".length)}` as ContextFragment["contentRef"]["uri"],
-                  mediaType: "text/plain",
-                  bytes: BigInt(new TextEncoder().encode(text).byteLength) as ContextFragment["contentRef"]["bytes"],
-                },
-                textContent: text,
-                source: {
-                  uri: `workspace://${chunk.path}`,
-                  producer: "terminus-control-lexical-retrieval",
-                  producerVersion: "v1",
-                  observedAt,
-                  observedBy: "control",
-                  evidenceRefs: [],
-                },
-                sourceVersion: chunk.sourceSha256,
-                authority: 50,
-                priority: 50,
-                trust: "derived",
-                confidentiality: "workspace",
-                injectionRisk: "low",
-                exactness: "exact",
-                scope: {
-                  workspaceId: null,
-                  sessionId: sessionId as ContextFragment["scope"]["sessionId"],
-                  taskId: taskId as ContextFragment["scope"]["taskId"],
-                  pathPatterns: [chunk.path],
-                },
-                freshness: { observedAt, sourceVersion: chunk.sourceSha256, stale: false, staleReason: null },
-                dependencies: [],
-                invalidation: [{ kind: "file_changed", selector: chunk.path }],
-                estimatedTokens: { [modelKey]: Math.max(1, Math.ceil(text.length / 4)) },
-                selectionFeatures: {
-                  relevance: Math.min(0.95, 0.5 + score * 0.1),
-                  novelty: 0.8,
-                  coverage: 0.75,
-                  uncertaintyReduction: 0.7,
-                  riskReduction: 0.5,
-                  modelCompatibility: 1,
-                  redundancyPenalty: 0,
-                  injectionPenalty: 0,
-                },
-              };
-
-              results.push({
-                fragment,
-                method: "lexical_bm25",
-                rawScore: score,
-                rerankedScore: score,
-                sourceVersion: chunk.sourceSha256,
-                reason: `lexical BM25 match for query: ${query.reason}`,
-              });
-            }
-          }
-        } catch {
-          // Fail soft if lexical retrieval is unavailable
-          telemetry.recordFailure();
-        }
-      }
+      return results;
+    } finally {
+      const elapsed = performance.now() - startTime;
+      telemetry.recordLatency(elapsed);
     }
-
-    const elapsed = performance.now() - startTime;
-    telemetry.recordLatency(elapsed);
-    return results;
   };
 
   return {
@@ -677,4 +773,4 @@ export function kernelRetrievalPipeline(
       suggestedMethods: ["lexical_bm25"],
     }))),
   };
-}
+};

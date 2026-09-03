@@ -17945,6 +17945,20 @@ async function agentLoop(turnId: string): Promise<void> {
           (effectiveWorldState.sections as Record<string, unknown>).recent_history = priorSection.previous_turn;
         }
       }
+      const activeRetrievalPipeline = !workspaceActivated
+        ? null
+        : kernelRetrievalPipeline({
+            clients: requireKernelUds(),
+            buildContext: buildArtifactContext,
+            observedAt: worldState.observedAt,
+            modelKey: selectedModel.modelKey,
+            sessionId: task.sessionId,
+            taskId: task.id,
+            workspaceId: workspace.id,
+            repositoryMap: repositorySignals.repositoryMap,
+            allowedScope: contract.allowedScope,
+            profileMode: harnessProfileMode,
+          });
       const compiled = await compileContext({
         task: effectiveTaskSnapshot,
         thread: threadSnapshot,
@@ -17976,23 +17990,10 @@ async function agentLoop(turnId: string): Promise<void> {
         toolSchemas: activeToolSchemas,
         compactionPolicy: { enabled: false, targetTokens: Number(contextBudget.optionalContextTarget) },
         store: contextStore,
-        retrievalPipeline: !workspaceActivated
-          ? {
-              retrieve: async () => [],
-              expandForGaps: async () => [],
-            }
-          : kernelRetrievalPipeline({
-              clients: requireKernelUds(),
-              buildContext: buildArtifactContext,
-              observedAt: worldState.observedAt,
-              modelKey: selectedModel.modelKey,
-              sessionId: task.sessionId,
-              taskId: task.id,
-              workspaceId: workspace.id,
-              repositoryMap: repositorySignals.repositoryMap,
-              allowedScope: contract.allowedScope,
-              profileMode: harnessProfileMode,
-            }),
+        retrievalPipeline: activeRetrievalPipeline ?? {
+          retrieve: async () => [],
+          expandForGaps: async () => [],
+        },
         signal: abortController.signal,
       });
       previousCacheEpoch = readCacheEpochSnapshot(compiled.manifest.decisionRecord)
@@ -18039,6 +18040,7 @@ async function agentLoop(turnId: string): Promise<void> {
           model: selectedModel.modelKey,
           total_estimated_tokens: compiled.totalEstimatedTokens,
           omitted_count: compiled.omitted.length,
+          retrieval_telemetry: activeRetrievalPipeline?.telemetry.snapshot() ?? null,
         },
         artifactRefs: [requestArtifact.uri],
       }, async (tx) => {

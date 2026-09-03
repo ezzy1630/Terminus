@@ -1,15 +1,16 @@
 """Deterministic grader for retrieval-v1/retrieval-named-01.
 
 Verifies:
-1. Public tests pass (returncode == 0)
-2. Hidden boundary tests pass (returncode == 0)
-3. Only src/shipping.py changed (git status --porcelain)
+1. Hidden boundary tests pass (run first to prevent tampering)
+2. Public tests pass (returncode == 0)
+3. Only src/shipping.py changed (checks git status and commit diff)
 Does not check for "PASS" in stdout.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +22,7 @@ def _run(workdir: Path, *args: str) -> tuple[bool, str]:
         cwd=workdir,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=60,
         check=False,
     )
     output = (result.stdout + result.stderr).strip()
@@ -29,19 +30,50 @@ def _run(workdir: Path, *args: str) -> tuple[bool, str]:
 
 
 def _changed_files(workdir: Path) -> set[str]:
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
+    git_bin = shutil.which("git") or "git"
+    # Check working tree (uncommitted/staged)
+    status_proc = subprocess.run(
+        [git_bin, "status", "--porcelain"],
         cwd=workdir,
         capture_output=True,
         text=True,
         timeout=20,
         check=False,
     )
-    return {
+    status_files = {
         line[3:].strip()
-        for line in result.stdout.splitlines()
+        for line in status_proc.stdout.splitlines()
         if len(line) >= 3 and not line[3:].strip().startswith("hidden/")
     }
+
+    # Check committed changes against initial/base commit
+    log_proc = subprocess.run(
+        [git_bin, "log", "--reverse", "--format=%H"],
+        cwd=workdir,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    commits = [line.strip() for line in log_proc.stdout.splitlines() if line.strip()]
+    diff_files: set[str] = set()
+    if commits:
+        base_commit = commits[0]
+        diff_proc = subprocess.run(
+            [git_bin, "diff", "--name-only", base_commit, "HEAD"],
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        diff_files = {
+            line.strip()
+            for line in diff_proc.stdout.splitlines()
+            if line.strip() and not line.strip().startswith("hidden/")
+        }
+
+    return status_files | diff_files
 
 
 def main() -> int:
@@ -49,17 +81,17 @@ def main() -> int:
     workdir = Path(payload["workdir"]).resolve()
     checks: list[tuple[str, bool, str]] = []
 
-    # 1. Run public tests
-    pub_ok, pub_out = _run(workdir, "-m", "pytest", "-q", "tests")
-    checks.append(("public tests pass", pub_ok, pub_out))
-
-    # 2. Run hidden tests if present
+    # 1. Run hidden tests first to prevent candidate code tampering
     hidden_test = workdir / "hidden" / "test_hidden.py"
     if hidden_test.exists():
         hidden_ok, hidden_out = _run(workdir, "-m", "pytest", "-q", str(hidden_test))
         checks.append(("hidden boundary tests pass", hidden_ok, hidden_out))
     else:
         checks.append(("hidden boundary tests pass", False, "hidden test file missing"))
+
+    # 2. Run public tests
+    pub_ok, pub_out = _run(workdir, "-m", "pytest", "-q", "tests")
+    checks.append(("public tests pass", pub_ok, pub_out))
 
     # 3. Scope verification: only src/shipping.py changed
     changed = _changed_files(workdir)

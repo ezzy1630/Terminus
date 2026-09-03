@@ -26,5 +26,5 @@ acceptance_criteria:
 grader:
   entrypoint: grader/run.py
   protocol: json_stdio
-  timeout_seconds: 30
+  timeout_seconds: 60
 risk_class: normal

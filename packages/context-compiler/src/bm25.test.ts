@@ -52,7 +52,7 @@ describe("BM25 with token-based normalization", () => {
     // Both docs contain 'target_term' once.
     // Short doc has few tokens; long doc has many tokens.
     const shortDoc = tokenizeForBm25("target_term some other context");
-    const longDoc = tokenizeForBm25("target_term " + "filler word ".repeat(50));
+    const longDoc = tokenizeForBm25(`target_term ${"filler word ".repeat(50)}`);
     const corpus = [shortDoc, longDoc];
     const df = computeDocumentFrequencies(corpus);
     const avgdl = computeAvgDocTokens(corpus);

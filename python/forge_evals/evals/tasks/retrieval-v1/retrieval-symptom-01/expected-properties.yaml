@@ -1,16 +1,17 @@
-properties:
-  - id: P-RETRIEVAL-SYMPTOM-01-DISCOVERY
-    description: "DISCOVERY.json identifies src/payments.py as the offending file."
-    target_metric: "resolved"
-    direction: "maximize"
-    threshold: 1.0
-  - id: P-RETRIEVAL-SYMPTOM-01-PASS
-    description: "The payment test suite passes including hidden retry tests."
-    target_metric: "resolved"
-    direction: "maximize"
-    threshold: 1.0
-  - id: P-RETRIEVAL-SYMPTOM-01-SCOPE
-    description: "Only src/payments.py and DISCOVERY.json are modified."
-    target_metric: "scope_retained"
-    direction: "maximize"
-    threshold: 1.0
+expected:
+  outcome: completed
+  changed_files:
+    - src/payments.py
+    - DISCOVERY.json
+  tests:
+    - command: python -m pytest -q tests
+      status: passed
+    - command: python -m pytest -q hidden/test_hidden.py
+      status: passed
+  cost_usd_max: 0.15
+  turns_max: 6
+  rejection_triggers:
+    - changed_files outside [src/payments.py, DISCOVERY.json]
+    - DISCOVERY.json missing or incomplete
+    - payment retry defect still present
+    - public test regression

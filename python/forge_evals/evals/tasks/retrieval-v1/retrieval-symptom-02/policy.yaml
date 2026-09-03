@@ -7,7 +7,6 @@ allowed_commands:
 allowed_read_paths:
   - "**"
 allowed_write_paths:
-  - "src/**"
-  - "tests/**"
+  - "src/batch_parser.py"
 network: none
 max_memory_mb: 1024

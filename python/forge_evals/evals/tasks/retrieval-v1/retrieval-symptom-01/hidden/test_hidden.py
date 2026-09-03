@@ -22,9 +22,12 @@ def test_retry_reuses_exact_same_idempotency_key():
         customer_id="cust_abc",
         max_retries=3,
     )
-    assert result["status"] == "succeeded"
-    assert len(gateway.attempts) == 3
+    if result["status"] != "succeeded":
+        raise AssertionError(f"Expected status succeeded, got {result['status']}")
+    if len(gateway.attempts) != 3:
+        raise AssertionError(f"Expected 3 attempts, got {len(gateway.attempts)}")
     # All 3 attempts MUST share the identical idempotency key!
     first_key = gateway.attempts[0]
     for key in gateway.attempts:
-        assert key == first_key, f"Idempotency key changed across retries: {gateway.attempts}"
+        if key != first_key:
+            raise AssertionError(f"Idempotency key changed across retries: {gateway.attempts}")

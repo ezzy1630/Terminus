@@ -245,7 +245,14 @@ def run_canary(
         candidate_commit=candidate_commit,
         is_aa_test=is_aa_test,
     )
-    if baseline_commit == candidate_commit and not is_aa_test:
+    if is_aa_test:
+        if baseline_commit != candidate_commit:
+            report.ineligible_reason = (
+                f"A/A test requires identical baseline and candidate commits; got "
+                f"{baseline_commit} != {candidate_commit}"
+            )
+            return report
+    elif baseline_commit == candidate_commit:
         report.ineligible_reason = (
             f"baseline and candidate commits are identical ({baseline_commit}); "
             "a canary compares two different harness revisions"
@@ -281,6 +288,12 @@ def run_canary(
     report.identity_locked = not report.identity_issues
     report.eligible = report.identity_locked and bool(report.tasks)
     report.aggregate = _aggregate_task_rows(report.tasks)
+    if is_aa_test and report.aggregate.get("resolved_delta", 0) != 0:
+        report.eligible = False
+        report.ineligible_reason = (
+            f"A/A test detected divergence between identical configurations: "
+            f"resolved_delta={report.aggregate['resolved_delta']}"
+        )
 
     if output_dir is not None:
         out = Path(output_dir)

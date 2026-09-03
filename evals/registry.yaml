@@ -123,6 +123,7 @@ campaigns:
 # owns the evidence and promotion requirements.
 cohorts:
   - {id: canary, class: reliability, private_holdout_required: false}
+  - {id: retrieval-v1, class: retrieval, private_holdout_required: false}
   - {id: tiny_bugfix, class: coding, private_holdout_required: true}
   - {id: cross_file_feature, class: coding, private_holdout_required: true}
   - {id: refactor, class: coding, private_holdout_required: true}

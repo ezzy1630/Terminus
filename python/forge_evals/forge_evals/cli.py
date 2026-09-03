@@ -1418,14 +1418,20 @@ def _cmd_canary(args: argparse.Namespace) -> int:
     suite_name = getattr(args, "suite", "canary")
     tasks = RETRIEVAL_V1_TASKS if suite_name == "retrieval-v1" else CANARY_TASKS
 
+    baseline_commit = args.baseline_commit
+    candidate_commit = args.candidate_commit
+    is_aa = getattr(args, "aa_test", False)
+    if is_aa and candidate_commit == "working-tree" and baseline_commit != "working-tree":
+        candidate_commit = baseline_commit
+
     report = run_canary(
         pair_runner,
-        baseline_commit=args.baseline_commit,
-        candidate_commit=args.candidate_commit,
+        baseline_commit=baseline_commit,
+        candidate_commit=candidate_commit,
         seed=args.seed,
         output_dir=output_dir,
         tasks=tasks,
-        is_aa_test=getattr(args, "aa_test", False),
+        is_aa_test=is_aa,
     )
 
     # Persist both arms' raw records next to the report so the comparison is
@@ -1443,6 +1449,12 @@ def _cmd_canary(args: argparse.Namespace) -> int:
         _write_record(record, output_dir / "candidate", "jsonl")
 
     print(json.dumps(report.aggregate, indent=2, sort_keys=True))
+    if is_aa and report.aggregate.get("resolved_delta", 0) != 0:
+        print(
+            f"CANARY: A/A instability detected — non-zero resolved_delta={report.aggregate['resolved_delta']}",
+            file=sys.stderr,
+        )
+        return 1
     if not report.eligible:
         print(
             f"CANARY: INELIGIBLE — {report.ineligible_reason or '; '.join(report.identity_issues)}",

@@ -9,7 +9,8 @@ def test_multiple_refunds():
         {"type": "refund", "amount_cents": 1500},
     ]
     # 10000 + 2500 + 1500 = 14000
-    assert calculate_balance(txs) == 14000
+    if calculate_balance(txs) != 14000:
+        raise AssertionError(f"Expected 14000 cents, got {calculate_balance(txs)}")
 
 
 def test_mixed_transactions():
@@ -20,9 +21,16 @@ def test_mixed_transactions():
         {"type": "refund", "amount_cents": 350},
     ]
     # 5000 - 2000 - 150 + 350 = 3200
-    assert calculate_balance(txs) == 3200
+    if calculate_balance(txs) != 3200:
+        raise AssertionError(f"Expected 3200 cents, got {calculate_balance(txs)}")
 
 
 def test_refund_only():
     txs = [{"type": "refund", "amount_cents": 1250}]
-    assert calculate_balance(txs) == 1250
+    if calculate_balance(txs) != 1250:
+        raise AssertionError(f"Expected 1250 cents, got {calculate_balance(txs)}")
+
+
+def test_empty_transactions():
+    if calculate_balance([]) != 0:
+        raise AssertionError("Expected balance 0 for empty transaction list")
