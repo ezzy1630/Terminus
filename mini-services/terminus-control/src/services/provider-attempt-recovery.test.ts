@@ -154,28 +154,24 @@ describe("provider attempt recovery (restart reconciliation)", () => {
     // Another owner resolved the attempt between the recovery pass's list
     // and its CAS; the status read inside the transaction sees "completed".
     const service = new ProviderSessionService<unknown>({
-      readTurnState: async () => null,
+      readTurnState: () => Promise.resolve(null),
       appendEvent: async (event, mutation) => {
         await mutation({});
         return event;
       },
       transaction: (): ProviderSessionTransaction => ({
-        startAttempt: async () => {},
-        completeAttempt: async () => {},
-        findAttemptStatus: async () => "completed",
-        interruptAttempt: async () => 0,
-        readTurnForRecovery: async () => null,
-        interruptTurnForRecovery: async () => 1,
-        blockTaskForRecovery: async () => undefined,
+        startAttempt: () => Promise.resolve(),
+        completeAttempt: () => Promise.resolve(),
+        findAttemptStatus: () => Promise.resolve("completed"),
+        interruptAttempt: () => Promise.resolve(0),
+        readTurnForRecovery: () => Promise.resolve(null),
+        interruptTurnForRecovery: () => Promise.resolve(1),
+        blockTaskForRecovery: () => Promise.resolve(),
       }),
-      mutate: async (op) => op(),
-      executeLocal: async () => {
-        throw new Error("not wired");
-      },
-      executeGateway: async () => {
-        throw new Error("not wired");
-      },
-      listInFlightAttempts: async () => world.attempts,
+      mutate: (op) => Promise.resolve(op()),
+      executeLocal: () => Promise.reject(new Error("not wired")),
+      executeGateway: () => Promise.reject(new Error("not wired")),
+      listInFlightAttempts: () => Promise.resolve(world.attempts),
     });
     const result = await service.reconcileInFlightAttempts(["PROVIDER_RUNNING"]);
     expect(result.alreadyResolved).toEqual(["a1"]);
@@ -240,31 +236,27 @@ describe("provider attempt recovery (restart reconciliation)", () => {
     };
     // Simulate a durable fault between find and CAS on the first attempt.
     const service = new ProviderSessionService<unknown>({
-      readTurnState: async () => null,
+      readTurnState: () => Promise.resolve(null),
       appendEvent: async (event, mutation) => {
         await mutation({});
         return event;
       },
       transaction: (): ProviderSessionTransaction => ({
-        startAttempt: async () => {},
-        completeAttempt: async () => {},
-        findAttemptStatus: async (attemptId) => {
-          if (attemptId === "bad") throw new Error("durable store unavailable");
-          return world.attempts.find((attempt) => attempt.id === attemptId)?.status ?? null;
+        startAttempt: () => Promise.resolve(),
+        completeAttempt: () => Promise.resolve(),
+        findAttemptStatus: (attemptId) => {
+          if (attemptId === "bad") return Promise.reject(new Error("durable store unavailable"));
+          return Promise.resolve(world.attempts.find((attempt) => attempt.id === attemptId)?.status ?? null);
         },
-        interruptAttempt: async () => 1,
-        readTurnForRecovery: async (turnId) => world.turnStates.get(turnId) ?? null,
-        interruptTurnForRecovery: async () => 1,
-        blockTaskForRecovery: async () => undefined,
+        interruptAttempt: () => Promise.resolve(1),
+        readTurnForRecovery: (turnId) => Promise.resolve(world.turnStates.get(turnId) ?? null),
+        interruptTurnForRecovery: () => Promise.resolve(1),
+        blockTaskForRecovery: () => Promise.resolve(),
       }),
-      mutate: async (op) => op(),
-      executeLocal: async () => {
-        throw new Error("not wired");
-      },
-      executeGateway: async () => {
-        throw new Error("not wired");
-      },
-      listInFlightAttempts: async () => world.attempts,
+      mutate: (op) => Promise.resolve(op()),
+      executeLocal: () => Promise.reject(new Error("not wired")),
+      executeGateway: () => Promise.reject(new Error("not wired")),
+      listInFlightAttempts: () => Promise.resolve(world.attempts),
     });
     const result = await service.reconcileInFlightAttempts(["PROVIDER_RUNNING"]);
     expect(result.failed).toEqual([{ id: "bad", error: "durable store unavailable" }]);
@@ -289,28 +281,24 @@ describe("provider attempt recovery (restart reconciliation)", () => {
       events: [],
     };
     const service = new ProviderSessionService<unknown>({
-      readTurnState: async () => null,
+      readTurnState: () => Promise.resolve(null),
       appendEvent: async (event, mutation) => {
         await mutation({});
         return event;
       },
       transaction: (): ProviderSessionTransaction => ({
-        startAttempt: async () => {},
-        completeAttempt: async () => {},
-        findAttemptStatus: async () => "completed",
-        interruptAttempt: async () => 0,
-        readTurnForRecovery: async () => null,
-        interruptTurnForRecovery: async () => 1,
-        blockTaskForRecovery: async () => undefined,
+        startAttempt: () => Promise.resolve(),
+        completeAttempt: () => Promise.resolve(),
+        findAttemptStatus: () => Promise.resolve("completed"),
+        interruptAttempt: () => Promise.resolve(0),
+        readTurnForRecovery: () => Promise.resolve(null),
+        interruptTurnForRecovery: () => Promise.resolve(1),
+        blockTaskForRecovery: () => Promise.resolve(),
       }),
-      mutate: async (op) => op(),
-      executeLocal: async () => {
-        throw new Error("not wired");
-      },
-      executeGateway: async () => {
-        throw new Error("not wired");
-      },
-      listInFlightAttempts: async () => world.attempts,
+      mutate: (op) => Promise.resolve(op()),
+      executeLocal: () => Promise.reject(new Error("not wired")),
+      executeGateway: () => Promise.reject(new Error("not wired")),
+      listInFlightAttempts: () => Promise.resolve(world.attempts),
     });
     const result = await service.reconcileInFlightAttempts(["PROVIDER_RUNNING"]);
     expect(result.alreadyResolved).toEqual(["a3"]);
@@ -322,28 +310,24 @@ describe("provider attempt recovery (restart reconciliation)", () => {
     const transactionMarker = {};
     let observedTransaction: object | null = null;
     const service = new ProviderSessionService<object>({
-      readTurnState: async () => null,
+      readTurnState: () => Promise.resolve(null),
       appendEvent: async (_event, mutation) => mutation(transactionMarker),
       transaction: (transaction): ProviderSessionTransaction => {
         observedTransaction = transaction;
         return {
-          startAttempt: async () => {},
-          completeAttempt: async () => {},
-          findAttemptStatus: async () => "running",
-          interruptAttempt: async () => 1,
-          readTurnForRecovery: async () => null,
-          interruptTurnForRecovery: async () => 1,
-          blockTaskForRecovery: async () => undefined,
+          startAttempt: () => Promise.resolve(),
+          completeAttempt: () => Promise.resolve(),
+          findAttemptStatus: () => Promise.resolve("running"),
+          interruptAttempt: () => Promise.resolve(1),
+          readTurnForRecovery: () => Promise.resolve(null),
+          interruptTurnForRecovery: () => Promise.resolve(1),
+          blockTaskForRecovery: () => Promise.resolve(),
         };
       },
-      mutate: async (operation) => operation(),
-      executeLocal: async () => {
-        throw new Error("not wired");
-      },
-      executeGateway: async () => {
-        throw new Error("not wired");
-      },
-      listInFlightAttempts: async () => [{
+      mutate: (operation) => Promise.resolve(operation()),
+      executeLocal: () => Promise.reject(new Error("not wired")),
+      executeGateway: () => Promise.reject(new Error("not wired")),
+      listInFlightAttempts: () => Promise.resolve([{
         id: "attempt-transaction",
         turnId: "turn-transaction",
         status: "running",
@@ -352,7 +336,7 @@ describe("provider attempt recovery (restart reconciliation)", () => {
         requestArtifact: "artifact://sha256/request",
         responseArtifact: null,
         turn: { state: "COMPLETED", taskId: null },
-      }],
+      }]),
     });
 
     const result = await service.reconcileInFlightAttempts(["PROVIDER_RUNNING"]);
