@@ -18,7 +18,7 @@ A declared test is not a passing run. Executed-test evidence lives in CI
 | Declared Rust tests | 606 | `#[test]` + `#[tokio::test]` occurrences in crates/** (excl. generated) |
 | TypeScript test files | 177 | `*.test.{ts,tsx}` in packages/ + apps/ |
 | Declared TypeScript test blocks | 1687 | `test(/it(` occurrences in those files |
-| Declared Python tests | 529 | `def test_*` in python/** |
+| Declared Python tests | 530 | `def test_*` in python/** |
 | ADRs | 56 | docs/decisions/ADR-*.md |
 | Runbooks | 15 | docs/runbooks/*.md |
 | SQLite migrations | 30 | migrations/sqlite/*.sql |

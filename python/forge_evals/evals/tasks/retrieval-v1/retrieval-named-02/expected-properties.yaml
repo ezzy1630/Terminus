@@ -1,0 +1,11 @@
+properties:
+  - id: P-RETRIEVAL-NAMED-02-PASS
+    description: "The ledger test suite passes including hidden refund edge cases."
+    target_metric: "resolved"
+    direction: "maximize"
+    threshold: 1.0
+  - id: P-RETRIEVAL-NAMED-02-SCOPE
+    description: "Only src/ledger.py is modified by the agent."
+    target_metric: "scope_retained"
+    direction: "maximize"
+    threshold: 1.0

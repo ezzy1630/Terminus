@@ -1,0 +1,30 @@
+suite: retrieval-v1
+task: retrieval-named-01
+cohort: retrieval-v1
+title: Named file bug fix — free shipping threshold
+source_commit: fixture-retrieval-named-01-v1
+image_digest: local:python-3.12-pytest-8
+timeout: 600
+budget:
+  max_cost_usd: 1.0
+  max_wall_seconds: 600
+  max_tool_calls: 50
+  max_turns: 20
+allowed_network: []
+secrets: {}
+grader_version: 1.0.0
+rationale: >
+  Retrieval archetype 1: Explicitly named file.
+  The prompt directly mentions src/shipping.py and requests fixing the free-shipping threshold.
+acceptance_criteria:
+  - id: tests-pass
+    statement: the full test suite passes including hidden boundary tests
+    verification_hint: "command: python -m pytest -q"
+  - id: scope
+    statement: only src/shipping.py changed
+    verification_hint: "command: git status --porcelain"
+grader:
+  entrypoint: grader/run.py
+  protocol: json_stdio
+  timeout_seconds: 30
+risk_class: normal

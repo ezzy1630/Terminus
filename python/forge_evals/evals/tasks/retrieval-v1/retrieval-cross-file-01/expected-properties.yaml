@@ -1,0 +1,11 @@
+properties:
+  - id: P-RETRIEVAL-CROSS-FILE-01-PASS
+    description: "All client, API, CLI, and scheduler tests pass including hidden integration checks."
+    target_metric: "resolved"
+    direction: "maximize"
+    threshold: 1.0
+  - id: P-RETRIEVAL-CROSS-FILE-01-SCOPE
+    description: "Only src/client.py, src/api.py, src/cli.py, and src/scheduler.py are modified."
+    target_metric: "scope_retained"
+    direction: "maximize"
+    threshold: 1.0

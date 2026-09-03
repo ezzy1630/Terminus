@@ -1,0 +1,32 @@
+suite: retrieval-v1
+task: retrieval-symptom-02
+cohort: retrieval-v1
+title: Symptom-based bug fix — blank line ValueError in batch processing
+source_commit: fixture-retrieval-symptom-02-v1
+image_digest: local:python-3.12-pytest-8
+timeout: 600
+budget:
+  max_cost_usd: 1.0
+  max_wall_seconds: 600
+  max_tool_calls: 50
+  max_turns: 20
+allowed_network: []
+secrets: {}
+grader_version: 1.0.0
+rationale: >
+  Retrieval archetype 2: Code located from symptoms or behavior.
+  The prompt describes an unhandled ValueError crash during batch item parsing.
+  No file names are provided in the prompt. The agent must locate the parsing logic
+  and fix blank line / comment line handling.
+acceptance_criteria:
+  - id: tests-pass
+    statement: the full test suite passes including hidden blank-line and comment tests
+    verification_hint: "command: python -m pytest -q"
+  - id: scope
+    statement: only the batch parser module changed
+    verification_hint: "command: git status --porcelain"
+grader:
+  entrypoint: grader/run.py
+  protocol: json_stdio
+  timeout_seconds: 30
+risk_class: normal

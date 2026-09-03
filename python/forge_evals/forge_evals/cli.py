@@ -1218,6 +1218,17 @@ def _add_canary_cmd(sub: argparse._SubParsersAction[Any]) -> None:
         default="evals/results/canary",
         help="Directory for the report and both arms' run records.",
     )
+    p.add_argument(
+        "--aa-test",
+        action="store_true",
+        help="Run an A/A validation test with identical configurations on both arms.",
+    )
+    p.add_argument(
+        "--suite",
+        choices=["canary", "retrieval-v1"],
+        default="canary",
+        help="Evaluation suite to run (default: canary).",
+    )
 
 
 def _canary_live_pair_runner(
@@ -1282,7 +1293,7 @@ def _canary_live_pair_runner(
         for arm, harness in harnesses.items():
             harness_commit = args.baseline_commit if arm == "baseline" else args.candidate_commit
             request = RunRequest(
-                suite="canary",
+                suite=getattr(spec, "suite", "canary"),
                 task=spec.task_id,
                 task_dir=spec.package_dir,
                 harness_id="terminus-live",
@@ -1326,7 +1337,7 @@ def _canary_live_pair_runner(
 
 
 def _canary_fixture_pair_runner(args: argparse.Namespace) -> Any:
-    """Offline pair runner over deterministic fixture records.
+    """Offline counterpart to :func:`_canary_live_pair_runner`.
 
     Proves the canary machinery (pairing, identity enforcement, diffs,
     report) end to end without a provider. The records are fixture-only
@@ -1352,7 +1363,7 @@ def _canary_fixture_pair_runner(args: argparse.Namespace) -> Any:
             ("candidate", args.candidate_commit),
         ):
             request = RunRequest(
-                suite="canary",
+                suite=getattr(spec, "suite", "canary"),
                 task=spec.task_id,
                 task_dir=spec.package_dir,
                 harness_id="terminus-minimal",
@@ -1392,7 +1403,7 @@ def _canary_fixture_pair_runner(args: argparse.Namespace) -> Any:
 
 def _cmd_canary(args: argparse.Namespace) -> int:
     """Execute the paired canary comparison."""
-    from .canary import CANARY_TASKS, run_canary
+    from .canary import CANARY_TASKS, RETRIEVAL_V1_TASKS, run_canary
 
     output_dir = Path(args.output_dir)
     if args.fixture_mode:
@@ -1404,13 +1415,17 @@ def _cmd_canary(args: argparse.Namespace) -> int:
             print(f"canary unavailable: {error}", file=sys.stderr)
             return 2
 
+    suite_name = getattr(args, "suite", "canary")
+    tasks = RETRIEVAL_V1_TASKS if suite_name == "retrieval-v1" else CANARY_TASKS
+
     report = run_canary(
         pair_runner,
         baseline_commit=args.baseline_commit,
         candidate_commit=args.candidate_commit,
         seed=args.seed,
         output_dir=output_dir,
-        tasks=CANARY_TASKS,
+        tasks=tasks,
+        is_aa_test=getattr(args, "aa_test", False),
     )
 
     # Persist both arms' raw records next to the report so the comparison is

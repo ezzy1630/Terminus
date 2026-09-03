@@ -1,0 +1,30 @@
+suite:
+  id: retrieval-v1
+  version: 1
+  description: |
+    Terminus retrieval-v1 evaluation cohort. Five representative tasks measuring
+    retrieval efficacy across 3 archetypes:
+    - 2 named file tasks (retrieval-named-01, retrieval-named-02)
+    - 2 symptom/behavior tasks (retrieval-symptom-01, retrieval-symptom-02)
+    - 1 cross-file reference task (retrieval-cross-file-01)
+  source: internal
+  license: proprietary
+  task_count: 5
+  default_timeout_seconds: 600
+  default_budget:
+    model_micros: 1500000
+    compute_seconds: 300
+    wall_clock_seconds: 600
+    human_approvals: 0
+  grader_version: 1.0.0
+  metrics:
+    primary: resolved
+    secondary: [scope_retained, cost_usd, turns_taken, retrieval_latency_ms, hit_rate]
+  cohorts:
+    - retrieval-v1
+  tasks:
+    - retrieval-named-01
+    - retrieval-named-02
+    - retrieval-symptom-01
+    - retrieval-symptom-02
+    - retrieval-cross-file-01

@@ -3168,6 +3168,10 @@ export declare type ConnectorChunk = Message<"terminus.kernel.v1.ConnectorChunk"
 export declare const ConnectorChunkSchema: GenMessage<ConnectorChunk>;
 
 /**
+ * CodeSearchRequest performs code intelligence search.
+ * Currently delegates to inspect_symbol and performs exact symbol lookup
+ * against the heuristic symbol index.
+ *
  * @generated from message terminus.kernel.v1.CodeSearchRequest
  */
 export declare type CodeSearchRequest = Message<"terminus.kernel.v1.CodeSearchRequest"> & {

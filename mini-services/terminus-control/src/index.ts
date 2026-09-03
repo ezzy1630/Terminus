@@ -589,6 +589,11 @@ import {
   type WorkspaceFileReader,
 } from "./agent/retrieval-hydrator.js";
 import {
+  kernelRetrievalPipeline,
+  mapRetrievalMethod,
+  RetrievalTelemetryCollector,
+} from "./agent/retrieval-pipeline.js";
+import {
   VerificationRepairController,
   buildRepairContext,
   normalizeFailure,
@@ -13394,264 +13399,9 @@ async function discoverRepositorySignals(
   };
 }
 
-/** Kernel-backed code-intelligence retrieval for the live compiler path. */
-function kernelRetrievalPipeline(
-  clients: KernelUdsClients,
-  buildContext: () => Promise<RequestContext>,
-  observedAt: Rfc3339Timestamp,
-  modelKey: ModelKey,
-  sessionId: string,
-  taskId: string,
-  workspaceId: string,
-  repositoryMap: RepositoryMapObservation | null,
-  /** The task contract's allowed scope; ranks the repository map. */
-  allowedScope: { readonly readPaths: readonly string[]; readonly writePaths: readonly string[] }
-    = { readPaths: [], writePaths: [] },
-): RetrievalPipeline {
-  const fileReader: WorkspaceFileReader = async ({ path, startLine, endLine }) => {
-    try {
-      const baseContext = await buildContext();
-      const read = await clients.files.Read({
-        context: {
-          ...baseContext,
-          requestId: randomUUID(),
-          idempotencyKey: `code-hydrate:${randomUUID()}`,
-        },
-        intent: {
-          userIntentRef: "retrieval-hydration",
-          taskContractHash: "",
-          trustLabel: "derived",
-          confidentialityLabel: "workspace",
-          taintSources: [],
-          policyProfileId: "secure-local-default",
-          expectedEffectClass: "read_local",
-        },
-        path: { workspaceId, relativePath: path },
-        mode: "ranges",
-        ranges: [{ startLine, endLine }],
-        symbols: [],
-        maxBytes: 48 * 1_024,
-        expectedSha256: "",
-      });
-      return {
-        content: new TextDecoder("utf-8", { fatal: false }).decode(read.modelProjectionUtf8),
-        fileSha256: read.sourceVersion?.sha256 ?? null,
-        totalLines: null,
-      };
-    } catch {
-      // File unreadable (deleted/moved/unreadable since indexing): the
-      // caller falls back to the metadata-only representation.
-      return { content: null, fileSha256: null, totalLines: null };
-    }
-  };
-  const repositoryMapFragment = repositoryMap === null || repositoryMap.entries.length === 0
-    ? null
-    : (() => {
-        // Task-scoped and token-capped: files the contract may write come
-        // first, then files it may read, then the rest of the index — and the
-        // whole fragment stops at REPOSITORY_MAP_TOKEN_BUDGET instead of the
-        // 16-18k tokens the alphabetically-first 200 files used to cost.
-        const selection = selectTaskScopedRepositoryMap(
-          repositoryMap.entries
-            .slice(0, REPOSITORY_MAP_CONTEXT_ENTRY_LIMIT * 8)
-            .map((entry) => ({ path: entry.path, symbols: entry.symbols })),
-          { readPaths: allowedScope.readPaths, writePaths: allowedScope.writePaths },
-        );
-        const entries = selection.entries;
-        const rendered = buildRepositoryMapFragment(entries, {
-          maxEntries: entries.length,
-          omittedEntries: Math.max(0, repositoryMap.entries.length - entries.length),
-          continuationToken: repositoryMap.continuationToken,
-          title: "Kernel repository map",
-        });
-        const hash = computeContentHash(rendered.text);
-        const bytes = new TextEncoder().encode(rendered.text).byteLength;
-        const pathPatterns = entries.map((entry) => entry.path);
-        const fragment: ContextFragment = {
-          id: `kernel-repository-map:${hash}`,
-          kind: "code",
-          contentRef: {
-            hash,
-            uri: `artifact://sha256/${hash.slice("sha256:".length)}` as ContextFragment["contentRef"]["uri"],
-            mediaType: "text/plain",
-            bytes: BigInt(bytes) as ContextFragment["contentRef"]["bytes"],
-          },
-          textContent: rendered.text,
-          source: {
-            uri: `workspace://${workspaceId}/repository-map`,
-            producer: "terminus-kernel-code-intel",
-            producerVersion: "v1",
-            observedAt,
-            observedBy: "kernel",
-            evidenceRefs: [],
-          },
-          sourceVersion: repositoryMap.indexRevision,
-          authority: 55,
-          priority: 60,
-          trust: "derived",
-          confidentiality: "workspace",
-          injectionRisk: "low",
-          exactness: "semantics_preserving",
-          scope: {
-            workspaceId: workspaceId as ContextFragment["scope"]["workspaceId"],
-            sessionId: sessionId as ContextFragment["scope"]["sessionId"],
-            taskId: taskId as ContextFragment["scope"]["taskId"],
-            pathPatterns,
-          },
-          freshness: {
-            observedAt,
-            sourceVersion: repositoryMap.indexRevision,
-            stale: false,
-            staleReason: null,
-          },
-          dependencies: [],
-          invalidation: [{ kind: "file_changed", selector: `workspace://${workspaceId}` }],
-          estimatedTokens: { [modelKey]: Math.max(1, Math.ceil(rendered.text.length / 4)) },
-          selectionFeatures: {
-            relevance: 0.65,
-            novelty: 0.9,
-            coverage: 0.95,
-            uncertaintyReduction: 0.85,
-            riskReduction: 0.55,
-            modelCompatibility: 1,
-            redundancyPenalty: 0,
-            injectionPenalty: 0,
-          },
-        };
-        return fragment;
-      })();
-  const retrieve = async (queries: readonly RetrievalQuery[]): Promise<readonly RetrievalResult[]> => {
-    const results: RetrievalResult[] = repositoryMapFragment === null
-      ? []
-      : [{
-          fragment: repositoryMapFragment,
-          method: "semantic",
-          rawScore: 0.8,
-          rerankedScore: 0.8,
-          sourceVersion: repositoryMapFragment.sourceVersion,
-          reason: "kernel repository map",
-        }];
-    const seen = new Set<string>();
-    for (const query of queries) {
-      const baseContext = await buildContext();
-      const response = await clients.codeIntel.Search({
-        context: {
-          ...baseContext,
-          requestId: randomUUID(),
-          idempotencyKey: `code-search:${randomUUID()}`,
-        },
-        workspaceId,
-        query: query.text,
-        limit: 5,
-      });
-      if (response.truncated) {
-        throw new Error(
-          `code-intelligence retrieval truncated for query ${JSON.stringify(query.text)}${response.continuation === undefined ? " without a continuation token" : "; continuation RPC is unavailable"}`,
-        );
-      }
-      for (const hit of response.results) {
-        const id = `kernel-code:${hit.path}:${hit.line}:${hit.symbol}`;
-        if (seen.has(id)) continue;
-        seen.add(id);
-        // Hydrate the hit into an actual source span before labeling it as
-        // code context (deep-audit Rank 1 / PR3). Metadata-only fallback
-        // preserves navigation value when the file cannot be read.
-        const searchHit: SearchHit = {
-          path: hit.path,
-          line: hit.line,
-          symbol: typeof hit.symbol === "string" && hit.symbol.length > 0 ? hit.symbol : null,
-          method: hit.method,
-        };
-        const hydratedSpan = await hydrateSearchHit(searchHit, fileReader);
-        const text = hydratedSpan?.fragmentText ?? [
-          `# Code intelligence result`,
-          `path: ${hit.path}`,
-          `line: ${hit.line}`,
-          `symbol: ${hit.symbol}`,
-          `index method: ${hit.method}`,
-          `(source span unavailable — request read for implementation)`,
-        ].join("\n");
-        const hash = computeContentHash(text);
-        const fragment: ContextFragment = {
-          id,
-          kind: "code",
-          contentRef: {
-            hash,
-            uri: `artifact://sha256/${hash.slice("sha256:".length)}` as ContextFragment["contentRef"]["uri"],
-            mediaType: "text/plain",
-            bytes: BigInt(new TextEncoder().encode(text).byteLength) as ContextFragment["contentRef"]["bytes"],
-          },
-          textContent: text,
-          source: {
-            uri: `workspace://${hit.path}`,
-            producer: "terminus-kernel-code-intel",
-            producerVersion: "v1",
-            observedAt,
-            observedBy: "kernel",
-            evidenceRefs: [],
-          },
-          sourceVersion: null,
-          authority: 55,
-          priority: 55,
-          trust: "derived",
-          confidentiality: "workspace",
-          injectionRisk: "low",
-          exactness: "recoverable_by_reference",
-          scope: {
-            workspaceId: null,
-            sessionId: sessionId as ContextFragment["scope"]["sessionId"],
-            taskId: taskId as ContextFragment["scope"]["taskId"],
-            pathPatterns: [hit.path],
-          },
-          freshness: { observedAt, sourceVersion: null, stale: false, staleReason: null },
-          dependencies: [],
-          invalidation: [{ kind: "file_changed", selector: hit.path }],
-          estimatedTokens: { [modelKey]: Math.max(1, Math.ceil(text.length / 4)) },
-          selectionFeatures: {
-            relevance: query.suggestedMethods.includes(mapRetrievalMethod(hit.method)) ? 0.9 : 0.6,
-            novelty: 0.7,
-            coverage: 0.8,
-            uncertaintyReduction: 0.7,
-            riskReduction: 0.5,
-            modelCompatibility: 1,
-            redundancyPenalty: 0,
-            injectionPenalty: 0,
-          },
-        };
-        results.push({
-          fragment,
-          method: mapRetrievalMethod(hit.method),
-          rawScore: 1,
-          rerankedScore: 1,
-          sourceVersion: hydratedSpan?.fileSha256 ?? null,
-          reason: query.reason,
-        });
-      }
-    }
-    return results;
-  };
-  return {
-    retrieve: (queries) => retrieve(queries),
-    expandForGaps: (gaps) => retrieve(gaps.map((gap) => ({
-      text: gap.requirement,
-      reason: `evidence gap: ${gap.requirementId}`,
-      suggestedMethods: ["lexical_bm25"],
-    }))),
-  };
-}
-
-function mapRetrievalMethod(method: string): RetrievalMethod {
-  switch (method) {
-    case "tree_sitter":
-    case "lsp":
-    case "graph":
-      return method === "graph" ? "dependency_graph" : method;
-    case "lexical_bm25":
-      return method;
-    default:
-      return "lexical_bm25";
-  }
-}
+// Note: kernelRetrievalPipeline and mapRetrievalMethod are extracted to
+// ./agent/retrieval-pipeline.ts with comprehensive per-turn telemetry and
+// chunked lexical retrieval candidate support.
 
 interface AgentTaskTransition {
   readonly taskId: string;
@@ -18231,17 +17981,18 @@ async function agentLoop(turnId: string): Promise<void> {
               retrieve: async () => [],
               expandForGaps: async () => [],
             }
-          : kernelRetrievalPipeline(
-              requireKernelUds(),
-              buildArtifactContext,
-              worldState.observedAt,
-              selectedModel.modelKey,
-              task.sessionId,
-              task.id,
-              workspace.id,
-              repositorySignals.repositoryMap,
-              contract.allowedScope,
-            ),
+          : kernelRetrievalPipeline({
+              clients: requireKernelUds(),
+              buildContext: buildArtifactContext,
+              observedAt: worldState.observedAt,
+              modelKey: selectedModel.modelKey,
+              sessionId: task.sessionId,
+              taskId: task.id,
+              workspaceId: workspace.id,
+              repositoryMap: repositorySignals.repositoryMap,
+              allowedScope: contract.allowedScope,
+              profileMode: harnessProfileMode,
+            }),
         signal: abortController.signal,
       });
       previousCacheEpoch = readCacheEpochSnapshot(compiled.manifest.decisionRecord)

@@ -1,0 +1,11 @@
+properties:
+  - id: P-RETRIEVAL-SYMPTOM-02-PASS
+    description: "The batch parser test suite passes including hidden blank line and comment checks."
+    target_metric: "resolved"
+    direction: "maximize"
+    threshold: 1.0
+  - id: P-RETRIEVAL-SYMPTOM-02-SCOPE
+    description: "Only src/batch_parser.py is modified by the agent."
+    target_metric: "scope_retained"
+    direction: "maximize"
+    threshold: 1.0

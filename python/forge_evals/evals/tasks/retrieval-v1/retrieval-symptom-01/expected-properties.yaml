@@ -1,0 +1,16 @@
+properties:
+  - id: P-RETRIEVAL-SYMPTOM-01-DISCOVERY
+    description: "DISCOVERY.json identifies src/payments.py as the offending file."
+    target_metric: "resolved"
+    direction: "maximize"
+    threshold: 1.0
+  - id: P-RETRIEVAL-SYMPTOM-01-PASS
+    description: "The payment test suite passes including hidden retry tests."
+    target_metric: "resolved"
+    direction: "maximize"
+    threshold: 1.0
+  - id: P-RETRIEVAL-SYMPTOM-01-SCOPE
+    description: "Only src/payments.py and DISCOVERY.json are modified."
+    target_metric: "scope_retained"
+    direction: "maximize"
+    threshold: 1.0

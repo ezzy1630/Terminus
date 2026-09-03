@@ -63,6 +63,14 @@ tiers:
     release_evidence: true
 
 suites:
+  - id: retrieval-v1
+    manifest: evals/suites/retrieval-v1.yaml
+    task_roots:
+      - python/forge_evals/evals/tasks/retrieval-v1
+    source: internal
+    license: proprietary
+    default_tier: tier1
+    live_provider_required_for_promotion: true
   - id: terminus-internal
     manifest: evals/suites/forge-internal.yaml
     task_roots:
