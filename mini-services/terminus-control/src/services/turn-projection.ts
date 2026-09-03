@@ -87,6 +87,7 @@ export interface PublicAttemptProjection {
   readonly completed_at: string | null;
 }
 
+// skipcq: JS-R1005
 export const deriveWaitingReason = (
   state: string,
   extra?: TurnProjectionState,
@@ -131,6 +132,7 @@ const terminalErrorRequiresReconciliation = (terminalError: unknown): boolean =>
     && !Array.isArray(terminalError)
     && (terminalError as Record<string, unknown>)["reconciliation_required"] === true;
 
+// skipcq: JS-R1005
 export const projectTurn = (
   turn: TurnProjectionRow,
   attempts: readonly ProviderAttemptProjectionRow[],

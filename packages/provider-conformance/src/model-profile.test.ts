@@ -8,10 +8,10 @@ import {
   type ModelProfileCheckStatus,
 } from "./model-profile.js";
 
-function report(
+const report = (
   evidenceClass: ConformanceEvidenceClass = "external_live",
   status: ModelProfileCheckStatus = "passed",
-) {
+) => {
   return buildModelProfileConformanceReport({
     providerId: "openai",
     modelSnapshot: "gpt-test-2026-09-01",

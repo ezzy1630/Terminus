@@ -21,9 +21,10 @@ export interface ProviderGateResult {
   readonly issues: readonly string[];
 }
 
-export async function runExitGate(
+// skipcq: JS-R1005
+export const runExitGate = (
   results: Readonly<Record<string, ProviderGateResult>>,
-): Promise<ExitGateResult> {
+): Promise<ExitGateResult> => {
   const warnings: string[] = [];
   const failedTests: string[] = [];
   let passedTests = 0;
@@ -68,17 +69,17 @@ export async function runExitGate(
     }
   }
 
-  return {
+  return Promise.resolve({
     passed: failedTests.length === 0,
     totalTests,
     passedTests,
     failedTests,
     warnings,
     providerResults: results,
-  };
-}
+  });
+};
 
-export function buildProviderGateResult(
+export const buildProviderGateResult = (
   providerId: string,
   checks: {
     readonly rendersParseable: boolean;
@@ -89,15 +90,13 @@ export function buildProviderGateResult(
     readonly errorsProjectCorrectly: boolean;
   },
   issues: readonly string[] = [],
-): ProviderGateResult {
-  return {
-    providerId,
-    rendersParseable: checks.rendersParseable,
-    costsReconcile: checks.costsReconcile,
-    cacheBehavesUnderFailure: checks.cacheBehavesUnderFailure,
-    fallbackPolicyCompliant: checks.fallbackPolicyCompliant,
-    confidentialityEnforced: checks.confidentialityEnforced,
-    errorsProjectCorrectly: checks.errorsProjectCorrectly,
-    issues: [...issues],
-  };
-}
+): ProviderGateResult => ({
+  providerId,
+  rendersParseable: checks.rendersParseable,
+  costsReconcile: checks.costsReconcile,
+  cacheBehavesUnderFailure: checks.cacheBehavesUnderFailure,
+  fallbackPolicyCompliant: checks.fallbackPolicyCompliant,
+  confidentialityEnforced: checks.confidentialityEnforced,
+  errorsProjectCorrectly: checks.errorsProjectCorrectly,
+  issues: [...issues],
+});

@@ -80,9 +80,9 @@ export interface ReplayResult {
  * The manifest records the exact fragments and their order — replay
  * honors that order.
  */
-export async function replayContext(
+export const replayContext = async (
   input: ReplayInput,
-): Promise<ReplayResult> {
+): Promise<ReplayResult> => {
   assertManifestSelection(input.manifest, input.selectedFragments);
   const toolSchemas = replayToolSchemas(input);
   const cachePlan: ContextCachePlan = {
@@ -126,19 +126,19 @@ export async function replayContext(
     renderedRequestHash: hashRenderedRequest(rendered),
     ablation: null,
   };
-}
+};
 
 const VOLATILE_WORLD_STATE_FRAGMENT_ID = "runtime:world_state:latest";
 
-function isVolatileFragment(fragment: ContextFragment): boolean {
-  return fragment.id === VOLATILE_WORLD_STATE_FRAGMENT_ID;
-}
+const isVolatileFragment = (fragment: ContextFragment): boolean =>
+  fragment.id === VOLATILE_WORLD_STATE_FRAGMENT_ID;
 
-function ablatedCachePlan(
+// skipcq: JS-R1005
+const ablatedCachePlan = (
   input: ReplayInput,
   fragments: readonly ContextFragment[],
   toolSchemas: readonly ProviderToolSchema[],
-): ContextCachePlan {
+): ContextCachePlan => {
   const originalStableIds = new Set(
     input.manifest.fragments
       .slice(0, input.manifest.cachePlan.volatileSuffixBoundary)
@@ -204,7 +204,7 @@ function ablatedCachePlan(
     breakpoints: validBreakpoints,
     predictedCachedTokens,
   };
-}
+};
 
 /**
  * Replay with an ablation: remove specified fragments, optionally inject
@@ -212,10 +212,10 @@ function ablatedCachePlan(
  *
  * The ablation spec is recorded in the result for experiment tracking.
  */
-export async function replayWithAblation(
+export const replayWithAblation = async (
   input: ReplayInput,
   ablation: AblationSpec,
-): Promise<ReplayResult> {
+): Promise<ReplayResult> => {
   assertManifestSelection(input.manifest, input.selectedFragments);
   const toolSchemas = replayToolSchemas(input);
   const removeSet = new Set(ablation.removeFragmentIds);
@@ -268,7 +268,7 @@ export async function replayWithAblation(
 // ──────────────────────── Ablation presets ───────────────────────────────────
 
 /** Ablation that removes all checkpoint fragments. */
-export function checkpointAblation(fragments: readonly ContextFragment[]): AblationSpec {
+export const checkpointAblation = (fragments: readonly ContextFragment[]): AblationSpec => {
   const checkpointIds = fragments
     .filter((f) => f.kind === "checkpoint")
     .map((f) => f.id);
@@ -276,10 +276,10 @@ export function checkpointAblation(fragments: readonly ContextFragment[]): Ablat
     label: "remove_all_checkpoints",
     removeFragmentIds: checkpointIds,
   };
-}
+};
 
 /** Ablation that removes all memory fragments. */
-export function memoryAblation(fragments: readonly ContextFragment[]): AblationSpec {
+export const memoryAblation = (fragments: readonly ContextFragment[]): AblationSpec => {
   const memoryIds = fragments
     .filter((f) => f.kind === "memory")
     .map((f) => f.id);
@@ -287,10 +287,10 @@ export function memoryAblation(fragments: readonly ContextFragment[]): AblationS
     label: "remove_all_memory",
     removeFragmentIds: memoryIds,
   };
-}
+};
 
 /** Ablation that removes all world_state fragments. */
-export function worldStateAblation(fragments: readonly ContextFragment[]): AblationSpec {
+export const worldStateAblation = (fragments: readonly ContextFragment[]): AblationSpec => {
   const wsIds = fragments
     .filter((f) => f.kind === "world_state")
     .map((f) => f.id);
@@ -298,10 +298,10 @@ export function worldStateAblation(fragments: readonly ContextFragment[]): Ablat
     label: "remove_all_world_state",
     removeFragmentIds: wsIds,
   };
-}
+};
 
 /** Ablation that removes all documentation fragments. */
-export function documentationAblation(fragments: readonly ContextFragment[]): AblationSpec {
+export const documentationAblation = (fragments: readonly ContextFragment[]): AblationSpec => {
   const docIds = fragments
     .filter((f) => f.kind === "documentation")
     .map((f) => f.id);
@@ -309,21 +309,19 @@ export function documentationAblation(fragments: readonly ContextFragment[]): Ab
     label: "remove_all_documentation",
     removeFragmentIds: docIds,
   };
-}
+};
 
 /** Returns all standard ablation presets for a set of fragments. */
-export function standardAblations(
+export const standardAblations = (
   fragments: readonly ContextFragment[],
-): readonly AblationSpec[] {
-  return [
-    checkpointAblation(fragments),
-    memoryAblation(fragments),
-    worldStateAblation(fragments),
-    documentationAblation(fragments),
-  ];
-}
+): readonly AblationSpec[] => [
+  checkpointAblation(fragments),
+  memoryAblation(fragments),
+  worldStateAblation(fragments),
+  documentationAblation(fragments),
+];
 
-function replayHardInputLimit(manifest: ContextManifest): TokenCount {
+const replayHardInputLimit = (manifest: ContextManifest): TokenCount => {
   const record = manifest.decisionRecord;
   const configured = record?.hardInputLimit;
   if (typeof configured === "number" && Number.isFinite(configured) && configured >= 0) {
@@ -333,13 +331,13 @@ function replayHardInputLimit(manifest: ContextManifest): TokenCount {
   // recoverable fallback rather than pretending the recovery margin was an
   // input limit.
   return (manifest.outputReserveTokens + manifest.reasoningReserveTokens + manifest.recoveryMarginTokens) as TokenCount;
-}
+};
 
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
 
-function isProviderToolSchema(value: unknown): value is ProviderToolSchema {
+// skipcq: JS-R1005
+const isProviderToolSchema = (value: unknown): value is ProviderToolSchema => {
   if (!isRecord(value)) return false;
   const trustLevels = new Set(["builtin", "first_party", "verified_third_party", "untrusted"]);
   return typeof value.id === "string"
@@ -363,19 +361,19 @@ function isProviderToolSchema(value: unknown): value is ProviderToolSchema {
     && value.defaultTimeoutMs > 0
     && Array.isArray(value.policyTags)
     && value.policyTags.every((entry) => typeof entry === "string");
-}
+};
 
-function replayToolSchemas(input: ReplayInput): readonly ProviderToolSchema[] {
+const replayToolSchemas = (input: ReplayInput): readonly ProviderToolSchema[] => {
   if (input.toolSchemas !== undefined) return input.toolSchemas;
   const candidate = input.manifest.decisionRecord?.toolSchemas;
   if (!Array.isArray(candidate)) return [];
   return candidate.filter(isProviderToolSchema);
-}
+};
 
-function assertManifestSelection(
+const assertManifestSelection = (
   manifest: ContextManifest,
   fragments: readonly ContextFragment[],
-): void {
+): void => {
   if (manifest.fragments.length !== fragments.length) {
     throw new Error(
       `replay selection does not match manifest ${manifest.id}: expected ${manifest.fragments.length} fragments, got ${fragments.length}`,
@@ -388,13 +386,12 @@ function assertManifestSelection(
       throw new Error(`replay selection mismatch at position ${index} for manifest ${manifest.id}`);
     }
   }
-}
+};
 
-function hashRenderedRequest(rendered: RenderedProviderRequest): ContentHash {
-  return computeContentHash(canonicalJson({
+const hashRenderedRequest = (rendered: RenderedProviderRequest): ContentHash =>
+  computeContentHash(canonicalJson({
     providerId: rendered.providerId,
     model: rendered.model,
     body: rendered.body,
     request: { ...rendered.request, signal: null },
   }));
-}

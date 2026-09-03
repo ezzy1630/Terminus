@@ -462,12 +462,13 @@ function describeRunnerCatalog(catalog: VerificationRunnerCatalog): readonly str
  * is `skipped` with the reason — a hardcoded `just <recipe>` fails every
  * repository without a justfile.
  */
-export function resolvePredicateCommand(
+// skipcq: JS-R1005
+export const resolvePredicateCommand = (
   predicateType: string,
   program: string,
   args: readonly string[],
   catalog: VerificationRunnerCatalog,
-): PredicateCommandResolution {
+): PredicateCommandResolution => {
   if (program !== "terminus-predicate") {
     return { kind: "command", program, args, source: null };
   }
@@ -510,7 +511,7 @@ export function resolvePredicateCommand(
       ? `no test runner detected in this repository for '${predicateType}' (looked for ${[...REPOSITORY_SIGNAL_PATHS].join(", ")})`
       : `no detected runner implements '${predicateType}' (needs one of ${kinds.join(", ")}; detected ${detected.join("; ")})`,
   };
-}
+};
 
 function parseCommand(command: string): { readonly program: string; readonly args: readonly string[] } {
   const tokens: string[] = [];

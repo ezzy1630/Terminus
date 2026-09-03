@@ -58,18 +58,18 @@ export interface ModelProfileReportInput {
 export const IMMUTABLE_ARTIFACT_REF_PATTERN =
   /^(?:artifact:\/\/sha256\/[0-9a-f]{64}(?:#[a-zA-Z0-9_.-]+)?|sha256:[0-9a-f]{64})$/i;
 
-export function isImmutableArtifactRef(ref: string): boolean {
-  return IMMUTABLE_ARTIFACT_REF_PATTERN.test(ref.trim());
-}
+export const isImmutableArtifactRef = (ref: string): boolean =>
+  IMMUTABLE_ARTIFACT_REF_PATTERN.test(ref.trim());
 
-function requireText(name: string, value: string): void {
+const requireText = (name: string, value: string): void => {
   if (value.trim().length === 0) throw new Error(`${name} must be non-empty`);
-}
+};
 
 /** Build a complete, identity-bound conformance report from observed checks. */
-export function buildModelProfileConformanceReport(
+// skipcq: JS-R1005
+export const buildModelProfileConformanceReport = (
   input: ModelProfileReportInput,
-): ModelProfileConformanceReport {
+): ModelProfileConformanceReport => {
   for (const [name, value] of Object.entries({
     providerId: input.providerId,
     modelSnapshot: input.modelSnapshot,
@@ -139,11 +139,12 @@ export interface ModelProfileExpectation {
  * from the requested evidence class. Caller-supplied booleans cannot satisfy
  * this gate.
  */
-export function runModelProfileExitGate(input: {
+// skipcq: JS-R1005
+export const runModelProfileExitGate = (input: {
   readonly expectedProfiles: readonly ModelProfileExpectation[];
   readonly requiredEvidenceClass: ConformanceEvidenceClass;
   readonly reports: readonly unknown[];
-}): ModelProfileExitGateResult {
+}): ModelProfileExitGateResult => {
   if (input.expectedProfiles.length === 0) throw new Error("expectedProfiles must be non-empty");
   const expectedIds = input.expectedProfiles.map((profile) => profile.profileId);
   if (new Set(expectedIds).size !== expectedIds.length) {
@@ -188,12 +189,13 @@ export function runModelProfileExitGate(input: {
     failures,
     reports,
   };
-}
+};
 
 /** Validate an untrusted report object at boundary transitions. */
-export function validateModelProfileConformanceReport(
+// skipcq: JS-R1005
+export const validateModelProfileConformanceReport = (
   value: unknown,
-): ModelProfileConformanceReport {
+): ModelProfileConformanceReport => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("model profile conformance report must be an object");
   }
