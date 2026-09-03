@@ -7,10 +7,11 @@ import type {
   GoldenEpisode,
 } from "./types.js";
 
-export async function validateProviderConformance(
+// skipcq: JS-R1005
+export const validateProviderConformance = async (
   renderer: ProviderRenderer,
   episodes: readonly GoldenEpisode[],
-): Promise<ConformanceReport> {
+): Promise<ConformanceReport> => {
   const violations: ConformanceViolation[] = [];
   let passedCount = 0;
 

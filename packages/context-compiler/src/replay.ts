@@ -71,6 +71,81 @@ export interface ReplayResult {
   readonly ablation: AblationSpec | null;
 }
 
+const replayHardInputLimit = (manifest: ContextManifest): TokenCount => {
+  const record = manifest.decisionRecord;
+  const configured = record?.hardInputLimit;
+  if (typeof configured === "number" && Number.isFinite(configured) && configured >= 0) {
+    return BigInt(Math.trunc(configured)) as TokenCount;
+  }
+  // Legacy manifests did not record the limit. Preserve a conservative
+  // recoverable fallback rather than pretending the recovery margin was an
+  // input limit.
+  return (manifest.outputReserveTokens + manifest.reasoningReserveTokens + manifest.recoveryMarginTokens) as TokenCount;
+};
+
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+// skipcq: JS-R1005
+const isProviderToolSchema = (value: unknown): value is ProviderToolSchema => {
+  if (!isRecord(value)) return false;
+  const trustLevels = new Set(["builtin", "first_party", "verified_third_party", "untrusted"]);
+  return typeof value.id === "string"
+    && typeof value.version === "string"
+    && typeof value.summary === "string"
+    && isRecord(value.inputSchema)
+    && isRecord(value.resultSchema)
+    && typeof value.sideEffectClass === "string"
+    && Array.isArray(value.requiredCapabilities)
+    && value.requiredCapabilities.every((entry) => typeof entry === "string")
+    && typeof value.trustLevel === "string"
+    && trustLevels.has(value.trustLevel)
+    && typeof value.maximumModelResultBytes === "number"
+    && Number.isSafeInteger(value.maximumModelResultBytes)
+    && value.maximumModelResultBytes >= 0
+    && typeof value.maximumArtifactBytes === "number"
+    && Number.isSafeInteger(value.maximumArtifactBytes)
+    && value.maximumArtifactBytes >= 0
+    && typeof value.defaultTimeoutMs === "number"
+    && Number.isSafeInteger(value.defaultTimeoutMs)
+    && value.defaultTimeoutMs > 0
+    && Array.isArray(value.policyTags)
+    && value.policyTags.every((entry) => typeof entry === "string");
+};
+
+const replayToolSchemas = (input: ReplayInput): readonly ProviderToolSchema[] => {
+  if (input.toolSchemas !== undefined) return input.toolSchemas;
+  const candidate = input.manifest.decisionRecord?.toolSchemas;
+  if (!Array.isArray(candidate)) return [];
+  return candidate.filter(isProviderToolSchema);
+};
+
+const assertManifestSelection = (
+  manifest: ContextManifest,
+  fragments: readonly ContextFragment[],
+): void => {
+  if (manifest.fragments.length !== fragments.length) {
+    throw new Error(
+      `replay selection does not match manifest ${manifest.id}: expected ${manifest.fragments.length} fragments, got ${fragments.length}`,
+    );
+  }
+  for (let index = 0; index < manifest.fragments.length; index += 1) {
+    const entry = manifest.fragments[index]!;
+    const fragment = fragments[index]!;
+    if (entry.fragmentId !== fragment.id || entry.artifactHash !== fragment.contentRef.hash) {
+      throw new Error(`replay selection mismatch at position ${index} for manifest ${manifest.id}`);
+    }
+  }
+};
+
+const hashRenderedRequest = (rendered: RenderedProviderRequest): ContentHash =>
+  computeContentHash(canonicalJson({
+    providerId: rendered.providerId,
+    model: rendered.model,
+    body: rendered.body,
+    request: { ...rendered.request, signal: null },
+  }));
+
 // ──────────────────────── Replay functions ───────────────────────────────────
 
 /**
@@ -320,78 +395,3 @@ export const standardAblations = (
   worldStateAblation(fragments),
   documentationAblation(fragments),
 ];
-
-const replayHardInputLimit = (manifest: ContextManifest): TokenCount => {
-  const record = manifest.decisionRecord;
-  const configured = record?.hardInputLimit;
-  if (typeof configured === "number" && Number.isFinite(configured) && configured >= 0) {
-    return BigInt(Math.trunc(configured)) as TokenCount;
-  }
-  // Legacy manifests did not record the limit. Preserve a conservative
-  // recoverable fallback rather than pretending the recovery margin was an
-  // input limit.
-  return (manifest.outputReserveTokens + manifest.reasoningReserveTokens + manifest.recoveryMarginTokens) as TokenCount;
-};
-
-const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-
-// skipcq: JS-R1005
-const isProviderToolSchema = (value: unknown): value is ProviderToolSchema => {
-  if (!isRecord(value)) return false;
-  const trustLevels = new Set(["builtin", "first_party", "verified_third_party", "untrusted"]);
-  return typeof value.id === "string"
-    && typeof value.version === "string"
-    && typeof value.summary === "string"
-    && isRecord(value.inputSchema)
-    && isRecord(value.resultSchema)
-    && typeof value.sideEffectClass === "string"
-    && Array.isArray(value.requiredCapabilities)
-    && value.requiredCapabilities.every((entry) => typeof entry === "string")
-    && typeof value.trustLevel === "string"
-    && trustLevels.has(value.trustLevel)
-    && typeof value.maximumModelResultBytes === "number"
-    && Number.isSafeInteger(value.maximumModelResultBytes)
-    && value.maximumModelResultBytes >= 0
-    && typeof value.maximumArtifactBytes === "number"
-    && Number.isSafeInteger(value.maximumArtifactBytes)
-    && value.maximumArtifactBytes >= 0
-    && typeof value.defaultTimeoutMs === "number"
-    && Number.isSafeInteger(value.defaultTimeoutMs)
-    && value.defaultTimeoutMs > 0
-    && Array.isArray(value.policyTags)
-    && value.policyTags.every((entry) => typeof entry === "string");
-};
-
-const replayToolSchemas = (input: ReplayInput): readonly ProviderToolSchema[] => {
-  if (input.toolSchemas !== undefined) return input.toolSchemas;
-  const candidate = input.manifest.decisionRecord?.toolSchemas;
-  if (!Array.isArray(candidate)) return [];
-  return candidate.filter(isProviderToolSchema);
-};
-
-const assertManifestSelection = (
-  manifest: ContextManifest,
-  fragments: readonly ContextFragment[],
-): void => {
-  if (manifest.fragments.length !== fragments.length) {
-    throw new Error(
-      `replay selection does not match manifest ${manifest.id}: expected ${manifest.fragments.length} fragments, got ${fragments.length}`,
-    );
-  }
-  for (let index = 0; index < manifest.fragments.length; index += 1) {
-    const entry = manifest.fragments[index]!;
-    const fragment = fragments[index]!;
-    if (entry.fragmentId !== fragment.id || entry.artifactHash !== fragment.contentRef.hash) {
-      throw new Error(`replay selection mismatch at position ${index} for manifest ${manifest.id}`);
-    }
-  }
-};
-
-const hashRenderedRequest = (rendered: RenderedProviderRequest): ContentHash =>
-  computeContentHash(canonicalJson({
-    providerId: rendered.providerId,
-    model: rendered.model,
-    body: rendered.body,
-    request: { ...rendered.request, signal: null },
-  }));

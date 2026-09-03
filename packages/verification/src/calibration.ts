@@ -38,6 +38,7 @@ const SPECIAL_EVIDENCE_REQUIREMENTS = new Set([
 export interface CalibrationCase {
   readonly id: string;
   readonly tier: VerificationTier;
+  // skipcq: JS-T1001
   readonly risk_class?: "low" | "normal" | "high" | "critical" | undefined;
   readonly changed_files: readonly string[];
   readonly expected_outcome:

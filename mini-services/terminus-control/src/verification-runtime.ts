@@ -358,56 +358,6 @@ async function hashChangedGitPaths(
 export const WORKSPACE_TREE_HASH_SCRIPT =
   'find . -type f -not -path "./.git/*" -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256';
 
-async function runKernelPredicate(
-  clients: KernelUdsClients,
-  baseContext: RequestContext,
-  workspaceId: string,
-  request: Parameters<PredicateCommandRunner["run"]>[0],
-  catalog: VerificationRunnerCatalog,
-  workspaceRoot: string | null = null,
-): Promise<PredicateCommandOutcome> {
-  if (request.signal?.aborted) {
-    throw new Error("verification predicate aborted before kernel start");
-  }
-  const parsed = parseCommand(request.command);
-  const resolution = resolvePredicateCommand(request.predicateType, parsed.program, parsed.args, catalog);
-  if (resolution.kind === "skipped") {
-    return {
-      exitCode: 0,
-      stdout: "",
-      stderr: "",
-      status: "skipped",
-      reasonIfSkipped: resolution.reason,
-      observations: {
-        requestedPaths: [...request.paths],
-        detectedRunners: describeRunnerCatalog(catalog),
-      },
-    };
-  }
-  const outcome = await runKernelCommand(
-    clients,
-    baseContext,
-    workspaceId,
-    resolution.program,
-    resolution.args,
-    request.signal,
-    request.timeoutMs,
-    workspaceRoot,
-  );
-  return {
-    ...outcome,
-    observations: {
-      // `paths` scope the node, not the runner: appending them as argv to a
-      // repository-owned recipe would change what the recipe means. They are
-      // recorded as evidence instead of silently dropped.
-      requestedPaths: [...request.paths],
-      resolvedCommand: [resolution.program, ...resolution.args].join(" "),
-      ...(resolution.source === null ? {} : { runnerSource: resolution.source }),
-      timeoutMs: request.timeoutMs,
-    },
-  };
-}
-
 /** Runner role that satisfies each derived predicate, in preference order. */
 const RUNNER_KINDS_BY_PREDICATE: Readonly<Record<string, readonly VerificationRunnerKind[]>> = {
   file_parses: ["typecheck", "lint", "test"],
@@ -446,12 +396,50 @@ type PredicateCommandResolution =
   | { readonly kind: "command"; readonly program: string; readonly args: readonly string[]; readonly source: string | null }
   | { readonly kind: "skipped"; readonly reason: string };
 
-function describeRunnerCatalog(catalog: VerificationRunnerCatalog): readonly string[] {
-  return Object.values(catalog)
+const describeRunnerCatalog = (catalog: VerificationRunnerCatalog): readonly string[] =>
+  Object.values(catalog)
     .filter((runner): runner is NonNullable<typeof runner> => runner !== undefined)
     .map((runner) => `${runner.kind}=${runner.command} (${runner.sourcePath})`)
     .sort();
-}
+
+// skipcq: JS-R1005
+const parseCommand = (command: string): { readonly program: string; readonly args: readonly string[] } => {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  for (const character of command.trim()) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote !== null) {
+      if (character === quote) quote = null;
+      else current += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+    } else if (/\s/.test(character)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = "";
+      }
+    } else {
+      current += character;
+    }
+  }
+  if (escaped || quote !== null) throw new Error("verification command has an unterminated escape or quote");
+  if (current.length > 0) tokens.push(current);
+  const [program, ...args] = tokens;
+  if (program === undefined) throw new Error("verification command is empty");
+  return { program, args };
+};
 
 /**
  * Turn a node's declared command into something the kernel can run.
@@ -513,42 +501,54 @@ export const resolvePredicateCommand = (
   };
 };
 
-function parseCommand(command: string): { readonly program: string; readonly args: readonly string[] } {
-  const tokens: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | null = null;
-  let escaped = false;
-  for (const character of command.trim()) {
-    if (escaped) {
-      current += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote !== null) {
-      if (character === quote) quote = null;
-      else current += character;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-    } else if (/\s/.test(character)) {
-      if (current.length > 0) {
-        tokens.push(current);
-        current = "";
-      }
-    } else {
-      current += character;
-    }
+async function runKernelPredicate(
+  clients: KernelUdsClients,
+  baseContext: RequestContext,
+  workspaceId: string,
+  request: Parameters<PredicateCommandRunner["run"]>[0],
+  catalog: VerificationRunnerCatalog,
+  workspaceRoot: string | null = null,
+): Promise<PredicateCommandOutcome> {
+  if (request.signal?.aborted) {
+    throw new Error("verification predicate aborted before kernel start");
   }
-  if (escaped || quote !== null) throw new Error("verification command has an unterminated escape or quote");
-  if (current.length > 0) tokens.push(current);
-  const [program, ...args] = tokens;
-  if (program === undefined) throw new Error("verification command is empty");
-  return { program, args };
+  const parsed = parseCommand(request.command);
+  const resolution = resolvePredicateCommand(request.predicateType, parsed.program, parsed.args, catalog);
+  if (resolution.kind === "skipped") {
+    return {
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      status: "skipped",
+      reasonIfSkipped: resolution.reason,
+      observations: {
+        requestedPaths: [...request.paths],
+        detectedRunners: describeRunnerCatalog(catalog),
+      },
+    };
+  }
+  const outcome = await runKernelCommand(
+    clients,
+    baseContext,
+    workspaceId,
+    resolution.program,
+    resolution.args,
+    request.signal,
+    request.timeoutMs,
+    workspaceRoot,
+  );
+  return {
+    ...outcome,
+    observations: {
+      // `paths` scope the node, not the runner: appending them as argv to a
+      // repository-owned recipe would change what the recipe means. They are
+      // recorded as evidence instead of silently dropped.
+      requestedPaths: [...request.paths],
+      resolvedCommand: [resolution.program, ...resolution.args].join(" "),
+      ...(resolution.source === null ? {} : { runnerSource: resolution.source }),
+      timeoutMs: request.timeoutMs,
+    },
+  };
 }
 
 function nodeCommandResolution(

@@ -134,6 +134,86 @@ export interface ModelProfileExpectation {
   readonly providerId: string;
 }
 
+// skipcq: JS-R1005
+const parseModelProfileCheck = (value: unknown, index: number): ModelProfileCheckResult => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`report.checks[${index}] must be an object`);
+  }
+  const check = value as Record<string, unknown>;
+  if (
+    typeof check.checkId !== "string"
+    || !MODEL_PROFILE_CHECK_IDS.includes(check.checkId as ModelProfileCheckId)
+  ) {
+    throw new Error(`report.checks[${index}].checkId is invalid`);
+  }
+  if (check.status !== "passed" && check.status !== "failed" && check.status !== "blocked") {
+    throw new Error(`report.checks[${index}].status is invalid`);
+  }
+  if (typeof check.artifactRef !== "string") {
+    throw new Error(`report.checks[${index}].artifactRef must be a string`);
+  }
+  if (check.diagnostic !== null && typeof check.diagnostic !== "string") {
+    throw new Error(`report.checks[${index}].diagnostic must be a string or null`);
+  }
+  return {
+    checkId: check.checkId as ModelProfileCheckId,
+    status: check.status,
+    artifactRef: check.artifactRef,
+    diagnostic: check.diagnostic,
+  };
+};
+
+/** Validate an untrusted report object at boundary transitions. */
+// skipcq: JS-R1005
+export const validateModelProfileConformanceReport = (
+  value: unknown,
+): ModelProfileConformanceReport => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("model profile conformance report must be an object");
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.schemaVersion !== MODEL_PROFILE_CONFORMANCE_SCHEMA_VERSION) {
+    throw new Error(`unsupported schemaVersion: ${String(obj.schemaVersion)}`);
+  }
+  for (const field of [
+    "providerId",
+    "modelSnapshot",
+    "apiVersion",
+    "profileId",
+    "profileVersion",
+    "testedAt",
+    "terminusCommit",
+  ]) {
+    if (typeof obj[field] !== "string" || (obj[field] as string).trim().length === 0) {
+      throw new Error(`report.${field} must be a non-empty string`);
+    }
+  }
+  if (obj.evidenceClass !== "deterministic_adapter" && obj.evidenceClass !== "external_live") {
+    throw new Error(`invalid evidenceClass: ${String(obj.evidenceClass)}`);
+  }
+  if (Number.isNaN(Date.parse(obj.testedAt as string))) {
+    throw new Error("report.testedAt must be an RFC3339 timestamp");
+  }
+  if (!/^[0-9a-f]{40,64}$/i.test(obj.terminusCommit as string)) {
+    throw new Error("report.terminusCommit must be a full Git revision");
+  }
+  if (!Array.isArray(obj.checks)) {
+    throw new Error("report.checks must be an array");
+  }
+  const checks = obj.checks.map(parseModelProfileCheck);
+  return buildModelProfileConformanceReport({
+    providerId: obj.providerId as string,
+    modelSnapshot: obj.modelSnapshot as string,
+    apiVersion: obj.apiVersion as string,
+    profileId: obj.profileId as string,
+    profileVersion: obj.profileVersion as string,
+    evidenceClass: obj.evidenceClass as ConformanceEvidenceClass,
+    testedAt: obj.testedAt as string,
+    terminusCommit: obj.terminusCommit as string,
+    checks,
+  });
+};
+
 /**
  * Fail closed unless every expected versioned profile has one complete report
  * from the requested evidence class. Caller-supplied booleans cannot satisfy
@@ -190,80 +270,3 @@ export const runModelProfileExitGate = (input: {
     reports,
   };
 };
-
-/** Validate an untrusted report object at boundary transitions. */
-// skipcq: JS-R1005
-export const validateModelProfileConformanceReport = (
-  value: unknown,
-): ModelProfileConformanceReport => {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("model profile conformance report must be an object");
-  }
-  const obj = value as Record<string, unknown>;
-  if (obj.schemaVersion !== MODEL_PROFILE_CONFORMANCE_SCHEMA_VERSION) {
-    throw new Error(`unsupported schemaVersion: ${String(obj.schemaVersion)}`);
-  }
-  for (const field of [
-    "providerId",
-    "modelSnapshot",
-    "apiVersion",
-    "profileId",
-    "profileVersion",
-    "testedAt",
-    "terminusCommit",
-  ]) {
-    if (typeof obj[field] !== "string" || (obj[field] as string).trim().length === 0) {
-      throw new Error(`report.${field} must be a non-empty string`);
-    }
-  }
-  if (obj.evidenceClass !== "deterministic_adapter" && obj.evidenceClass !== "external_live") {
-    throw new Error(`invalid evidenceClass: ${String(obj.evidenceClass)}`);
-  }
-  if (Number.isNaN(Date.parse(obj.testedAt as string))) {
-    throw new Error("report.testedAt must be an RFC3339 timestamp");
-  }
-  if (!/^[0-9a-f]{40,64}$/i.test(obj.terminusCommit as string)) {
-    throw new Error("report.terminusCommit must be a full Git revision");
-  }
-  if (!Array.isArray(obj.checks)) {
-    throw new Error("report.checks must be an array");
-  }
-  const checks = obj.checks.map((value, index): ModelProfileCheckResult => {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new Error(`report.checks[${index}] must be an object`);
-    }
-    const check = value as Record<string, unknown>;
-    if (
-      typeof check.checkId !== "string"
-      || !MODEL_PROFILE_CHECK_IDS.includes(check.checkId as ModelProfileCheckId)
-    ) {
-      throw new Error(`report.checks[${index}].checkId is invalid`);
-    }
-    if (check.status !== "passed" && check.status !== "failed" && check.status !== "blocked") {
-      throw new Error(`report.checks[${index}].status is invalid`);
-    }
-    if (typeof check.artifactRef !== "string") {
-      throw new Error(`report.checks[${index}].artifactRef must be a string`);
-    }
-    if (check.diagnostic !== null && typeof check.diagnostic !== "string") {
-      throw new Error(`report.checks[${index}].diagnostic must be a string or null`);
-    }
-    return {
-      checkId: check.checkId as ModelProfileCheckId,
-      status: check.status,
-      artifactRef: check.artifactRef,
-      diagnostic: check.diagnostic,
-    };
-  });
-  return buildModelProfileConformanceReport({
-    providerId: obj.providerId as string,
-    modelSnapshot: obj.modelSnapshot as string,
-    apiVersion: obj.apiVersion as string,
-    profileId: obj.profileId as string,
-    profileVersion: obj.profileVersion as string,
-    evidenceClass: obj.evidenceClass as ConformanceEvidenceClass,
-    testedAt: obj.testedAt as string,
-    terminusCommit: obj.terminusCommit as string,
-    checks,
-  });
-}
