@@ -7,10 +7,11 @@ import type {
   GoldenEpisode,
 } from "./types.js";
 
-export async function validateProviderConformance(
+// skipcq: JS-R1005
+export const validateProviderConformance = async (
   renderer: ProviderRenderer,
   episodes: readonly GoldenEpisode[],
-): Promise<ConformanceReport> {
+): Promise<ConformanceReport> => {
   const violations: ConformanceViolation[] = [];
   let passedCount = 0;
 
@@ -162,19 +163,32 @@ export async function validateProviderConformance(
       });
     }
 
-    // 5. Usage extraction
+    // 5. Usage extraction. Every normalized field participates in the
+    // contract; checking only inputTokens let cache/reasoning/cost drift pass.
     try {
       const usage = renderer.extractUsage(ep.simulatedResponse);
-      if (usage.inputTokens !== ep.expectedUsage.inputTokens) {
-        episodePassed = false;
-        violations.push({
-          episodeId: ep.id,
-          rendererId: renderer.providerId,
-          check: "usage.inputTokens",
-          expected: ep.expectedUsage.inputTokens,
-          actual: usage.inputTokens,
-          message: `Input token count mismatch: expected ${ep.expectedUsage.inputTokens}, got ${usage.inputTokens}`,
-        });
+      const usageFields = [
+        "inputTokens",
+        "cachedInputTokens",
+        "cacheWriteTokens",
+        "outputTokens",
+        "reasoningTokens",
+        "toolSchemaTokens",
+        "latencyMs",
+        "timeToFirstTokenMs",
+      ] as const;
+      for (const field of usageFields) {
+        if (usage[field] !== ep.expectedUsage[field]) {
+          episodePassed = false;
+          violations.push({
+            episodeId: ep.id,
+            rendererId: renderer.providerId,
+            check: `usage.${field}`,
+            expected: ep.expectedUsage[field],
+            actual: usage[field],
+            message: `Usage ${field} mismatch`,
+          });
+        }
       }
     } catch (err) {
       episodePassed = false;

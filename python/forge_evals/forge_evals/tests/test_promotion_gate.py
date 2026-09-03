@@ -41,7 +41,12 @@ def test_promotion_gate_all_pass_promotes() -> None:
     """All gates pass → PROMOTE."""
     result = evaluate_promotion(_winning_evaluation())
     assert result.decision is PromotionDecision.PROMOTE
-    assert all(g.status is GateStatus.PASS for g in result.gates)
+    # The reliability gate is n/a without reliability evidence; every other
+    # gate must actually pass.
+    assert all(
+        g.status is GateStatus.PASS or g.status is GateStatus.NOT_APPLICABLE
+        for g in result.gates
+    )
     assert result.passed
 
 
@@ -181,10 +186,11 @@ def test_promotion_gate_passed_property_matches_decision() -> None:
     assert not evaluate_promotion(ev_lose).passed
 
 
-def test_promotion_gate_has_six_gates() -> None:
-    """Six gates are evaluated (Pareto, confidence, regressions, security, operations, maintainability)."""
+def test_promotion_gate_has_seven_gates() -> None:
+    """Seven gates: Pareto, confidence, regressions, security, operations,
+    maintainability, reliability (causal tier 3)."""
     result = evaluate_promotion(_winning_evaluation())
-    assert len(result.gates) == 6
+    assert len(result.gates) == 7
     names = {g.name for g in result.gates}
     assert names == {
         "pareto_frontier",
@@ -193,7 +199,16 @@ def test_promotion_gate_has_six_gates() -> None:
         "security_guardrails",
         "operations",
         "maintainability",
+        "reliability",
     }
+
+
+def test_promotion_gate_reliability_gate_present_without_evidence() -> None:
+    """The reliability gate reports n/a when no reliability evidence exists."""
+    result = evaluate_promotion(_winning_evaluation())
+    reliability = next((g for g in result.gates if g.name == "reliability"), None)
+    assert reliability is not None
+    assert reliability.status is GateStatus.NOT_APPLICABLE
 
 
 def test_promotion_gate_result_blocking_gates_property() -> None:

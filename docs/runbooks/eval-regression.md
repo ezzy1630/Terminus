@@ -86,3 +86,5 @@ Use this runbook when the eval lab detects a regression: a feature, configuratio
 - `docs/runbooks/security-incident.md` — if the regression is a safety regression.
 - `docs/quality/release-gates.md` — release gate criteria.
 - SPEC §18 (eval lab), §41 (impl), §46.11 (eval tiers), §46.18 (release gate), §50.9 (quality/release acceptance).
+- `docs/architecture/evaluation-lab.md` — causal baseline-vs-candidate system (ADR-0056), tier commands, report schemas.
+- `docs/decisions/ADR-0056-causal-baseline-candidate-evaluation-tiers.md` — the three-tier decision and gate semantics.

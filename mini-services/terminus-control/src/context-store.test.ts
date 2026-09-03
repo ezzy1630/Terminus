@@ -14,7 +14,13 @@ import type {
 
 const MANIFEST_ID = "00000000-0000-7000-8000-000000000001";
 
-function storeFor(experiment: Readonly<Record<string, unknown>>): PrismaContextStore {
+const storeFor = (
+  experiment: Readonly<Record<string, unknown>>,
+  options: {
+    readonly breakpoints?: readonly number[];
+    readonly fragments?: readonly Record<string, unknown>[];
+  } = {},
+): PrismaContextStore => {
   const row = {
     id: MANIFEST_ID,
     providerAttemptId: null,
@@ -25,12 +31,12 @@ function storeFor(experiment: Readonly<Record<string, unknown>>): PrismaContextS
     experimentJson: JSON.stringify(experiment),
     estimatedTokensJson: JSON.stringify({ output: "10", reasoning: "0", toolResult: "0", recovery: "0" }),
     cachePlanJson: JSON.stringify({
-      stablePrefixHash: "sha256:" + "0".repeat(64),
+      stablePrefixHash: `sha256:${"0".repeat(64)}`,
       volatileSuffixBoundary: 0,
-      breakpoints: [],
+      breakpoints: options.breakpoints ?? [],
       predictedCachedTokens: "200",
     }),
-    fragments: [],
+    fragments: options.fragments ?? [],
     createdAt: new Date("2026-08-27T00:00:00Z"),
   };
   const db = {
@@ -51,9 +57,27 @@ function storeFor(experiment: Readonly<Record<string, unknown>>): PrismaContextS
 }
 
 describe("PrismaContextStore cache observation read-back", () => {
+  test("restores the cache breakpoint recorded for a rendered fragment", async () => {
+    const manifest = await storeFor({}, {
+      breakpoints: [0],
+      fragments: [{
+        id: "row-1",
+        fragmentKey: "fragment-1",
+        kind: "authority",
+        contentArtifact: `artifact://sha256/${"2".repeat(64)}`,
+        authority: 100,
+        renderedPosition: 0,
+        estimatedTokens: 12,
+        selected: true,
+      }],
+    }).getManifest(MANIFEST_ID as Uuid7);
+
+    expect(manifest?.fragments[0]?.cacheBreakpoint).toBe(true);
+  });
+
   test("reads the explicit observed cache count from the durable observation", async () => {
     const store = storeFor({
-      providerCapabilityHash: "sha256:" + "1".repeat(64),
+      providerCapabilityHash: `sha256:${"1".repeat(64)}`,
       observation: {
         cache: {
           predictedCachedTokens: "200",

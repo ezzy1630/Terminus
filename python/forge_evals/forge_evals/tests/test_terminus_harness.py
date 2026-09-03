@@ -169,6 +169,42 @@ def _harness(url: str) -> TerminusHarness:
     )
 
 
+def test_context_manifest_events_resolve_durable_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = TerminusHarness(
+        TerminusHarnessConfig(base_url="http://unused", token=None, poll_interval_seconds=0.0)
+    )
+    requested: list[str] = []
+
+    def fake_request(method: str, path: str, _body: object = None) -> dict[str, Any]:
+        assert method == "GET"
+        requested.append(path)
+        return {"manifest_id": "manifest-1", "estimated_tokens": {"predictedInput": 42}}
+
+    monkeypatch.setattr(harness, "_request", fake_request)
+    manifests = harness._collect_context_manifests(
+        [{
+            "event_type": "context.manifest_persisted",
+            "payload": {"manifestId": "manifest-1"},
+        }],
+        fallback=[{"purpose": "legacy-context"}],
+    )
+
+    assert manifests == [{
+        "manifest_id": "manifest-1",
+        "estimated_tokens": {"predictedInput": 42},
+    }]
+    assert requested == ["/v1/context/manifests/manifest-1"]
+
+
+def test_context_manifest_collection_uses_legacy_inventory_without_events() -> None:
+    harness = TerminusHarness(TerminusHarnessConfig(base_url="http://unused", token=None))
+    fallback = [{"purpose": "context-manifest", "artifact_hash": "sha256:legacy"}]
+
+    assert harness._collect_context_manifests([], fallback=fallback) is fallback
+
+
 def test_wait_follows_repair_continuation_instead_of_dead_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -191,8 +227,7 @@ def test_wait_follows_repair_continuation_instead_of_dead_parent(
     )
     repair_reads = iter([{"state": "PROVIDER_RUNNING"}, {"state": "COMPLETED"}])
 
-    def fake_request(method: str, path: str, body: object = None) -> dict[str, Any]:
-        del body
+    def fake_request(method: str, path: str, _body: object = None) -> dict[str, Any]:
         assert method == "GET"
         if path == "/v1/tasks/task-1":
             return next(task_reads)
@@ -218,8 +253,7 @@ def test_wait_does_not_complete_active_task_after_proposal_turn_settles(
     )
     turn_reads = iter([{"state": "COMPLETED"}, {"state": "COMPLETED"}])
 
-    def fake_request(method: str, path: str, body: object = None) -> dict[str, Any]:
-        del body
+    def fake_request(method: str, path: str, _body: object = None) -> dict[str, Any]:
         assert method == "GET"
         if path == "/v1/tasks/task-1":
             return next(task_reads)
@@ -241,8 +275,7 @@ def test_wait_preserves_cancellation_for_active_task(
         TerminusHarnessConfig(base_url="http://unused", token=None, poll_interval_seconds=0.0)
     )
 
-    def fake_request(method: str, path: str, body: object = None) -> dict[str, Any]:
-        del body
+    def fake_request(method: str, path: str, _body: object = None) -> dict[str, Any]:
         assert method == "GET"
         if path == "/v1/tasks/task-1":
             return {"status": "ACTIVE", "active_turn": None}
@@ -262,8 +295,7 @@ def test_wait_preserves_terminal_completed_task_status(
         TerminusHarnessConfig(base_url="http://unused", token=None, poll_interval_seconds=0.0)
     )
 
-    def fake_request(method: str, path: str, body: object = None) -> dict[str, Any]:
-        del body
+    def fake_request(method: str, path: str, _body: object = None) -> dict[str, Any]:
         assert method == "GET"
         if path == "/v1/tasks/task-1":
             return {"status": "COMPLETED", "active_turn": None}
@@ -359,8 +391,7 @@ def test_session_steering_fails_closed_when_defaults_are_not_applied(
 ) -> None:
     harness = TerminusHarness(TerminusHarnessConfig(base_url="http://unused", token=None))
 
-    def reject_patch(method: str, path: str, body: object = None) -> dict[str, Any]:
-        del path, body
+    def reject_patch(method: str, _path: str, _body: object = None) -> dict[str, Any]:
         if method == "PATCH":
             raise TerminusControlError("session patch rejected")
         raise AssertionError(f"unexpected method: {method}")

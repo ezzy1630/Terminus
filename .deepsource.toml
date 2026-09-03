@@ -32,10 +32,12 @@ exclude_patterns = [
   "docs/generated/**",
   "skills/**",
   "Terminus — Research/**",
-  "evals/**",
+  "**/evals/**",
+  "python/forge_evals/evals/**",
   "**/generated/**",
   "packages/terminus-kernel-client/src/generated/**",
-  "scripts/**"
+  "scripts/**",
+  "**/terminus-control/src/index.ts"
 ]
 
 [[analyzers]]

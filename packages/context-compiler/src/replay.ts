@@ -26,7 +26,8 @@ import type {
   ModelCapabilitySnapshot,
   ProviderToolSchema,
 } from "@terminus/provider-core";
-import { canonicalJson, computeContentHash } from "@terminus/context-ir";
+import { canonicalJson, computeContentHash, computeStablePrefixHash } from "@terminus/context-ir";
+import { resolveTokenizer } from "./tokenizer.js";
 
 // ──────────────────────── Ablation specification ─────────────────────────────
 
@@ -70,6 +71,81 @@ export interface ReplayResult {
   readonly ablation: AblationSpec | null;
 }
 
+const replayHardInputLimit = (manifest: ContextManifest): TokenCount => {
+  const record = manifest.decisionRecord;
+  const configured = record?.hardInputLimit;
+  if (typeof configured === "number" && Number.isFinite(configured) && configured >= 0) {
+    return BigInt(Math.trunc(configured)) as TokenCount;
+  }
+  // Legacy manifests did not record the limit. Preserve a conservative
+  // recoverable fallback rather than pretending the recovery margin was an
+  // input limit.
+  return (manifest.outputReserveTokens + manifest.reasoningReserveTokens + manifest.recoveryMarginTokens) as TokenCount;
+};
+
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+// skipcq: JS-R1005
+const isProviderToolSchema = (value: unknown): value is ProviderToolSchema => {
+  if (!isRecord(value)) return false;
+  const trustLevels = new Set(["builtin", "first_party", "verified_third_party", "untrusted"]);
+  return typeof value.id === "string"
+    && typeof value.version === "string"
+    && typeof value.summary === "string"
+    && isRecord(value.inputSchema)
+    && isRecord(value.resultSchema)
+    && typeof value.sideEffectClass === "string"
+    && Array.isArray(value.requiredCapabilities)
+    && value.requiredCapabilities.every((entry) => typeof entry === "string")
+    && typeof value.trustLevel === "string"
+    && trustLevels.has(value.trustLevel)
+    && typeof value.maximumModelResultBytes === "number"
+    && Number.isSafeInteger(value.maximumModelResultBytes)
+    && value.maximumModelResultBytes >= 0
+    && typeof value.maximumArtifactBytes === "number"
+    && Number.isSafeInteger(value.maximumArtifactBytes)
+    && value.maximumArtifactBytes >= 0
+    && typeof value.defaultTimeoutMs === "number"
+    && Number.isSafeInteger(value.defaultTimeoutMs)
+    && value.defaultTimeoutMs > 0
+    && Array.isArray(value.policyTags)
+    && value.policyTags.every((entry) => typeof entry === "string");
+};
+
+const replayToolSchemas = (input: ReplayInput): readonly ProviderToolSchema[] => {
+  if (input.toolSchemas !== undefined) return input.toolSchemas;
+  const candidate = input.manifest.decisionRecord?.toolSchemas;
+  if (!Array.isArray(candidate)) return [];
+  return candidate.filter(isProviderToolSchema);
+};
+
+const assertManifestSelection = (
+  manifest: ContextManifest,
+  fragments: readonly ContextFragment[],
+): void => {
+  if (manifest.fragments.length !== fragments.length) {
+    throw new Error(
+      `replay selection does not match manifest ${manifest.id}: expected ${manifest.fragments.length} fragments, got ${fragments.length}`,
+    );
+  }
+  for (let index = 0; index < manifest.fragments.length; index += 1) {
+    const entry = manifest.fragments[index]!;
+    const fragment = fragments[index]!;
+    if (entry.fragmentId !== fragment.id || entry.artifactHash !== fragment.contentRef.hash) {
+      throw new Error(`replay selection mismatch at position ${index} for manifest ${manifest.id}`);
+    }
+  }
+};
+
+const hashRenderedRequest = (rendered: RenderedProviderRequest): ContentHash =>
+  computeContentHash(canonicalJson({
+    providerId: rendered.providerId,
+    model: rendered.model,
+    body: rendered.body,
+    request: { ...rendered.request, signal: null },
+  }));
+
 // ──────────────────────── Replay functions ───────────────────────────────────
 
 /**
@@ -79,9 +155,9 @@ export interface ReplayResult {
  * The manifest records the exact fragments and their order — replay
  * honors that order.
  */
-export async function replayContext(
+export const replayContext = async (
   input: ReplayInput,
-): Promise<ReplayResult> {
+): Promise<ReplayResult> => {
   assertManifestSelection(input.manifest, input.selectedFragments);
   const toolSchemas = replayToolSchemas(input);
   const cachePlan: ContextCachePlan = {
@@ -125,7 +201,85 @@ export async function replayContext(
     renderedRequestHash: hashRenderedRequest(rendered),
     ablation: null,
   };
-}
+};
+
+const VOLATILE_WORLD_STATE_FRAGMENT_ID = "runtime:world_state:latest";
+
+const isVolatileFragment = (fragment: ContextFragment): boolean =>
+  fragment.id === VOLATILE_WORLD_STATE_FRAGMENT_ID;
+
+// skipcq: JS-R1005
+const ablatedCachePlan = (
+  input: ReplayInput,
+  fragments: readonly ContextFragment[],
+  toolSchemas: readonly ProviderToolSchema[],
+): ContextCachePlan => {
+  const originalStableIds = new Set(
+    input.manifest.fragments
+      .slice(0, input.manifest.cachePlan.volatileSuffixBoundary)
+      .map((entry) => entry.fragmentId),
+  );
+  const stable: ContextFragment[] = [];
+  for (const fragment of fragments) {
+    if (!originalStableIds.has(fragment.id)) break;
+    stable.push(fragment);
+  }
+  const originalBreakpointIds = new Set(
+    input.manifest.cachePlan.breakpoints
+      .map((index) => input.manifest.fragments[index]?.fragmentId)
+      .filter((id): id is string => id !== undefined),
+  );
+  const breakpoints = fragments.flatMap((fragment, index) =>
+    originalBreakpointIds.has(fragment.id) ? [index] : []
+  );
+
+  const hadStableBreakpoint = input.manifest.cachePlan.breakpoints.includes(
+    input.manifest.cachePlan.volatileSuffixBoundary - 1,
+  );
+  if (hadStableBreakpoint && stable.length > 0 && !breakpoints.includes(stable.length - 1)) {
+    breakpoints.push(stable.length - 1);
+  }
+
+  const originalHadPostStableBreakpoint = input.manifest.cachePlan.breakpoints.some(
+    (index) => index >= input.manifest.cachePlan.volatileSuffixBoundary,
+  );
+  if (originalHadPostStableBreakpoint) {
+    let cacheableEnd = fragments.length - 1;
+    while (cacheableEnd >= 0 && isVolatileFragment(fragments[cacheableEnd]!)) {
+      cacheableEnd -= 1;
+    }
+    if (cacheableEnd >= 0 && !breakpoints.includes(cacheableEnd)) {
+      breakpoints.push(cacheableEnd);
+    }
+  }
+
+  const modelKey = input.model.modelKey;
+  const toolSchemaTokens = toolSchemas.length === 0
+    ? 0
+    : resolveTokenizer(input.provider.providerId, modelKey)
+      .estimateToolSchemaTokens(toolSchemas);
+  const minimumCacheableTokens = input.provider.caching.minimumTokens ?? 0;
+  const prefixTokens: number[] = [];
+  let runningTokens = 0;
+  for (const fragment of fragments) {
+    runningTokens += fragment.estimatedTokens[modelKey] ?? 0;
+    prefixTokens.push(runningTokens);
+  }
+  const validBreakpoints = [...new Set(breakpoints)]
+    .filter((index) => (prefixTokens[index] ?? 0) + toolSchemaTokens >= minimumCacheableTokens)
+    .sort((a, b) => a - b);
+
+  const predictedCachedTokens = stable.reduce(
+    (sum, fragment) => sum + BigInt(fragment.estimatedTokens[modelKey] ?? 0),
+    0n,
+  ) as TokenCount;
+  return {
+    stablePrefixHash: computeStablePrefixHash(stable),
+    volatileSuffixBoundary: stable.length,
+    breakpoints: validBreakpoints,
+    predictedCachedTokens,
+  };
+};
 
 /**
  * Replay with an ablation: remove specified fragments, optionally inject
@@ -133,10 +287,10 @@ export async function replayContext(
  *
  * The ablation spec is recorded in the result for experiment tracking.
  */
-export async function replayWithAblation(
+export const replayWithAblation = async (
   input: ReplayInput,
   ablation: AblationSpec,
-): Promise<ReplayResult> {
+): Promise<ReplayResult> => {
   assertManifestSelection(input.manifest, input.selectedFragments);
   const toolSchemas = replayToolSchemas(input);
   const removeSet = new Set(ablation.removeFragmentIds);
@@ -148,12 +302,7 @@ export async function replayWithAblation(
     fragments = [...fragments, ...ablation.injectFragments];
   }
 
-  const cachePlan: ContextCachePlan = {
-    stablePrefixHash: input.manifest.cachePlan.stablePrefixHash,
-    volatileSuffixBoundary: input.manifest.cachePlan.volatileSuffixBoundary,
-    breakpoints: [...input.manifest.cachePlan.breakpoints],
-    predictedCachedTokens: input.manifest.predictedCachedTokens,
-  };
+  const cachePlan = ablatedCachePlan(input, fragments, toolSchemas);
 
   const rendered = await input.renderer.render({
     provider: input.provider,
@@ -194,7 +343,7 @@ export async function replayWithAblation(
 // ──────────────────────── Ablation presets ───────────────────────────────────
 
 /** Ablation that removes all checkpoint fragments. */
-export function checkpointAblation(fragments: readonly ContextFragment[]): AblationSpec {
+export const checkpointAblation = (fragments: readonly ContextFragment[]): AblationSpec => {
   const checkpointIds = fragments
     .filter((f) => f.kind === "checkpoint")
     .map((f) => f.id);
@@ -202,10 +351,10 @@ export function checkpointAblation(fragments: readonly ContextFragment[]): Ablat
     label: "remove_all_checkpoints",
     removeFragmentIds: checkpointIds,
   };
-}
+};
 
 /** Ablation that removes all memory fragments. */
-export function memoryAblation(fragments: readonly ContextFragment[]): AblationSpec {
+export const memoryAblation = (fragments: readonly ContextFragment[]): AblationSpec => {
   const memoryIds = fragments
     .filter((f) => f.kind === "memory")
     .map((f) => f.id);
@@ -213,10 +362,10 @@ export function memoryAblation(fragments: readonly ContextFragment[]): AblationS
     label: "remove_all_memory",
     removeFragmentIds: memoryIds,
   };
-}
+};
 
 /** Ablation that removes all world_state fragments. */
-export function worldStateAblation(fragments: readonly ContextFragment[]): AblationSpec {
+export const worldStateAblation = (fragments: readonly ContextFragment[]): AblationSpec => {
   const wsIds = fragments
     .filter((f) => f.kind === "world_state")
     .map((f) => f.id);
@@ -224,10 +373,10 @@ export function worldStateAblation(fragments: readonly ContextFragment[]): Ablat
     label: "remove_all_world_state",
     removeFragmentIds: wsIds,
   };
-}
+};
 
 /** Ablation that removes all documentation fragments. */
-export function documentationAblation(fragments: readonly ContextFragment[]): AblationSpec {
+export const documentationAblation = (fragments: readonly ContextFragment[]): AblationSpec => {
   const docIds = fragments
     .filter((f) => f.kind === "documentation")
     .map((f) => f.id);
@@ -235,92 +384,14 @@ export function documentationAblation(fragments: readonly ContextFragment[]): Ab
     label: "remove_all_documentation",
     removeFragmentIds: docIds,
   };
-}
+};
 
 /** Returns all standard ablation presets for a set of fragments. */
-export function standardAblations(
+export const standardAblations = (
   fragments: readonly ContextFragment[],
-): readonly AblationSpec[] {
-  return [
-    checkpointAblation(fragments),
-    memoryAblation(fragments),
-    worldStateAblation(fragments),
-    documentationAblation(fragments),
-  ];
-}
-
-function replayHardInputLimit(manifest: ContextManifest): TokenCount {
-  const record = manifest.decisionRecord;
-  const configured = record?.hardInputLimit;
-  if (typeof configured === "number" && Number.isFinite(configured) && configured >= 0) {
-    return BigInt(Math.trunc(configured)) as TokenCount;
-  }
-  // Legacy manifests did not record the limit. Preserve a conservative
-  // recoverable fallback rather than pretending the recovery margin was an
-  // input limit.
-  return (manifest.outputReserveTokens + manifest.reasoningReserveTokens + manifest.recoveryMarginTokens) as TokenCount;
-}
-
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function isProviderToolSchema(value: unknown): value is ProviderToolSchema {
-  if (!isRecord(value)) return false;
-  const trustLevels = new Set(["builtin", "first_party", "verified_third_party", "untrusted"]);
-  return typeof value.id === "string"
-    && typeof value.version === "string"
-    && typeof value.summary === "string"
-    && isRecord(value.inputSchema)
-    && isRecord(value.resultSchema)
-    && typeof value.sideEffectClass === "string"
-    && Array.isArray(value.requiredCapabilities)
-    && value.requiredCapabilities.every((entry) => typeof entry === "string")
-    && typeof value.trustLevel === "string"
-    && trustLevels.has(value.trustLevel)
-    && typeof value.maximumModelResultBytes === "number"
-    && Number.isSafeInteger(value.maximumModelResultBytes)
-    && value.maximumModelResultBytes >= 0
-    && typeof value.maximumArtifactBytes === "number"
-    && Number.isSafeInteger(value.maximumArtifactBytes)
-    && value.maximumArtifactBytes >= 0
-    && typeof value.defaultTimeoutMs === "number"
-    && Number.isSafeInteger(value.defaultTimeoutMs)
-    && value.defaultTimeoutMs > 0
-    && Array.isArray(value.policyTags)
-    && value.policyTags.every((entry) => typeof entry === "string");
-}
-
-function replayToolSchemas(input: ReplayInput): readonly ProviderToolSchema[] {
-  if (input.toolSchemas !== undefined) return input.toolSchemas;
-  const candidate = input.manifest.decisionRecord?.toolSchemas;
-  if (!Array.isArray(candidate)) return [];
-  return candidate.filter(isProviderToolSchema);
-}
-
-function assertManifestSelection(
-  manifest: ContextManifest,
-  fragments: readonly ContextFragment[],
-): void {
-  if (manifest.fragments.length !== fragments.length) {
-    throw new Error(
-      `replay selection does not match manifest ${manifest.id}: expected ${manifest.fragments.length} fragments, got ${fragments.length}`,
-    );
-  }
-  for (let index = 0; index < manifest.fragments.length; index += 1) {
-    const entry = manifest.fragments[index]!;
-    const fragment = fragments[index]!;
-    if (entry.fragmentId !== fragment.id || entry.artifactHash !== fragment.contentRef.hash) {
-      throw new Error(`replay selection mismatch at position ${index} for manifest ${manifest.id}`);
-    }
-  }
-}
-
-function hashRenderedRequest(rendered: RenderedProviderRequest): ContentHash {
-  return computeContentHash(canonicalJson({
-    providerId: rendered.providerId,
-    model: rendered.model,
-    body: rendered.body,
-    request: { ...rendered.request, signal: null },
-  }));
-}
+): readonly AblationSpec[] => [
+  checkpointAblation(fragments),
+  memoryAblation(fragments),
+  worldStateAblation(fragments),
+  documentationAblation(fragments),
+];

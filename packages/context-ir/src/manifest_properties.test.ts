@@ -22,104 +22,99 @@ const MODEL = "test/model" as ModelKey;
 const NOW = "2026-07-23T00:00:00Z" as Rfc3339Timestamp;
 const HASH = `sha256:${"ab".repeat(32)}` as ContentHash;
 
-function fragment(id: string, authority: number): ContextFragment {
-  return {
-    id,
-    kind: "code",
-    contentRef: {
-      hash: HASH,
-      uri: `artifact://sha256/${"ab".repeat(32)}` as ContextFragment["contentRef"]["uri"],
-      mediaType: "text/plain",
-      bytes: 0n as ContextFragment["contentRef"]["bytes"],
-    },
-    source: {
-      uri: "test://source",
-      producer: "test",
-      producerVersion: "0",
-      observedAt: NOW,
-      observedBy: "control",
-      evidenceRefs: [],
-    },
+const fragment = (id: string, authority: number): ContextFragment => ({
+  id,
+  kind: "code",
+  contentRef: {
+    hash: HASH,
+    uri: `artifact://sha256/${"ab".repeat(32)}` as ContextFragment["contentRef"]["uri"],
+    mediaType: "text/plain",
+    bytes: 0n as ContextFragment["contentRef"]["bytes"],
+  },
+  source: {
+    uri: "test://source",
+    producer: "test",
+    producerVersion: "0",
+    observedAt: NOW,
+    observedBy: "control",
+    evidenceRefs: [],
+  },
+  sourceVersion: null,
+  authority,
+  priority: 0,
+  trust: "derived",
+  confidentiality: "workspace",
+  injectionRisk: "low",
+  exactness: "exact",
+  scope: {
+    workspaceId: null,
+    sessionId: null,
+    taskId: null,
+    pathPatterns: [],
+  },
+  freshness: {
+    stale: false,
     sourceVersion: null,
-    authority,
-    priority: 0,
-    trust: "derived",
-    confidentiality: "workspace",
-    injectionRisk: "low",
-    exactness: "exact",
-    scope: {
-      workspaceId: null,
-      sessionId: null,
-      taskId: null,
-      pathPatterns: [],
-    },
-    freshness: {
-      stale: false,
-      sourceVersion: null,
-      observedAt: NOW,
-      staleReason: null,
-    },
-    dependencies: [],
-    invalidation: [],
-    estimatedTokens: { [MODEL]: 10 },
-    selectionFeatures: {
-      relevance: 1,
-      novelty: 0,
-      coverage: 1,
-      uncertaintyReduction: 1,
-      riskReduction: 1,
-      modelCompatibility: 1,
-      redundancyPenalty: 0,
-      injectionPenalty: 0,
-    },
-  };
-}
+    observedAt: NOW,
+    staleReason: null,
+  },
+  dependencies: [],
+  invalidation: [],
+  estimatedTokens: { [MODEL]: 10 },
+  selectionFeatures: {
+    relevance: 1,
+    novelty: 0,
+    coverage: 1,
+    uncertaintyReduction: 1,
+    riskReduction: 1,
+    modelCompatibility: 1,
+    redundancyPenalty: 0,
+    injectionPenalty: 0,
+  },
+});
 
-function epoch(): ContextEpochSnapshot {
-  return {
-    epochId: "01900000-0000-7000-8000-0000000000aa" as Uuid7,
-    threadId: "01900000-0000-7000-8000-0000000000bb" as Uuid7,
-    sequence: 1,
-    baselineHash: HASH,
-    provider: "test",
-    model: MODEL,
-    continuationId: null,
-    startedAt: NOW,
-  };
-}
+const epoch = (): ContextEpochSnapshot => ({
+  epochId: "01900000-0000-7000-8000-0000000000aa" as Uuid7,
+  threadId: "01900000-0000-7000-8000-0000000000bb" as Uuid7,
+  sequence: 1,
+  baselineHash: HASH,
+  provider: "test",
+  model: MODEL,
+  continuationId: null,
+  startedAt: NOW,
+});
 
-function cachePlan(): ContextCachePlan {
-  return {
-    stablePrefixHash: HASH,
-    volatileSuffixBoundary: 0,
-    breakpoints: [],
-    predictedCachedTokens: 0n as TokenCount,
-  };
-}
+const cachePlan = (): ContextCachePlan => ({
+  stablePrefixHash: HASH,
+  volatileSuffixBoundary: 0,
+  breakpoints: [],
+  predictedCachedTokens: 0n as TokenCount,
+});
 
-function input(selected: ContextFragment[]): ManifestBuilderInput {
-  return {
-    compilerVersion: "0.1.0",
-    policyVersion: "0.1.0",
-    providerCapabilityHash: HASH,
-    model: MODEL,
-    epoch: epoch(),
-    selected,
-    omitted: [],
-    cachePlan: cachePlan(),
-    reserves: {
-      output: 100n as TokenCount,
-      reasoning: 0n as TokenCount,
-      toolResult: 0n as TokenCount,
-      recovery: 0n as TokenCount,
-    },
-    predictedCachedTokens: 0n as TokenCount,
-    confidentialityDecisions: {},
-    taintDecisions: {},
-    experimentAssignments: [],
-    occurredAt: NOW,
-  };
-}
+const input = (
+  selected: ContextFragment[],
+  selectedCachePlan: ContextCachePlan = cachePlan(),
+): ManifestBuilderInput => ({
+  compilerVersion: "0.1.0",
+  policyVersion: "0.1.0",
+  providerCapabilityHash: HASH,
+  model: MODEL,
+  epoch: epoch(),
+  selected,
+  omitted: [],
+  cachePlan: selectedCachePlan,
+  reserves: {
+    output: 100n as TokenCount,
+    reasoning: 0n as TokenCount,
+    toolResult: 0n as TokenCount,
+    recovery: 0n as TokenCount,
+  },
+  predictedCachedTokens: 0n as TokenCount,
+  confidentialityDecisions: {},
+  taintDecisions: {},
+  experimentAssignments: [],
+  occurredAt: NOW,
+});
 
 describe("context manifest properties", () => {
   test("hard-required fragments retain required=true in manifest", () => {
@@ -135,6 +130,16 @@ describe("context manifest properties", () => {
   test("manifest builder accepts empty selection", () => {
     const manifest = buildManifest(input([]));
     expect(manifest.fragments).toEqual([]);
+  });
+
+  test("manifest entries preserve cache breakpoint positions", () => {
+    const selected = [fragment("stable", 90), fragment("volatile", 40)];
+    const manifest = buildManifest(input(selected, {
+      ...cachePlan(),
+      breakpoints: [0],
+    }));
+
+    expect(manifest.fragments.map((entry) => entry.cacheBreakpoint)).toEqual([true, false]);
   });
 
   test("garbage JSON decode does not throw when guarded", () => {

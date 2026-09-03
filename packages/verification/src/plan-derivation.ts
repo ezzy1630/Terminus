@@ -10,6 +10,7 @@ import {
   serializeNodeSpec,
   type PredicateType as PredicateTypeName,
 } from "./node-spec.js";
+import { classifyVerificationTier, type VerificationTier } from "./risk-tier.js";
 
 export type VerificationPlanMode = "incremental" | "admission";
 
@@ -62,6 +63,7 @@ export interface VerificationPlanDerivationInput {
 }
 
 export interface VerificationPlanDerivation {
+  readonly verificationTier: VerificationTier;
   readonly nodes: readonly VerificationNode[];
   readonly completionExpression: string;
   readonly rationale: ReadonlyMap<string, readonly string[]>;
@@ -119,30 +121,30 @@ const GENERATED_PATTERN = /(^|[/_.-])generated([/_.-]|$)|\.gen\.[^.]+$/i;
 const UI_PATTERN = /(^|[/_.-])(app|apps|components|pages|ui|views)([/_.-]|$)|\.(css|html|scss|tsx|jsx|vue)$/i;
 const SECURITY_PATTERN = /(auth|credential|secret|sandbox|permission|policy|security|token)/i;
 
-function uniqueSorted(values: readonly string[]): readonly string[] {
-  return [...new Set(values.filter((value) => value.trim().length > 0))].sort();
-}
+const uniqueSorted = (values: readonly string[]): readonly string[] =>
+  [...new Set(values.filter((value) => value.trim().length > 0))].sort();
 
-function extensionOf(path: string): string {
+const extensionOf = (path: string): string => {
   const dot = path.lastIndexOf(".");
   return dot < 0 ? "" : path.slice(dot).toLowerCase();
-}
+};
 
-function slug(value: string): string {
+const slug = (value: string): string => {
   const result = value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   return result.length > 0 ? result.slice(0, 48) : "check";
-}
+};
 
-function firstPaths(signals: VerificationDerivationSignals): readonly string[] {
+const firstPaths = (signals: VerificationDerivationSignals): readonly string[] => {
   const paths = uniqueSorted(signals.changedFiles);
   return paths.length > 0 ? paths : ["."];
-}
+};
 
-function predicateFromHint(hint: string, hasUiPaths: boolean): {
+// skipcq: JS-R1005
+const predicateFromHint = (hint: string, hasUiPaths: boolean): {
   readonly predicateType: PredicateTypeName;
   readonly command: string | undefined;
   readonly reason: string;
-} {
+} => {
   const normalized = hint.trim().toLowerCase();
   const commandMatch = /^(?:command|test|run):\s*(.+)$/i.exec(hint.trim());
   if (commandMatch?.[1] !== undefined) {
@@ -222,25 +224,29 @@ const TEST_CLASS_PREDICATES: ReadonlySet<string> = new Set([
   PredicateType.PERFORMANCE_THRESHOLD,
 ]);
 
-export function timeoutFor(
+// skipcq: JS-R1005
+export const timeoutFor = (
   predicateType: PredicateTypeName,
   budgetSeconds?: number | undefined,
-): number {
+): number => {
   const testClass = TEST_CLASS_PREDICATES.has(predicateType);
   const floor = testClass ? TEST_PREDICATE_TIMEOUT_FLOOR_MS : STATIC_PREDICATE_TIMEOUT_FLOOR_MS;
   const ceiling = testClass ? TEST_PREDICATE_TIMEOUT_CEILING_MS : STATIC_PREDICATE_TIMEOUT_CEILING_MS;
   if (budgetSeconds === undefined || !Number.isFinite(budgetSeconds) || budgetSeconds <= 0) return floor;
   return Math.min(ceiling, Math.max(floor, Math.round(budgetSeconds * 1_000)));
-}
+};
 
-function makeNode(
+// skipcq: JS-R1005
+const makeNode = (
   input: VerificationPlanDerivationInput,
   draft: NodeDraft,
   rationale: Map<string, readonly string[]>,
-): VerificationNode {
+  verificationTier: VerificationTier,
+): VerificationNode => {
   const id = `${slug(draft.label)}_${input.idSource()}`;
   const observation = {
     derivationVersion: "terminus.verification.plan.v1",
+    verificationTier,
     mode: input.mode,
     objectivePresent: input.objective.trim().length > 0,
     uiComputerUseAvailable: input.signals.uiComputerUseAvailable === true,
@@ -283,9 +289,10 @@ function makeNode(
     retryPolicy: { maxAttempts: 1, backoffMs: 0, flakeIdentity: null },
     acceptanceCriterionId: draft.criterionId,
   };
-}
+};
 
-function auxiliaryDrafts(
+// skipcq: JS-R1005
+const auxiliaryDrafts = (
   input: VerificationPlanDerivationInput,
   paths: readonly string[],
   signals: {
@@ -298,10 +305,12 @@ function auxiliaryDrafts(
     readonly hasUi: boolean;
     readonly hasSecurity: boolean;
   },
-): readonly NodeDraft[] {
+  tier: VerificationTier,
+): readonly NodeDraft[] => {
   const required = input.mode === "admission";
+  const isTier1 = tier === 1;
   const drafts: NodeDraft[] = [];
-  if (signals.hasCode || input.criteria.length === 0) {
+  if (signals.hasCode || (!isTier1 && input.criteria.length === 0)) {
     drafts.push({
       label: "parse",
       predicateType: PredicateType.FILE_PARSES,
@@ -331,7 +340,7 @@ function auxiliaryDrafts(
       dependsOn: [],
       reasons: ["typed-language or configuration changes make diagnostics relevant"],
     });
-  } else if (signals.hasCode || input.criteria.length === 0) {
+  } else if (signals.hasCode || (!isTier1 && input.criteria.length === 0)) {
     drafts.push({
       label: "diagnostics",
       predicateType: PredicateType.STATIC_DIAGNOSTICS,
@@ -342,7 +351,7 @@ function auxiliaryDrafts(
       reasons: ["code changes make static diagnostics relevant"],
     });
   }
-  const nativeCommands = uniqueSorted(input.signals.nativeTestCommands ?? []);
+  const nativeCommands = isTier1 ? [] : uniqueSorted(input.signals.nativeTestCommands ?? []);
   if (nativeCommands.length > 0) {
     for (const [index, command] of nativeCommands.entries()) {
       drafts.push({
@@ -356,7 +365,7 @@ function auxiliaryDrafts(
         reasons: ["repository supplied a native test recipe"],
       });
     }
-  } else if (signals.hasTests || input.criteria.length === 0) {
+  } else if (signals.hasTests || (!isTier1 && input.criteria.length === 0)) {
     drafts.push({
       label: "targeted_tests",
       predicateType: PredicateType.UNIT_TEST,
@@ -428,9 +437,10 @@ function auxiliaryDrafts(
   return drafts;
 }
 
-export function deriveVerificationNodes(
+// skipcq: JS-R1005
+export const deriveVerificationNodes = (
   input: VerificationPlanDerivationInput,
-): VerificationPlanDerivation {
+): VerificationPlanDerivation => {
   const changedFiles = uniqueSorted(input.signals.changedFiles);
   const projectFiles = uniqueSorted(input.signals.projectFiles ?? []);
   const paths = firstPaths(input.signals);
@@ -446,20 +456,57 @@ export function deriveVerificationNodes(
   const hasGenerated = generatedPaths.length > 0 || allSignalPaths.some((path) => GENERATED_PATTERN.test(path));
   const hasUi = allSignalPaths.some((path) => UI_PATTERN.test(path));
   const hasSecurity = allSignalPaths.some((path) => SECURITY_PATTERN.test(path));
-  const auxiliary = auxiliaryDrafts(input, paths, {
-    hasCode,
-    hasTypedCode,
-    hasTests,
-    hasMigration,
-    hasProtocol,
-    hasGenerated,
-    hasUi,
-    hasSecurity,
+  const tierDecision = classifyVerificationTier({
+    riskClass: input.riskClass,
+    changedFiles,
   });
-  const drafts: NodeDraft[] = [...auxiliary];
+  const auxiliary = auxiliaryDrafts(
+    input,
+    paths,
+    {
+      hasCode,
+      hasTypedCode,
+      hasTests,
+      hasMigration,
+      hasProtocol,
+      hasGenerated,
+      hasUi,
+      hasSecurity,
+    },
+    tierDecision.tier,
+  );
+  const drafts: NodeDraft[] = tierDecision.tier === 0 ? [] : [...auxiliary];
+  if (tierDecision.tier > 0) {
+    drafts.push({
+      label: "diff_policy",
+      predicateType: PredicateType.DIFF_POLICY,
+      criterionId: null,
+      paths,
+      required: input.mode === "admission",
+      dependsOn: [],
+      reasons: [tierDecision.reason],
+    });
+  }
+  if (tierDecision.tier === 3) {
+    drafts.push({
+      label: "detached_review",
+      predicateType: PredicateType.DETACHED_REVIEW,
+      criterionId: null,
+      paths,
+      required: input.mode === "admission",
+      dependsOn: [],
+      reasons: ["Tier 3 requires review independent from the implementing trajectory"],
+    });
+  }
   for (const [index, criterion] of input.criteria.entries()) {
     const selectionText = criterion.verificationHint?.trim() || criterion.statement;
-    const selected = predicateFromHint(selectionText, hasUi);
+    const selected = tierDecision.tier === 0 && !criterion.verificationHint?.trim()
+      ? {
+          predicateType: PredicateType.ACCEPTANCE_QUERY,
+          command: undefined,
+          reason: "Tier 0 uses a direct observable acceptance query",
+        }
+      : predicateFromHint(selectionText, hasUi);
     const reasons = [
       selected.reason,
       ...(input.signals.failingTests?.length ? ["current failure selectors were available"] : []),
@@ -478,13 +525,17 @@ export function deriveVerificationNodes(
   }
   if (drafts.length === 0) {
     drafts.push({
-      label: "parse",
-      predicateType: PredicateType.FILE_PARSES,
+      label: tierDecision.tier === 0 ? "observation" : "parse",
+      predicateType: tierDecision.tier === 0 ? PredicateType.ACCEPTANCE_QUERY : PredicateType.FILE_PARSES,
       criterionId: null,
       paths,
       required: true,
       dependsOn: [],
-      reasons: ["no structured criteria were available; use the conservative baseline"],
+      reasons: [
+        tierDecision.tier === 0
+          ? "no mutation or criterion was available; require one direct observation"
+          : "no structured criteria were available; use the conservative baseline",
+      ],
     });
   }
 
@@ -508,7 +559,7 @@ export function deriveVerificationNodes(
         : tailId === null
           ? []
           : [tailId];
-    const node = makeNode(input, { ...draft, dependsOn }, rationale);
+    const node = makeNode(input, { ...draft, dependsOn }, rationale, tierDecision.tier);
     nodes.push(node);
     if (draft.criterionId !== null) criterionIds.push(node.id);
     if (draft.criterionId === null) tailId = node.id;
@@ -517,8 +568,9 @@ export function deriveVerificationNodes(
   const requiredIds = nodes.filter((node) => node.required).map((node) => node.id);
   const expressionIds = requiredIds.length > 0 ? requiredIds : criterionIds;
   return {
+    verificationTier: tierDecision.tier,
     nodes,
     completionExpression: expressionIds.join(" && "),
     rationale,
   };
-}
+};

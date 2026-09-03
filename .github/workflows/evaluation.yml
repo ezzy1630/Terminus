@@ -1,0 +1,116 @@
+name: Causal evaluation
+
+on:
+  pull_request:
+    branches: [main, dev, codex/release-blocker-closure]
+  schedule:
+    - cron: "41 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-reference-loop:
+    name: Deterministic lifecycle and adapter conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: ./.github/actions/setup-terminus
+      - run: just test-reference-loop
+      - run: bun test packages/provider-conformance packages/provider-core/src/conformance
+      - run: cd python && uv run --extra dev pytest -q forge_evals/forge_evals/tests/test_feature_registry.py
+
+  scheduled-lifecycle-sweep:
+    name: 50k lifecycle schedules
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: ./.github/actions/setup-terminus
+      - run: just lifecycle-conformance 50000
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lifecycle-conformance
+          path: evals/results/lifecycle
+          if-no-files-found: error
+
+  live-provider-canary:
+    name: Secret-gated live provider canary
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, terminus-live-eval]
+    env:
+      TERMINUS_BASELINE_URL: ${{ secrets.TERMINUS_BASELINE_URL }}
+      TERMINUS_BASELINE_TOKEN: ${{ secrets.TERMINUS_BASELINE_TOKEN }}
+      TERMINUS_CANDIDATE_URL: ${{ secrets.TERMINUS_CANDIDATE_URL }}
+      TERMINUS_CANDIDATE_TOKEN: ${{ secrets.TERMINUS_CANDIDATE_TOKEN }}
+      TERMINUS_BASELINE_COMMIT: ${{ vars.TERMINUS_BASELINE_COMMIT }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-terminus
+      - name: Require both live control planes
+        run: |
+          set -eu
+          test -n "$TERMINUS_BASELINE_URL"
+          test -n "$TERMINUS_BASELINE_TOKEN"
+          test -n "$TERMINUS_CANDIDATE_URL"
+          test -n "$TERMINUS_CANDIDATE_TOKEN"
+          test -n "$TERMINUS_BASELINE_COMMIT"
+      - run: just canary-live "$TERMINUS_BASELINE_COMMIT" "${{ github.sha }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: live-provider-canary
+          path: evals/results/canary-live
+          if-no-files-found: error
+
+  scheduled-held-out-cohort:
+    name: Paired held-out causal cohort
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, terminus-live-eval]
+    env:
+      TERMINUS_BASELINE_URL: ${{ secrets.TERMINUS_BASELINE_URL }}
+      TERMINUS_BASELINE_TOKEN: ${{ secrets.TERMINUS_BASELINE_TOKEN }}
+      TERMINUS_CANDIDATE_URL: ${{ secrets.TERMINUS_CANDIDATE_URL }}
+      TERMINUS_CANDIDATE_TOKEN: ${{ secrets.TERMINUS_CANDIDATE_TOKEN }}
+      TERMINUS_BASELINE_COMMIT: ${{ vars.TERMINUS_BASELINE_COMMIT }}
+      TERMINUS_LIVE_PROVIDER: ${{ vars.TERMINUS_LIVE_PROVIDER }}
+      TERMINUS_LIVE_MODEL: ${{ vars.TERMINUS_LIVE_MODEL }}
+      TERMINUS_LIVE_EFFORT: ${{ vars.TERMINUS_LIVE_EFFORT }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-terminus
+      - name: Require pinned live cohort inputs
+        run: |
+          set -eu
+          test -n "$TERMINUS_BASELINE_URL"
+          test -n "$TERMINUS_BASELINE_TOKEN"
+          test -n "$TERMINUS_CANDIDATE_URL"
+          test -n "$TERMINUS_CANDIDATE_TOKEN"
+          test -n "$TERMINUS_BASELINE_COMMIT"
+          test -n "$TERMINUS_LIVE_PROVIDER"
+          test -n "$TERMINUS_LIVE_MODEL"
+      - name: Run baseline arm
+        env:
+          TERMINUS_CONTROL_URL: ${{ env.TERMINUS_BASELINE_URL }}
+          TERMINUS_CONTROL_TOKEN: ${{ env.TERMINUS_BASELINE_TOKEN }}
+          TERMINUS_ARM: baseline
+        run: just eval-nightly-cohort "$TERMINUS_BASELINE_COMMIT" 5
+      - name: Run candidate arm
+        env:
+          TERMINUS_CONTROL_URL: ${{ env.TERMINUS_CANDIDATE_URL }}
+          TERMINUS_CONTROL_TOKEN: ${{ env.TERMINUS_CANDIDATE_TOKEN }}
+          TERMINUS_ARM: candidate
+        run: just eval-nightly-cohort "${{ github.sha }}" 5
+      - name: Compare paired arms
+        run: just cohort-compare evals/results/cohort/baseline evals/results/cohort/candidate
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: held-out-causal-cohort
+          path: evals/results/cohort
+          if-no-files-found: error

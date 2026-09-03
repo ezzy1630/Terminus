@@ -98,6 +98,7 @@ export const EVENT_TYPES = [
   "turn.recovery_interrupted",
   "turn.recovery_reconciled",
   "turn.recovery_failed",
+  "turn.recovery_requested",
   "completion.proposed",
   "tool.proposed",
   "tool.denied",
@@ -535,6 +536,7 @@ export interface EventPayloadMap {
   "turn.recovery_interrupted": RuntimeLifecyclePayload;
   "turn.recovery_reconciled": RuntimeLifecyclePayload;
   "turn.recovery_failed": RuntimeLifecyclePayload;
+  "turn.recovery_requested": RuntimeLifecyclePayload;
   "completion.proposed": RuntimeLifecyclePayload;
   "tool.proposed": ToolProposedPayload;
   "tool.denied": RuntimeLifecyclePayload;
@@ -692,7 +694,7 @@ export function splitSseStream(buffer: string): [string[], string] {
 // ────────────────────────── Helpers ──────────────────────────────────────────
 
 /** Returns the zod payload schema for a given event type. */
-export function payloadSchemaFor(type: EventType): z.ZodType<Readonly<Record<string, unknown>>> {
+export const payloadSchemaFor = (type: EventType): z.ZodType<Readonly<Record<string, unknown>>> => {
   const map: Record<EventType, z.ZodType> = {
     "task.created": taskCreatedPayloadSchema,
     "task.activated": taskActivatedPayloadSchema,
@@ -722,6 +724,7 @@ export function payloadSchemaFor(type: EventType): z.ZodType<Readonly<Record<str
     "turn.recovery_interrupted": runtimeLifecyclePayloadSchema,
     "turn.recovery_reconciled": runtimeLifecyclePayloadSchema,
     "turn.recovery_failed": runtimeLifecyclePayloadSchema,
+    "turn.recovery_requested": runtimeLifecyclePayloadSchema,
     "completion.proposed": runtimeLifecyclePayloadSchema,
     "tool.proposed": toolProposedPayloadSchema,
     "tool.denied": runtimeLifecyclePayloadSchema,
@@ -762,30 +765,28 @@ export function payloadSchemaFor(type: EventType): z.ZodType<Readonly<Record<str
     "capability.deactivated": capabilityDeactivatedPayloadSchema,
   } as const;
   return map[type] as z.ZodType<Readonly<Record<string, unknown>>>;
-}
+};
 
 /** Type guard: narrows an envelope to a typed event by event_type. */
-export function isEventType<T extends EventType>(
+export const isEventType = <T extends EventType>(
   envelope: EventEnvelope,
   type: T,
-): envelope is TypedEvent<T> {
-  return envelope.eventType === type;
-}
+): envelope is TypedEvent<T> => envelope.eventType === type;
 
 /** Built-in actor for system-emitted events. */
-export function systemActor(id = "system"): SemanticEventActor {
-  return { kind: "system", id };
-}
+export const systemActor = (id = "system"): SemanticEventActor => ({ kind: "system", id });
 
 /** Built-in actor for model-emitted events. */
-export function modelActor(model: ModelKey, requestId: string): SemanticEventActor {
-  return { kind: "model", id: `${model}:${requestId}` };
-}
+export const modelActor = (model: ModelKey, requestId: string): SemanticEventActor => ({
+  kind: "model",
+  id: `${model}:${requestId}`,
+});
 
 /** Built-in actor for user-emitted events. */
-export function userActor(principal: PrincipalId): SemanticEventActor {
-  return { kind: "user", id: principal };
-}
+export const userActor = (principal: PrincipalId): SemanticEventActor => ({
+  kind: "user",
+  id: principal,
+});
 
 /** Convenience: compute the artifact_ref hash for a payload (caller supplies). */
 export function payloadArtifactHash(_payload: unknown): ContentHash | null {

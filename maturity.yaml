@@ -166,9 +166,9 @@ components:
 
   # ---------------- Evaluation laboratory ----------------
   - { id: forge-evals, kind: python-package, path: python/forge_evals, tier: experimental,
-      basis: "Runners plus sealed Phase 11/12 structural contracts; no real held-out promotion, trusted signature verifier, canary, or dominance evidence" }
+      basis: "Runners plus sealed Phase 11/12 structural contracts; canary pairing, held-out partition enforcement, cohort metrics, and trajectory diffs now unit-tested at HEAD; no real held-out promotion, trusted signature verifier, or dominance evidence" }
   - { id: eval-corpus, kind: eval-corpus, path: evals, tier: fixture,
-      basis: "Benchmark suites/tasks/graders/security fixtures — data, not production code" }
+      basis: "Benchmark suites/tasks/graders/security fixtures and the holdout partition registry — data, not production code" }
 
   # ---------------- External harness adapters ----------------
   - { id: adapter-fixture-agent, kind: adapter, path: adapters/fixture-agent, tier: fixture,

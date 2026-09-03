@@ -16,7 +16,7 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | Component | Kind | Path | Tier | Basis |
 |---|---|---|---|---|
 | `adapter-fixture-agent` | adapter | `adapters/fixture-agent` | `fixture` | Deterministic no-model test double; replays recorded trajectories |
-| `eval-corpus` | eval-corpus | `evals` | `fixture` | Benchmark suites/tasks/graders/security fixtures — data, not production code |
+| `eval-corpus` | eval-corpus | `evals` | `fixture` | Benchmark suites/tasks/graders/security fixtures and the holdout partition registry — data, not production code |
 | `terminus-kernel-testkit` | rust-crate | `crates/terminus-kernel-testkit` | `fixture` | Fakes/builders/in-memory stores for tests only |
 | `provider-conformance` | ts-package | `packages/provider-conformance` | `fixture` | Conformance kit used to test provider renderers |
 | `testkit` | ts-package | `packages/testkit` | `fixture` | Explicit fixture-only provider/kernel builders with grant references; never a production success path |
@@ -29,7 +29,7 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `app-tui` | app | `apps/tui` | `experimental` | TERMINUS_TOKEN-authenticated text-mode client with Phase 9 operator reads; interactive intervention, continuity, and usability exit gates unverified |
 | `mini-service-control` | mini-service | `mini-services/terminus-control` | `experimental` | TS control plane persists local state and fails closed at an unconfigured provider transport; several Phase 9/10 coordinators remain process-local |
 | `mini-service-kernel` | mini-service | `mini-services/terminus-kernel` | `experimental` | Rust kernel gRPC-over-private-UDS boundary; file resolution still uses one configured data root, so arbitrary registered-root isolation is unverified |
-| `forge-evals` | python-package | `python/forge_evals` | `experimental` | Runners plus sealed Phase 11/12 structural contracts; no real held-out promotion, trusted signature verifier, canary, or dominance evidence |
+| `forge-evals` | python-package | `python/forge_evals` | `experimental` | Runners plus sealed Phase 11/12 structural contracts; canary pairing, held-out partition enforcement, cohort metrics, and trajectory diffs now unit-tested at HEAD; no real held-out promotion, trusted signature verifier, or dominance evidence |
 | `terminus-authz` | rust-crate | `crates/terminus-authz` | `experimental` | Signed/scoped capability tokens real; revocation + nonce state in-memory (audit 4.4) |
 | `terminus-code-intel` | rust-crate | `crates/terminus-code-intel` | `experimental` | Tree-sitter symbol index with basic tests |
 | `terminus-connector` | rust-crate | `crates/terminus-connector` | `experimental` | L7 connector broker: grant-bound credential injection, exact-operation binding, rustls HTTPS with pinned resolved addresses, bounded response capture, and response scrubbing; real-account inference conformance is not recorded at HEAD |

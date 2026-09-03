@@ -475,6 +475,49 @@ describe("Context Compiler", () => {
     );
     expect(ablated.fragmentCount).toBe(replayed.fragmentCount - 1);
     expect(ablated.renderedRequestHash).not.toBe(replayed.renderedRequestHash);
+    expect(ablated.rendered.request.cachePlan.stablePrefixHash).not.toBe(
+      compiled.manifest.cachePlan.stablePrefixHash,
+    );
+
+    const breakpointIdx = compiled.manifest.cachePlan.breakpoints[0];
+    if (breakpointIdx !== undefined) {
+      const breakpointFragmentId = compiled.manifest.fragments[breakpointIdx]?.fragmentId;
+      if (breakpointFragmentId) {
+        const ablatedBreakpoint = await replayWithAblation(
+          {
+            manifest: compiled.manifest,
+            selectedFragments: selected,
+            renderer: new FakeRenderer(),
+            provider: input.provider,
+            model: input.model,
+            epoch: null,
+            signal: null,
+          },
+          { label: "remove-breakpoint", removeFragmentIds: [breakpointFragmentId] },
+        );
+        expect(ablatedBreakpoint.rendered.request.cachePlan.breakpoints.length).toBeGreaterThan(0);
+      }
+    }
+    const highMinimumProvider = {
+      ...input.provider,
+      caching: {
+        ...input.provider.caching,
+        minimumTokens: 1_000_000,
+      },
+    };
+    const belowMinimum = await replayWithAblation(
+      {
+        manifest: compiled.manifest,
+        selectedFragments: selected,
+        renderer: new FakeRenderer(),
+        provider: highMinimumProvider,
+        model: input.model,
+        epoch: null,
+        signal: null,
+      },
+      { label: "below-provider-cache-minimum", removeFragmentIds: [selected[0]!.id] },
+    );
+    expect(belowMinimum.rendered.request.cachePlan.breakpoints).toEqual([]);
     await expect(replayContext({
       manifest: compiled.manifest,
       selectedFragments: selected.slice(1),

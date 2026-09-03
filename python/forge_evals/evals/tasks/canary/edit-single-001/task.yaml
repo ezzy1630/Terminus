@@ -1,0 +1,31 @@
+suite: canary
+task: edit-single-001
+cohort: canary
+title: Single-file edit — correct the free-shipping threshold
+source_commit: fixture-canary-edit-single-001-v1
+image_digest: local:python-3.12-pytest-8
+timeout: 600
+budget:
+  max_cost_usd: 1.0
+  max_wall_seconds: 600
+  max_tool_calls: 50
+  max_turns: 20
+allowed_network: []
+secrets: {}
+grader_version: 1.0.0
+rationale: >
+  Canary archetype: single-file edit. Exactly one source file may change; the
+  deterministic grader runs the public tests plus staged hidden boundary
+  tests and enforces the changed-file scope.
+acceptance_criteria:
+  - id: tests-pass
+    statement: the full test suite passes including hidden boundary tests
+    verification_hint: "command: python -m pytest -q"
+  - id: scope
+    statement: only src/shipping.py changed
+    verification_hint: "command: git status --porcelain"
+grader:
+  entrypoint: grader/run.py
+  protocol: json_stdio
+  timeout_seconds: 30
+risk_class: normal

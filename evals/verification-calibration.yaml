@@ -1,0 +1,49 @@
+schema_version: 1
+cases:
+  - id: unchanged-observable-answer
+    tier: 0
+    changed_files: []
+    expected_outcome: correct_completion
+    required_evidence: [acceptance_query]
+  - id: isolated-doc-update
+    tier: 1
+    risk_class: low
+    changed_files: [docs/guide.md]
+    expected_outcome: correct_completion
+    required_evidence: [diff_policy]
+  - id: ordinary-code-correct
+    tier: 2
+    risk_class: normal
+    changed_files: [src/index.ts]
+    expected_outcome: correct_completion
+    required_evidence: [file_parses, static_diagnostics, diff_policy]
+  - id: ordinary-code-wrong
+    tier: 2
+    risk_class: normal
+    changed_files: [src/index.ts]
+    expected_outcome: wrong_completion
+    required_evidence: [unit_test, diff_policy]
+  - id: stale-evidence
+    tier: 2
+    risk_class: normal
+    changed_files: [src/index.ts]
+    expected_outcome: stale_evidence_rejected
+    required_evidence: [workspace_revision_binding]
+  - id: missing-evidence
+    tier: 2
+    risk_class: normal
+    changed_files: [src/index.ts]
+    expected_outcome: missing_evidence_rejected
+    required_evidence: [mandatory_predicate]
+  - id: irrelevant-evidence
+    tier: 2
+    risk_class: normal
+    changed_files: [src/index.ts]
+    expected_outcome: irrelevant_evidence_rejected
+    required_evidence: [claim_evidence_binding]
+  - id: security-change
+    tier: 3
+    risk_class: high
+    changed_files: [src/auth/token.ts]
+    expected_outcome: correct_completion
+    required_evidence: [security_scanner, detached_review, diff_policy]

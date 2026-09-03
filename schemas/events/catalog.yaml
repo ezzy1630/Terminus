@@ -270,6 +270,19 @@
   pii: low
   retention: audit
 
+- type: turn.recovery_requested
+  version: 1
+  aggregate: turn
+  payload:
+    reason: {type: string, required: true}
+    code: {type: string, required: true}
+    previous_state: {type: string, required: true}
+    recovery: {type: string, required: true}
+    retryable: {type: bool, required: true}
+    details: {type: string, required: false}
+  pii: none
+  retention: audit
+
 - type: turn.completed
   version: 1
   aggregate: turn

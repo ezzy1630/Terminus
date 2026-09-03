@@ -6,5 +6,6 @@ export * from "./service-types.js";
 export * from "./task-projection-service.js";
 export * from "./tool-episode-service.js";
 export * from "./turn-coordinator.js";
+export * from "./turn-projection.js";
 export * from "./verification-coordinator.js";
 export * from "./repair-attempt-store.js";

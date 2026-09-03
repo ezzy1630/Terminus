@@ -252,6 +252,20 @@ describe("H3 predicate command derivation", () => {
     )).toMatchObject({ kind: "command", args: ["run", "lint"] });
   });
 
+  test("diff policy resolves to the intrinsic whitespace-error check", () => {
+    expect(resolvePredicateCommand(
+      "diff_policy",
+      "terminus-predicate",
+      ["diff_policy"],
+      {},
+    )).toEqual({
+      kind: "command",
+      program: "git",
+      args: ["diff", "--check"],
+      source: "terminus:diff-policy-v1",
+    });
+  });
+
   test("no detected runner skips the node with a reason instead of failing it", () => {
     const resolved = resolvePredicateCommand("unit_test", "terminus-predicate", ["unit_test"], {});
     expect(resolved.kind).toBe("skipped");

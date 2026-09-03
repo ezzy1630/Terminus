@@ -1,0 +1,32 @@
+suite: canary
+task: test-repair-001
+cohort: canary
+title: Failing-test repair — make the slugify suite green
+source_commit: fixture-canary-test-repair-001-v1
+image_digest: local:python-3.12-pytest-8
+timeout: 600
+budget:
+  max_cost_usd: 1.0
+  max_wall_seconds: 600
+  max_tool_calls: 50
+  max_turns: 20
+allowed_network: []
+secrets: {}
+grader_version: 1.0.0
+rationale: >
+  Canary archetype: failing-test repair. The public suite fails against the
+  shipped implementation; the agent must repair the implementation without
+  touching tests. Hidden tests add further cases; weakening or editing tests
+  fails the grader.
+acceptance_criteria:
+  - id: tests-pass
+    statement: the full suite passes including hidden cases
+    verification_hint: "command: python -m pytest -q"
+  - id: tests-untouched
+    statement: no file under tests/ changed
+    verification_hint: "command: git status --porcelain"
+grader:
+  entrypoint: grader/run.py
+  protocol: json_stdio
+  timeout_seconds: 30
+risk_class: normal

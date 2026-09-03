@@ -1,0 +1,24 @@
+schema_version: 1
+description: >-
+  Required provider-family conformance profiles. Model snapshot and API version
+  are resolved at run time and become part of each immutable report identity.
+profiles:
+  - {id: openai/responses, version: "1", provider: openai, status: awaiting_live_evidence}
+  - {id: anthropic/messages, version: "1", provider: anthropic, status: awaiting_live_evidence}
+  - {id: google/generate-content, version: "1", provider: google, status: awaiting_live_evidence}
+  - {id: local/openai-compatible, version: "1", provider: local, status: awaiting_live_evidence}
+required_checks:
+  - structured_tool_calls
+  - parallel_tool_semantics
+  - reasoning_replay
+  - truncation
+  - instruction_role_ordering
+  - cache_semantics
+  - usage_accounting
+  - cancellation
+  - retry_idempotency
+  - empty_response
+  - refusal
+  - large_tool_result
+  - tool_error_continuation
+  - reasoning_effort_verbosity

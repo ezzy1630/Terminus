@@ -97,33 +97,6 @@ interface KernelCommandOutcome {
   readonly stderr: string;
 }
 
-/**
- * Run verification commands through the kernel ProcessService. The control
- * plane never receives a direct process-spawn escape hatch.
- */
-export function createKernelPredicateRunner(
-  clients: KernelUdsClients,
-  baseContext: RequestContext,
-  workspaceId: string,
-  /**
-   * Repository-derived commands (H3). Read lazily so the runner picks up the
-   * signals discovered during the turn it is verifying. When it resolves to an
-   * empty catalog every derived predicate reports `skipped`, never `fail`.
-   */
-  runnerCatalog: () => VerificationRunnerCatalog = () => ({}),
-  /**
-   * Host path of the workspace, so the repository's own tool directories
-   * (`.venv/bin`, `node_modules/.bin`) resolve exactly as they do for the
-   * agent's `exec`. Without it `python -m pytest` ran the host interpreter,
-   * which has no pytest, and every derived check failed for the wrong reason.
-   */
-  workspaceRoot: string | null = null,
-): PredicateCommandRunner {
-  return {
-    run: (request) => runKernelPredicate(clients, baseContext, workspaceId, request, runnerCatalog(), workspaceRoot),
-  };
-}
-
 export async function resolveKernelEnvironmentDigest(
   clients: KernelUdsClients,
   signal?: AbortSignal | null,
@@ -358,14 +331,158 @@ async function hashChangedGitPaths(
 export const WORKSPACE_TREE_HASH_SCRIPT =
   'find . -type f -not -path "./.git/*" -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256';
 
-async function runKernelPredicate(
+/** Runner role that satisfies each derived predicate, in preference order. */
+const RUNNER_KINDS_BY_PREDICATE: Readonly<Record<string, readonly VerificationRunnerKind[]>> = {
+  file_parses: ["typecheck", "lint", "test"],
+  formatter_check: ["format", "lint"],
+  static_diagnostics: ["typecheck", "lint"],
+  unit_test: ["unit_test", "test"],
+  integration_test: ["integration_test", "test"],
+  property_test: ["test"],
+  fuzz_test: [],
+  security_scanner: ["security"],
+  schema_compatibility: ["codegen_check"],
+  migration_dry_run: [],
+  diff_policy: [],
+  performance_threshold: [],
+  e2e_test: ["e2e_test"],
+};
+
+/**
+ * Baseline probes are useful when the repository implements them, but they
+ * are not task acceptance predicates. If every required acceptance predicate
+ * is runnable, an unavailable baseline probe must stay visible as an optional
+ * skip instead of making an otherwise provable task impossible to admit.
+ *
+ * Risk-specific predicates are intentionally absent. A missing security,
+ * migration, compatibility, performance, or UI verifier remains required and
+ * therefore fails closed.
+ */
+const OPTIONAL_UNAVAILABLE_BASELINE_PREDICATES = new Set([
+  "file_parses",
+  "formatter_check",
+  "static_diagnostics",
+  "unit_test",
+]);
+
+type PredicateCommandResolution =
+  | { readonly kind: "command"; readonly program: string; readonly args: readonly string[]; readonly source: string | null }
+  | { readonly kind: "skipped"; readonly reason: string };
+
+const describeRunnerCatalog = (catalog: VerificationRunnerCatalog): readonly string[] =>
+  Object.values(catalog)
+    .filter((runner): runner is NonNullable<typeof runner> => runner !== undefined)
+    .map((runner) => `${runner.kind}=${runner.command} (${runner.sourcePath})`)
+    .sort();
+
+// skipcq: JS-R1005
+const parseCommand = (command: string): { readonly program: string; readonly args: readonly string[] } => {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  for (const character of command.trim()) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote !== null) {
+      if (character === quote) quote = null;
+      else current += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+    } else if (/\s/.test(character)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = "";
+      }
+    } else {
+      current += character;
+    }
+  }
+  if (escaped || quote !== null) throw new Error("verification command has an unterminated escape or quote");
+  if (current.length > 0) tokens.push(current);
+  const [program, ...args] = tokens;
+  if (program === undefined) throw new Error("verification command is empty");
+  return { program, args };
+};
+
+/**
+ * Turn a node's declared command into something the kernel can run.
+ *
+ * An explicit command from the node specification is honored verbatim. The
+ * `terminus-predicate <type>` placeholder is resolved against commands actually
+ * detected in this repository; when nothing implements the role, the predicate
+ * is `skipped` with the reason — a hardcoded `just <recipe>` fails every
+ * repository without a justfile.
+ */
+// skipcq: JS-R1005
+export const resolvePredicateCommand = (
+  predicateType: string,
+  program: string,
+  args: readonly string[],
+  catalog: VerificationRunnerCatalog,
+): PredicateCommandResolution => {
+  if (program !== "terminus-predicate") {
+    return { kind: "command", program, args, source: null };
+  }
+  if (predicateType === "ui_e2e") {
+    return {
+      kind: "skipped",
+      reason: "governed UI verification requires a configured computer-use verifier; no kernel command is defined",
+    };
+  }
+  if (predicateType === "diff_policy") {
+    return {
+      kind: "command",
+      program: "git",
+      args: ["diff", "--check"],
+      source: "terminus:diff-policy-v1",
+    };
+  }
+  const kinds = RUNNER_KINDS_BY_PREDICATE[predicateType];
+  if (kinds === undefined) {
+    return {
+      kind: "skipped",
+      reason: `predicate '${predicateType}' requires an external verifier; no repository command implements it`,
+    };
+  }
+  for (const kind of kinds) {
+    const runner = catalog[kind];
+    if (runner === undefined) continue;
+    const parsed = parseCommand(runner.command);
+    return {
+      kind: "command",
+      program: parsed.program,
+      args: parsed.args,
+      source: `${runner.kind}:${runner.sourcePath}`,
+    };
+  }
+  const detected = describeRunnerCatalog(catalog);
+  return {
+    kind: "skipped",
+    reason: detected.length === 0
+      ? `no test runner detected in this repository for '${predicateType}' (looked for ${[...REPOSITORY_SIGNAL_PATHS].join(", ")})`
+      : `no detected runner implements '${predicateType}' (needs one of ${kinds.join(", ")}; detected ${detected.join("; ")})`,
+  };
+};
+
+// skipcq: JS-R1005
+const runKernelPredicate = async (
   clients: KernelUdsClients,
   baseContext: RequestContext,
   workspaceId: string,
   request: Parameters<PredicateCommandRunner["run"]>[0],
   catalog: VerificationRunnerCatalog,
   workspaceRoot: string | null = null,
-): Promise<PredicateCommandOutcome> {
+): Promise<PredicateCommandOutcome> => {
   if (request.signal?.aborted) {
     throw new Error("verification predicate aborted before kernel start");
   }
@@ -406,141 +523,21 @@ async function runKernelPredicate(
       timeoutMs: request.timeoutMs,
     },
   };
-}
-
-/** Runner role that satisfies each derived predicate, in preference order. */
-const RUNNER_KINDS_BY_PREDICATE: Readonly<Record<string, readonly VerificationRunnerKind[]>> = {
-  file_parses: ["typecheck", "lint", "test"],
-  formatter_check: ["format", "lint"],
-  static_diagnostics: ["typecheck", "lint"],
-  unit_test: ["unit_test", "test"],
-  integration_test: ["integration_test", "test"],
-  property_test: ["test"],
-  fuzz_test: [],
-  security_scanner: ["security"],
-  schema_compatibility: ["codegen_check"],
-  migration_dry_run: [],
-  diff_policy: [],
-  performance_threshold: [],
-  e2e_test: ["e2e_test"],
 };
 
 /**
- * Baseline probes are useful when the repository implements them, but they
- * are not task acceptance predicates. If every required acceptance predicate
- * is runnable, an unavailable baseline probe must stay visible as an optional
- * skip instead of making an otherwise provable task impossible to admit.
- *
- * Risk-specific predicates are intentionally absent. A missing security,
- * migration, compatibility, performance, or UI verifier remains required and
- * therefore fails closed.
+ * Run verification commands through the kernel ProcessService. The control
+ * plane never receives a direct process-spawn escape hatch.
  */
-const OPTIONAL_UNAVAILABLE_BASELINE_PREDICATES = new Set([
-  "file_parses",
-  "formatter_check",
-  "static_diagnostics",
-  "unit_test",
-]);
-
-type PredicateCommandResolution =
-  | { readonly kind: "command"; readonly program: string; readonly args: readonly string[]; readonly source: string | null }
-  | { readonly kind: "skipped"; readonly reason: string };
-
-function describeRunnerCatalog(catalog: VerificationRunnerCatalog): readonly string[] {
-  return Object.values(catalog)
-    .filter((runner): runner is NonNullable<typeof runner> => runner !== undefined)
-    .map((runner) => `${runner.kind}=${runner.command} (${runner.sourcePath})`)
-    .sort();
-}
-
-/**
- * Turn a node's declared command into something the kernel can run.
- *
- * An explicit command from the node specification is honored verbatim. The
- * `terminus-predicate <type>` placeholder is resolved against commands actually
- * detected in this repository; when nothing implements the role, the predicate
- * is `skipped` with the reason — a hardcoded `just <recipe>` fails every
- * repository without a justfile.
- */
-export function resolvePredicateCommand(
-  predicateType: string,
-  program: string,
-  args: readonly string[],
-  catalog: VerificationRunnerCatalog,
-): PredicateCommandResolution {
-  if (program !== "terminus-predicate") {
-    return { kind: "command", program, args, source: null };
-  }
-  if (predicateType === "ui_e2e") {
-    return {
-      kind: "skipped",
-      reason: "governed UI verification requires a configured computer-use verifier; no kernel command is defined",
-    };
-  }
-  const kinds = RUNNER_KINDS_BY_PREDICATE[predicateType];
-  if (kinds === undefined) {
-    return {
-      kind: "skipped",
-      reason: `predicate '${predicateType}' requires an external verifier; no repository command implements it`,
-    };
-  }
-  for (const kind of kinds) {
-    const runner = catalog[kind];
-    if (runner === undefined) continue;
-    const parsed = parseCommand(runner.command);
-    return {
-      kind: "command",
-      program: parsed.program,
-      args: parsed.args,
-      source: `${runner.kind}:${runner.sourcePath}`,
-    };
-  }
-  const detected = describeRunnerCatalog(catalog);
-  return {
-    kind: "skipped",
-    reason: detected.length === 0
-      ? `no test runner detected in this repository for '${predicateType}' (looked for ${[...REPOSITORY_SIGNAL_PATHS].join(", ")})`
-      : `no detected runner implements '${predicateType}' (needs one of ${kinds.join(", ")}; detected ${detected.join("; ")})`,
-  };
-}
-
-function parseCommand(command: string): { readonly program: string; readonly args: readonly string[] } {
-  const tokens: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | null = null;
-  let escaped = false;
-  for (const character of command.trim()) {
-    if (escaped) {
-      current += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote !== null) {
-      if (character === quote) quote = null;
-      else current += character;
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      quote = character;
-    } else if (/\s/.test(character)) {
-      if (current.length > 0) {
-        tokens.push(current);
-        current = "";
-      }
-    } else {
-      current += character;
-    }
-  }
-  if (escaped || quote !== null) throw new Error("verification command has an unterminated escape or quote");
-  if (current.length > 0) tokens.push(current);
-  const [program, ...args] = tokens;
-  if (program === undefined) throw new Error("verification command is empty");
-  return { program, args };
-}
+export const createKernelPredicateRunner = (
+  clients: KernelUdsClients,
+  baseContext: RequestContext,
+  workspaceId: string,
+  runnerCatalog: () => VerificationRunnerCatalog = () => ({}),
+  workspaceRoot: string | null = null,
+): PredicateCommandRunner => ({
+  run: (request) => runKernelPredicate(clients, baseContext, workspaceId, request, runnerCatalog(), workspaceRoot),
+});
 
 function nodeCommandResolution(
   node: VerificationNode,

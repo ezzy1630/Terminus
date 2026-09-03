@@ -2,12 +2,10 @@ baseline:
   id: terminus-full
   version: 1
   description: |
-    Terminus full mode baseline (SPEC §18.1, §41.2). The strongest
-    supported Terminus configuration: scout + implementer + reviewer
-    topology, adaptive context with provenance DAG, memory on, native
-    compaction, deterministic routing with escalation. Used as the
-    upper-bound reference and the default comparison point for new
-    features.
+    Historical multivariate bundle retained for old-result decoding. It is not
+    an executable runtime profile and cannot be used as a promotion baseline.
+    New work must use the singleton cells in feature-experiments.yaml.
+  status: historical_non_executable
   harness: terminus
   harness_commit: 0000000000000000000000000000000000000000
   configuration:

@@ -121,6 +121,72 @@ export interface ProviderAttemptCostObservation {
 export interface ProviderSessionTransaction {
   readonly startAttempt: (input: ProviderAttemptStartInput) => Promise<void>;
   readonly completeAttempt: (input: ProviderAttemptResponseInput) => Promise<void>;
+  /** Read one attempt's current status for the recovery CAS. */
+  readonly findAttemptStatus?: (attemptId: string) => Promise<string | null>;
+  /** Mark one attempt `interrupted`; returns rows updated. */
+  readonly interruptAttempt?: (input: {
+    readonly attemptId: string;
+    readonly inFlightStates: readonly string[];
+    readonly interruptedAt: Date;
+    readonly errorJson: string;
+  }) => Promise<number>;
+  /** Read the owning turn's state and task for recovery decisions. */
+  readonly readTurnForRecovery?: (turnId: string) => Promise<{ readonly state: string; readonly taskId: string | null } | null>;
+  /** Settle the owning turn as INTERRUPTED while it is still active. */
+  readonly interruptTurnForRecovery?: (input: {
+    readonly turnId: string;
+    readonly expectedState: string;
+    readonly interruptedAt: Date;
+    readonly errorJson: string;
+  }) => Promise<number>;
+  /**
+   * Block the owning task: a live attempt may have taken effect upstream.
+   * Only the given statuses may be written (the original scope: ACTIVE and
+   * VERIFYING); a terminal task is left alone.
+   */
+  readonly blockTaskForRecovery?: (input: {
+    readonly taskId: string;
+    readonly phase: string;
+    readonly expectedStatuses: readonly string[];
+    readonly reasonJson: string;
+  }) => Promise<void>;
+  /** List attempts still in flight on the durable attempt rows. */
+  readonly listInFlightAttempts?: () => Promise<readonly {
+    readonly id: string;
+    readonly turnId: string;
+    readonly status: string;
+    readonly providerIdempotencyKey: string | null;
+    readonly requestFingerprint: string | null;
+    readonly requestArtifact: string;
+    readonly responseArtifact: string | null;
+    readonly turn: { readonly state: string; readonly taskId: string | null };
+  }[]>;
+}
+
+/** Provider attempt statuses that may still be executing upstream. */
+export const IN_FLIGHT_PROVIDER_STATES = ["running", "submitted", "streaming", "starting"] as const;
+
+export class ProviderAttemptAlreadyResolvedError extends Error {
+  constructor(readonly attemptId: string) {
+    super(`provider attempt ${attemptId} was already resolved before recovery`);
+    this.name = "ProviderAttemptAlreadyResolvedError";
+  }
+}
+
+export interface ProviderAttemptRecoveryRecord {
+  readonly id: string;
+  readonly turnId: string;
+  readonly taskId: string | null;
+  readonly previousStatus: string;
+  readonly providerIdempotencyKey: string | null;
+  readonly requestFingerprint: string | null;
+}
+
+export interface ProviderAttemptRecoveryResult {
+  readonly scanned: number;
+  readonly interrupted: readonly ProviderAttemptRecoveryRecord[];
+  readonly alreadyResolved: readonly string[];
+  readonly failed: readonly { readonly id: string; readonly error: string }[];
 }
 
 export interface ProviderSessionDependencies<TTransaction> {
@@ -130,6 +196,17 @@ export interface ProviderSessionDependencies<TTransaction> {
   readonly mutate: MutationRunner;
   readonly executeLocal: (input: ProviderExecutionInput) => Promise<ProviderResponse>;
   readonly executeGateway: (input: ProviderExecutionInput) => Promise<ProviderResponse>;
+  /** Durable read of attempts still in flight (restart recovery). */
+  readonly listInFlightAttempts?: () => Promise<readonly {
+    readonly id: string;
+    readonly turnId: string;
+    readonly status: string;
+    readonly providerIdempotencyKey: string | null;
+    readonly requestFingerprint: string | null;
+    readonly requestArtifact: string;
+    readonly responseArtifact: string | null;
+    readonly turn: { readonly state: string; readonly taskId: string | null };
+  }[]>;
 }
 
 /**
@@ -232,5 +309,147 @@ export class ProviderSessionService<TTransaction> {
         },
       );
     });
+  }
+
+  /**
+   * Reconcile provider calls that crossed the kernel boundary without a
+   * durable response. They cannot be retried safely: the provider may have
+   * accepted the request even when control did not receive a response.
+   * Recovery therefore records an interrupted attempt, blocks its task, and
+   * leaves a deterministic evidence event for provider-side reconciliation.
+   *
+   * The recovery event, the attempt CAS, the turn settlement, and the task
+   * block are one transaction; a re-delivered recovery pass collides with
+   * the attempt CAS and reports the attempt as already resolved.
+   */
+  // skipcq: JS-R1005
+  async reconcileInFlightAttempts(
+    activeTurnStates: readonly string[],
+    alreadyUnderMutationLock = false,
+  ): Promise<ProviderAttemptRecoveryResult> {
+    const { appendEvent, listInFlightAttempts } = this.dependencies;
+    if (listInFlightAttempts === undefined) {
+      throw new Error("provider attempt recovery ports are not configured");
+    }
+    const attempts = await listInFlightAttempts();
+    const inFlightStates: readonly string[] = IN_FLIGHT_PROVIDER_STATES;
+    const interrupted: ProviderAttemptRecoveryRecord[] = [];
+    const alreadyResolved: string[] = [];
+    const failed: Array<{ id: string; error: string }> = [];
+    for (const attempt of attempts) {
+      const recover = async (): Promise<void> => {
+        const interruptedAt = new Date();
+        await appendEvent(
+          {
+            eventType: "turn.recovery_interrupted",
+            aggregateType: "turn",
+            aggregateId: attempt.turnId,
+            correlationId: attempt.turn.taskId ?? attempt.turnId,
+            idempotencyKey: `provider-recovery:${attempt.id}`,
+            payload: {
+              previous_state: attempt.turn.state,
+              state: "INTERRUPTED",
+              reason: "provider_attempt_in_flight_on_process_restart",
+              reconciliation_required: true,
+              provider_attempt_id: attempt.id,
+              provider_idempotency_key: attempt.providerIdempotencyKey,
+              request_fingerprint: attempt.requestFingerprint,
+            },
+            artifactRefs: [
+              attempt.requestArtifact,
+              ...(attempt.responseArtifact === null ? [] : [attempt.responseArtifact]),
+            ],
+          },
+          // skipcq: JS-R1005
+          async (transaction) => {
+            const recovery = this.dependencies.transaction(transaction);
+            const {
+              findAttemptStatus,
+              interruptAttempt,
+              readTurnForRecovery,
+              interruptTurnForRecovery,
+              blockTaskForRecovery,
+            } = recovery;
+            if (
+              findAttemptStatus === undefined
+              || interruptAttempt === undefined
+              || readTurnForRecovery === undefined
+              || interruptTurnForRecovery === undefined
+              || blockTaskForRecovery === undefined
+            ) {
+              throw new Error("provider attempt recovery transaction ports are not configured");
+            }
+            const current = await findAttemptStatus(attempt.id);
+            if (current === null || !inFlightStates.includes(current.toLowerCase())) {
+              throw new ProviderAttemptAlreadyResolvedError(attempt.id);
+            }
+            const attemptUpdate = await interruptAttempt({
+              attemptId: attempt.id,
+              inFlightStates,
+              interruptedAt,
+              errorJson: JSON.stringify({
+                reason: "process_restart_before_provider_response",
+                reconciliation_required: true,
+                provider_idempotency_key: attempt.providerIdempotencyKey,
+              }),
+            });
+            if (attemptUpdate !== 1) {
+              throw new ProviderAttemptAlreadyResolvedError(attempt.id);
+            }
+            const turn = await readTurnForRecovery(attempt.turnId);
+            if (turn !== null && activeTurnStates.includes(turn.state)) {
+              const turnUpdate = await interruptTurnForRecovery({
+                turnId: attempt.turnId,
+                expectedState: turn.state,
+                interruptedAt,
+                errorJson: JSON.stringify({
+                  reason: "provider_attempt_in_flight_on_process_restart",
+                  provider_attempt_id: attempt.id,
+                  reconciliation_required: true,
+                }),
+              });
+              if (turnUpdate !== 1) {
+                throw new Error(`turn ${attempt.turnId} changed during provider recovery`);
+              }
+            }
+            if (turn?.taskId !== null && turn?.taskId !== undefined) {
+              await blockTaskForRecovery({
+                taskId: turn.taskId,
+                phase: turn.state === "VERIFYING" ? "VERIFY" : "IMPLEMENT",
+                expectedStatuses: ["ACTIVE", "VERIFYING"],
+                reasonJson: JSON.stringify({
+                  reason: "provider_recovery_required",
+                  provider_attempt_id: attempt.id,
+                  turn_id: attempt.turnId,
+                  reconciliation_required: true,
+                }),
+              });
+            }
+          },
+        );
+      };
+      try {
+        if (alreadyUnderMutationLock) await recover();
+        else await this.dependencies.mutate(recover);
+        interrupted.push({
+          id: attempt.id,
+          turnId: attempt.turnId,
+          taskId: attempt.turn.taskId,
+          previousStatus: attempt.status,
+          providerIdempotencyKey: attempt.providerIdempotencyKey,
+          requestFingerprint: attempt.requestFingerprint,
+        });
+      } catch (error: unknown) {
+        if (error instanceof ProviderAttemptAlreadyResolvedError) {
+          alreadyResolved.push(error.attemptId);
+        } else {
+          failed.push({
+            id: attempt.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+    return { scanned: attempts.length, interrupted, alreadyResolved, failed };
   }
 }

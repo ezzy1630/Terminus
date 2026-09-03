@@ -1,0 +1,34 @@
+suite:
+  id: canary
+  version: 1
+  description: |
+    Tier 2 canary (causal evaluation system): five compact archetype tasks
+    run as a paired baseline-vs-candidate comparison per agent-behavior PR.
+    Deterministic graders decide success from repository state and tests;
+    LLM judges are never on the success path. See
+    docs/architecture/evaluation-lab.md and ADR-0056.
+  source: internal
+  license: proprietary
+  task_count: 5
+  default_timeout_seconds: 600
+  default_budget:
+    model_micros: 1500000
+    compute_seconds: 300
+    wall_clock_seconds: 600
+    human_approvals: 0
+  grader_version: canary-1.0
+  metrics:
+    primary: resolved
+    secondary:
+      - false_completion
+      - cost_usd
+      - wall_clock_ms
+      - tool_sequence_divergence
+  cohorts:
+    - canary
+  paired_comparison_required: true
+  notes: |
+    Tasks live under python/forge_evals/evals/tasks/canary/. Run the paired
+    comparison with `terminus-eval canary` (live: two control planes;
+    offline: --fixture-mode). Partition class is `dev` — canary results are
+    diagnostics and never promotion evidence on their own.

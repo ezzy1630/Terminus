@@ -1,0 +1,13 @@
+outcome: completed
+changed_files: []
+tests: []
+verification_plan: []
+cost_usd_max: 1.0
+turns_max: 20
+rejection_triggers:
+  - any tracked file modified
+  - diagnosis missing the defective expression
+notes: >
+  Read-only diagnosis: the graded artifact is DIAGNOSIS.md content plus an
+  empty diff. Hidden tests repeat the content checks; both grader paths are
+  deterministic.

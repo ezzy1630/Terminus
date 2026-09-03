@@ -1,12 +1,48 @@
 # Evaluation laboratory
 
-This document is the deep dive for the Python evaluation laboratory (SPEC §18, §41). The eval lab is offline, non-privileged, and never on the production enforcement path. It is governed by ADR-0001 (primary metric), ADR-0025 (permanent baseline + promotion gates), and ADR-0003 (Python is eval-only).
+This document is the deep dive for the Python evaluation laboratory (SPEC §18, §41). The eval lab is offline, non-privileged, and never on the production enforcement path. It is governed by ADR-0001 (primary metric), ADR-0025 (permanent baseline + promotion gates), ADR-0056 (causal baseline-vs-candidate tiers), and ADR-0003 (Python is eval-only).
 
 ## Why an eval lab (SPEC §18, §41, J.3)
 
-Without pinned baselines, environment graders, and exact cost/trajectory records, architectural changes become anecdotes (SPEC §48.3). The eval lab is what makes Terminus's primary metric (ADR-0001) measurable and what governs feature promotion (ADR-0025).
+Without pinned baselines, environment graders, and exact cost/trajectory records, architectural changes become anecdotes (SPEC §48.3). The eval lab is what makes Terminus's primary metric (ADR-0001) measurable and what governs feature promotion (ADR-0025, ADR-0056).
 
 The eval lab is **offline and non-privileged**: it reads exported traces/artifacts; it never owns production effects. It runs in `python/forge_evals/`.
+
+## Causal baseline-vs-candidate system (ADR-0056)
+
+The lab answers one question with paired evidence instead of intuition: *did this Context Compiler / router / verification change actually improve Terminus?* Three tiers, all on the existing artifact model:
+
+### Tier 1 — deterministic lifecycle conformance (every PR, no live model)
+
+The turn-lifecycle reference loop runs fixed adversarial schedules plus seeded schedule permutations on a virtual clock, and **measures** the causal tier-1 properties (see `mini-services/terminus-control/src/agent/turn-lifecycle/conformance.ts`, report `terminus.lifecycle.conformance/v1`):
+
+- stuck-state rate (must be 0);
+- duplicate-attempt behavior — duplicate deliveries absorbed (must be 1.0);
+- recovery correctness and reconstruction from persisted events (crash replay must be exact);
+- cancellation correctness (cancel settles ABORTED once, spawns nothing);
+- exactly one valid terminal/waiting outcome (post-quiescence redelivery is inert);
+- idempotency after redelivery (quiescence within two rounds);
+- injected-clock deadline behavior (stale expiries absorbed, current expiries settle BUDGET_EXHAUSTED once).
+
+Fast and mandatory: `just test-reference-loop` (CI budget 5k seeds, well under a second). `just lifecycle-conformance` retains a 50k-seed report under `evals/results/lifecycle/`.
+
+### Tier 2 — small live-provider canary (relevant PRs)
+
+Five compact tasks under `python/forge_evals/evals/tasks/canary/` cover read-only diagnosis, single-file edit, multi-file edit, failing-test repair, and repository discovery with incomplete initial context. Deterministic graders (repository state + tests) decide success; LLM judges never sit on the success path.
+
+```bash
+just canary-fixture            # offline machinery check (fixture-only evidence)
+just canary-live <base> <cand> # live paired comparison, two control planes, fails closed without them
+```
+
+`terminus-eval canary` runs the pinned baseline and the candidate under identical model snapshot, reasoning effort, task, environment, seed, and budget; enforces the model-fixed identity key; and emits `terminus.canary.comparison/v1` with per-cell automatic trajectory, context-manifest, and tool-sequence diffs (`forge_evals.trajectory_diff`).
+
+### Tier 3 — larger held-out scheduled cohort
+
+- **Partitions**: `evals/holdout-partitions.yaml` (`forge_evals.holdout`) classifies every (suite, task) cell as `dev`, `holdout`, or `blocked`; blocked cells fail run sets closed, holdout cells must be stamped on the record, unlisted cells default to dev.
+- **Metrics**: `forge_evals.cohort_metrics` computes resolved-task rate, false-completion rate, median/p95 latency, token breakdowns, cost per resolved task, tool calls per resolved task, verification cost share and false-block rate, context-compilation latency and selected-token count, provider retries, lifecycle recoveries, stuck-state rate, cache-prefix survival between turns, and repair turns — with repetitions and bootstrap CIs, sliced by cohort and archetype. Unmeasured is `None`, never zero.
+- **Comparison**: `just cohort-compare <baseline-dir> <candidate-dir>` (CLI `terminus-eval cohort-compare`) emits `terminus.cohort.comparison/v1` plus a markdown summary: paired deltas with McNemar and bootstrap CIs, per-slice metric tables for both arms, per-pair trajectory/manifest/tool-sequence comparisons, and reliability gates. Verdicts at small n report `no_change` instead of reacting to single runs.
+- **Promotion**: the gate's seventh gate (`reliability`) consumes `ReliabilityEvidence`; a candidate regressing false-completion, stuck-state, verification false-block, or cache-prefix survival beyond margin is rejected regardless of mean primary-metric improvement (ADR-0056).
 
 ## Evaluation modes (SPEC §41.1, §18.1)
 
