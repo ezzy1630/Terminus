@@ -1241,6 +1241,9 @@ pub mod connector_chunk {
 // Code intelligence service (SPEC §11.8, §31.1)
 // =============================================================================
 
+/// CodeSearchRequest performs code intelligence search.
+/// Currently delegates to inspect_symbol and performs exact symbol lookup
+/// against the heuristic symbol index.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CodeSearchRequest {
     #[prost(message, optional, tag="1")]

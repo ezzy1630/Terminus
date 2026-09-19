@@ -1,0 +1,30 @@
+suite: retrieval-v1
+task: retrieval-named-02
+cohort: retrieval-v1
+title: Named file bug fix — ledger balance refund calculation
+source_commit: fixture-retrieval-named-02-v1
+image_digest: local:python-3.12-pytest-8
+timeout: 600
+budget:
+  max_cost_usd: 1.0
+  max_wall_seconds: 600
+  max_tool_calls: 50
+  max_turns: 20
+allowed_network: []
+secrets: {}
+grader_version: 1.0.0
+rationale: >
+  Retrieval archetype 1: Explicitly named file.
+  The prompt directly mentions src/ledger.py and asks to fix refund balance handling.
+acceptance_criteria:
+  - id: tests-pass
+    statement: the full test suite passes including hidden edge cases
+    verification_hint: "command: python -m pytest -q"
+  - id: scope
+    statement: only src/ledger.py changed
+    verification_hint: "command: git status --porcelain"
+grader:
+  entrypoint: grader/run.py
+  protocol: json_stdio
+  timeout_seconds: 60
+risk_class: normal

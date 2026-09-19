@@ -4103,6 +4103,8 @@ impl CodeIntelligenceService {
         Ok(service)
     }
 
+    /// Inspect a symbol. Performs exact symbol name lookup against the heuristic
+    /// symbol index (SPEC §34.6).
     pub fn inspect(
         &self,
         ctx: &RequestContext,

@@ -925,6 +925,11 @@ export interface ConnectorChunk {
   receipt?: ConnectorReceiptMessage | undefined;
 }
 
+/**
+ * CodeSearchRequest performs code intelligence search.
+ * Currently delegates to inspect_symbol and performs exact symbol lookup
+ * against the heuristic symbol index.
+ */
 export interface CodeSearchRequest {
   context: RequestContext | undefined;
   workspaceId: string;

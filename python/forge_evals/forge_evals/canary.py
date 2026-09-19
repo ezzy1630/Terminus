@@ -39,6 +39,7 @@ from .trajectory_diff import TrajectoryDiff, diff_trajectories
 __all__ = [
     "CANARY_TASKS",
     "CANARY_TASK_ROOT",
+    "RETRIEVAL_V1_TASKS",
     "CanaryReport",
     "CanaryTaskSpec",
     "canary_report_version",
@@ -57,14 +58,15 @@ PairRunner = Callable[["CanaryTaskSpec", int], tuple[RunRecord, RunRecord]]
 
 @dataclass(frozen=True)
 class CanaryTaskSpec:
-    """One canary task: id plus the archetype it covers."""
+    """One task spec: id, archetype, and suite."""
 
     task_id: str
     archetype: str
+    suite: str = "canary"
 
     @property
     def package_dir(self) -> Path:
-        return CANARY_TASK_ROOT / self.task_id
+        return Path(__file__).resolve().parents[1] / "evals" / "tasks" / self.suite / self.task_id
 
 
 # The five canary archetypes. Keep the list stable: cohort metrics slice by
@@ -76,6 +78,14 @@ CANARY_TASKS: tuple[CanaryTaskSpec, ...] = (
     CanaryTaskSpec("edit-multi-001", "multi_file_edit"),
     CanaryTaskSpec("test-repair-001", "failing_test_repair"),
     CanaryTaskSpec("repo-discovery-001", "repository_discovery"),
+)
+
+RETRIEVAL_V1_TASKS: tuple[CanaryTaskSpec, ...] = (
+    CanaryTaskSpec("retrieval-named-01", "named_file_edit", suite="retrieval-v1"),
+    CanaryTaskSpec("retrieval-named-02", "named_file_edit", suite="retrieval-v1"),
+    CanaryTaskSpec("retrieval-symptom-01", "symptom_discovery", suite="retrieval-v1"),
+    CanaryTaskSpec("retrieval-symptom-02", "symptom_bugfix", suite="retrieval-v1"),
+    CanaryTaskSpec("retrieval-cross-file-01", "cross_file_reference", suite="retrieval-v1"),
 )
 
 
@@ -93,6 +103,7 @@ class CanaryReport:
     tasks: list[dict[str, Any]] = field(default_factory=list)
     aggregate: dict[str, Any] = field(default_factory=dict)
     ineligible_reason: str | None = None
+    is_aa_test: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe form; run records are represented by their ids only."""
@@ -104,6 +115,7 @@ class CanaryReport:
             "report": self.report,
             "baseline_commit": self.baseline_commit,
             "candidate_commit": self.candidate_commit,
+            "is_aa_test": self.is_aa_test,
             "model_fixed_key": self.model_fixed_key,
             "identity_locked": self.identity_locked,
             "identity_issues": list(self.identity_issues),
@@ -218,6 +230,7 @@ def run_canary(
     seed: int = 42,
     output_dir: Path | str | None = None,
     tasks: tuple[CanaryTaskSpec, ...] = CANARY_TASKS,
+    is_aa_test: bool = False,
 ) -> CanaryReport:
     """Run the canary and produce the paired comparison report.
 
@@ -230,8 +243,16 @@ def run_canary(
     report = CanaryReport(
         baseline_commit=baseline_commit,
         candidate_commit=candidate_commit,
+        is_aa_test=is_aa_test,
     )
-    if baseline_commit == candidate_commit:
+    if is_aa_test:
+        if baseline_commit != candidate_commit:
+            report.ineligible_reason = (
+                f"A/A test requires identical baseline and candidate commits; got "
+                f"{baseline_commit} != {candidate_commit}"
+            )
+            return report
+    elif baseline_commit == candidate_commit:
         report.ineligible_reason = (
             f"baseline and candidate commits are identical ({baseline_commit}); "
             "a canary compares two different harness revisions"
@@ -267,6 +288,12 @@ def run_canary(
     report.identity_locked = not report.identity_issues
     report.eligible = report.identity_locked and bool(report.tasks)
     report.aggregate = _aggregate_task_rows(report.tasks)
+    if is_aa_test and report.aggregate.get("resolved_delta", 0) != 0:
+        report.eligible = False
+        report.ineligible_reason = (
+            f"A/A test detected divergence between identical configurations: "
+            f"resolved_delta={report.aggregate['resolved_delta']}"
+        )
 
     if output_dir is not None:
         out = Path(output_dir)

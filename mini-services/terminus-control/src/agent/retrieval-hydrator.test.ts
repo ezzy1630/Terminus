@@ -48,6 +48,43 @@ describe("hydrateSearchHit", () => {
     expect(span!.fragmentText).toContain("truncation");
   });
 
+  test("reports a byte-ceiling truncation the line span cannot express", async () => {
+    // The kernel caps `read` at a byte ceiling. `totalLines` cannot express
+    // that bound, so a reader that hits it must say so or the span is
+    // admitted as if it were whole.
+    const reader = async () => ({
+      content: "a\nb\nc",
+      fileSha256: null,
+      totalLines: null,
+      truncated: true,
+      continuationToken: "cursor-7",
+    });
+    const span = await hydrateSearchHit(
+      { path: "big.ts", line: 1, symbol: null, method: "lexical_bm25" },
+      reader,
+    );
+    expect(span!.truncated).toBe(true);
+    expect(span!.continuationToken).toBe("cursor-7");
+    expect(span!.fragmentText).toContain("byte ceiling reached");
+    expect(span!.fragmentText).toContain("continuation_token cursor-7");
+  });
+
+  test("falls back to a range hint when a truncated read offers no cursor", async () => {
+    const reader = async () => ({
+      content: "a\nb",
+      fileSha256: null,
+      totalLines: null,
+      truncated: true,
+    });
+    const span = await hydrateSearchHit(
+      { path: "big.ts", line: 1, symbol: null, method: "lexical_bm25" },
+      reader,
+    );
+    expect(span!.truncated).toBe(true);
+    expect(span!.continuationToken).toBeNull();
+    expect(span!.fragmentText).toContain("continue with read ranges");
+  });
+
   test("returns null for a deleted file so callers can fall back", async () => {
     const span = await hydrateSearchHit(
       { path: "gone.ts", line: 1, symbol: null, method: "lexical_bm25" },

@@ -2205,6 +2205,8 @@ fn connector_outcome(outcome: terminus_connector::Outcome) -> &'static str {
 
 #[tonic::async_trait]
 impl CodeIntelligenceRpc for GrpcKernel {
+    /// Note: CodeSearch currently delegates to `inspect_symbol` and performs
+    /// exact symbol name lookup against the heuristic symbol index, not full-text or fuzzy search.
     async fn search(
         &self,
         request: Request<protocol::CodeSearchRequest>,

@@ -28,6 +28,10 @@ Enforced structurally:
 
 `docs/security/non-bypassability-tests.md` defines the required bypass suite. The dedicated `tests/security/bypass/` fixtures are not all present, so the repository MUST NOT treat the full non-bypassability claim as proven. Any release making that claim must implement and pass every required fixture.
 
+> [!NOTE]
+> **Kernel enforcement vs. whole-system non-bypassability**:
+> The Rust kernel enforces capability tokens, operation classes, and broker isolation at its interface boundary. However, whole-system non-bypassability across all client processes, platform sandboxes, and host side channels remains an unproved release claim until the full adversarial bypass suite and signed platform conformance evidence are completed.
+
 ## Threat model (SPEC §36.2, Appendix I.1)
 
 Terminus assumes the following may be malicious or compromised:
