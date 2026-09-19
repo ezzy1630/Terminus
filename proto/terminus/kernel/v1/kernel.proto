@@ -917,6 +917,9 @@ message ConnectorChunk {
 // Code intelligence service (SPEC §11.8, §31.1)
 // =============================================================================
 
+// CodeSearchRequest performs code intelligence search.
+// Currently delegates to inspect_symbol and performs exact symbol lookup
+// against the heuristic symbol index.
 message CodeSearchRequest {
   RequestContext context = 1;
   string workspace_id = 2;

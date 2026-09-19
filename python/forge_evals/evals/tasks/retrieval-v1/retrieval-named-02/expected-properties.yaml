@@ -1,0 +1,15 @@
+expected:
+  outcome: completed
+  changed_files:
+    - src/ledger.py
+  tests:
+    - command: python -m pytest -q tests
+      status: passed
+    - command: python -m pytest -q hidden/test_hidden.py
+      status: passed
+  cost_usd_max: 0.10
+  turns_max: 5
+  rejection_triggers:
+    - changed_files outside [src/ledger.py]
+    - refund calculation defect still present
+    - public test regression

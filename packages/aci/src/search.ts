@@ -15,7 +15,7 @@
  */
 import { z } from "zod";
 import type { ContentHash } from "@terminus/domain";
-import { computeContentHash } from "@terminus/context-ir";
+import { computeContentHash, calculateBm25Score } from "@terminus/context-ir";
 import type {
   ToolExecutor,
   ToolCallContext,
@@ -187,27 +187,7 @@ function symbolKindForLine(line: string): string | undefined {
 
 // ────────────────────────── Reranking & BM25 Scoring ─────────────────────────
 
-export function calculateBm25Score(query: string, text: string): number {
-  const qTerms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const textLower = text.toLowerCase();
-  let score = 0;
-
-  for (const term of qTerms) {
-    if (term.length === 0) continue;
-    let count = 0;
-    let pos = 0;
-    while ((pos = textLower.indexOf(term, pos)) !== -1) {
-      count++;
-      pos += term.length;
-    }
-    if (count > 0) {
-      // BM25 term frequency term: tf / (tf + 1.2)
-      score += (count * 2.2) / (count + 1.2);
-    }
-  }
-
-  return score;
-}
+export { calculateBm25Score } from "@terminus/context-ir";
 
 export function diversityRerank(matches: readonly SearchMatch[], limit: number): readonly SearchMatch[] {
   const result: SearchMatch[] = [];

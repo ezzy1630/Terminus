@@ -1,0 +1,35 @@
+suite: retrieval-v1
+task: retrieval-symptom-01
+cohort: retrieval-v1
+title: Symptom-based localization — payment timeout duplicate charge
+source_commit: fixture-retrieval-symptom-01-v1
+image_digest: local:python-3.12-pytest-8
+timeout: 600
+budget:
+  max_cost_usd: 1.0
+  max_wall_seconds: 600
+  max_tool_calls: 50
+  max_turns: 20
+allowed_network: []
+secrets: {}
+grader_version: 1.0.0
+rationale: >
+  Retrieval archetype 2: Code located from symptoms or behavior.
+  The prompt describes customer symptom of double-charging during timeouts.
+  No file names are provided in the prompt. The agent must locate the retry mechanism,
+  fix the key reuse bug, and produce a DISCOVERY.json artifact.
+acceptance_criteria:
+  - id: discovery-artifact
+    statement: DISCOVERY.json correctly identifies the offending file and function
+    verification_hint: "inspection: DISCOVERY.json exists with valid JSON"
+  - id: tests-pass
+    statement: the full test suite passes including hidden timeout retry tests
+    verification_hint: "command: python -m pytest -q"
+  - id: scope
+    statement: only the payment module and DISCOVERY.json changed
+    verification_hint: "command: git status --porcelain"
+grader:
+  entrypoint: grader/run.py
+  protocol: json_stdio
+  timeout_seconds: 60
+risk_class: normal

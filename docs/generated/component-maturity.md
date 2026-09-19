@@ -31,7 +31,7 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `mini-service-kernel` | mini-service | `mini-services/terminus-kernel` | `experimental` | Rust kernel gRPC-over-private-UDS boundary; file resolution still uses one configured data root, so arbitrary registered-root isolation is unverified |
 | `forge-evals` | python-package | `python/forge_evals` | `experimental` | Runners plus sealed Phase 11/12 structural contracts; canary pairing, held-out partition enforcement, cohort metrics, and trajectory diffs now unit-tested at HEAD; no real held-out promotion, trusted signature verifier, or dominance evidence |
 | `terminus-authz` | rust-crate | `crates/terminus-authz` | `experimental` | Signed/scoped capability tokens real; revocation + nonce state in-memory (audit 4.4) |
-| `terminus-code-intel` | rust-crate | `crates/terminus-code-intel` | `experimental` | Tree-sitter symbol index with basic tests |
+| `terminus-code-intel` | rust-crate | `crates/terminus-code-intel` | `experimental` | heuristic symbol index with basic tests |
 | `terminus-connector` | rust-crate | `crates/terminus-connector` | `experimental` | L7 connector broker: grant-bound credential injection, exact-operation binding, rustls HTTPS with pinned resolved addresses, bounded response capture, and response scrubbing; real-account inference conformance is not recorded at HEAD |
 | `terminus-egress` | rust-crate | `crates/terminus-egress` | `experimental` | L4 broker real (DNS/IP/port/scheme/bytes); no L7 intent semantics yet (audit 4.7) |
 | `terminus-git` | rust-crate | `crates/terminus-git` | `experimental` | Protected worktree/commit/merge operations, small test set |
