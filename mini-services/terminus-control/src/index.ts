@@ -16716,6 +16716,35 @@ async function agentLoop(turnId: string): Promise<void> {
       workspaceId: workspace.id,
       idempotencyKey: `context:${turnId}`,
     });
+    /**
+     * Retrieval reads workspace files and queries the code index. The artifact
+     * context grants ARTIFACT_INGEST and CODE_INTEL only, so reusing it for
+     * `files.Read` made every hydration read fail capability validation at the
+     * kernel; the reader swallowed the denial and retrieval silently degraded
+     * to metadata-only hits. This is the same failure the repository-signal
+     * read path already had to fix.
+     */
+    const buildRetrievalContext = async (): Promise<RequestContext> => ({
+      ...await kernelTaskContext({
+        sessionId: turn.thread.sessionId,
+        taskId: task.id,
+        turnId,
+        workspaceId: workspace.id,
+        operationClasses: [
+          CapabilityOperationProto.CAPABILITY_OPERATION_READ,
+          CapabilityOperationProto.CAPABILITY_OPERATION_CODE_INTEL,
+        ],
+        workspacePaths: leastWorkspaceScope([
+          ...contract.allowedScope.readPaths,
+          ...contract.allowedScope.writePaths,
+        ]),
+      }),
+      sessionId: turn.thread.sessionId,
+      taskId: task.id,
+      turnId,
+      workspaceId: workspace.id,
+      idempotencyKey: `retrieval:${turnId}`,
+    });
     const artifactClient = createKernelArtifactClient(requireKernelUds().artifacts, buildArtifactContext);
     /**
      * Tell the model its last response was cut off by the output limit and
@@ -17949,7 +17978,7 @@ async function agentLoop(turnId: string): Promise<void> {
         ? null
         : kernelRetrievalPipeline({
             clients: requireKernelUds(),
-            buildContext: buildArtifactContext,
+            buildContext: buildRetrievalContext,
             observedAt: worldState.observedAt,
             modelKey: selectedModel.modelKey,
             sessionId: task.sessionId,

@@ -158,7 +158,20 @@ export type {
   RetrievalSelectionMetrics,
 } from "./retrieval-metrics.js";
 
-export * from "./bm25.js";
+// Named rather than `export *`: the wildcard pulled the re-export surface of
+// `@terminus/context-ir` in behind it and made several names ambiguous about
+// which module owns them.
+export type { Bm25Options, Bm25ScoredItem } from "./bm25.js";
+export {
+  tokenizeForBm25,
+  countTokensForBm25,
+  computeTermFrequencies,
+  computeDocumentFrequencies,
+  computeAvgDocTokens,
+  scoreDocumentBm25,
+  calculateBm25Score,
+  rankDocumentsBm25,
+} from "./bm25.js";
 import {
   tokenizeForBm25,
   computeDocumentFrequencies,

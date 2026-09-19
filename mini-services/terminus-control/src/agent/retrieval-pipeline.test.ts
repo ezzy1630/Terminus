@@ -178,6 +178,44 @@ describe("Retrieval Pipeline & Chunked Lexical Candidate", () => {
       expect(snap.searchMethodsUsed).not.toContain("lexical_bm25");
     });
 
+    it("records a retrieval failure when the kernel refuses a hydration read", async () => {
+      // A capability whose operation classes omit READ makes every hydration
+      // read fail at the kernel. The reader is deliberately fail-soft, so the
+      // only way this surfaces is the turn's failure telemetry; without it a
+      // fully-denied retrieval reports as a clean run with no hydrated files.
+      const deniedClients = {
+        ...mockClients,
+        files: {
+          Read: () => Promise.reject(new Error("7 PERMISSION_DENIED: capability token scope exceeded")),
+        },
+      } as KernelUdsClients;
+
+      const pipeline = kernelRetrievalPipeline({
+        clients: deniedClients,
+        buildContext: () => Promise.resolve(fakeContext),
+        observedAt: "2026-09-02T20:00:00Z" as any,
+        modelKey: "test-model" as any,
+        sessionId: "sess-1",
+        taskId: "task-1",
+        workspaceId: "ws-1",
+        repositoryMap: {
+          indexRevision: "rev-1",
+          entries: [{ path: "src/shipping.py", symbols: ["calculateShipping"] }],
+          totalEntries: 1,
+          continuationToken: null,
+        },
+        profileMode: "minimal",
+      });
+
+      await pipeline.retrieve([
+        { text: "calculateShipping", reason: "named", suggestedMethods: ["exact_path_symbol"] },
+      ]);
+
+      const snap = pipeline.telemetry.snapshot();
+      expect(snap.hydrationFailures).toBeGreaterThan(0);
+      expect(snap.filesHydrated).toHaveLength(0);
+    });
+
     it("adaptive profile activates chunked lexical BM25 candidate for natural language queries", async () => {
       const pipeline = kernelRetrievalPipeline({
         clients: mockClients,

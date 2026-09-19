@@ -13,20 +13,67 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
+
+# A grader runs a submission the model wrote, so its output is untrusted in
+# both content and volume. `capture_output=True` buffers the whole stream
+# before any truncation, which lets a submission that prints without bound
+# exhaust the grader instead of failing. Output is streamed and only a tail is
+# retained.
+_TAIL_BYTES = 1_000
+_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+_RUN_TIMEOUT_SECONDS = 60
 
 
 def _run(workdir: Path, *args: str) -> tuple[bool, str]:
-    result = subprocess.run(
+    proc = subprocess.Popen(
         [sys.executable, *args],
         cwd=workdir,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
-    output = (result.stdout + result.stderr).strip()
-    return result.returncode == 0, output[-1_000:]
+    tail = bytearray()
+    state = {"total": 0, "over_limit": False}
+
+    def _drain() -> None:
+        stream = proc.stdout
+        if stream is None:
+            return
+        while True:
+            chunk = stream.read(65_536)
+            if not chunk:
+                break
+            state["total"] += len(chunk)
+            if state["total"] > _MAX_OUTPUT_BYTES:
+                state["over_limit"] = True
+                proc.kill()
+                break
+            tail.extend(chunk)
+            # Keep only the trailing window; a no-op while under the cap.
+            del tail[:-_TAIL_BYTES]
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=_RUN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.kill()
+        proc.wait(timeout=10)
+    reader.join(timeout=10)
+    if proc.stdout is not None:
+        proc.stdout.close()
+
+    output = tail.decode("utf-8", errors="replace").strip()
+    if state["over_limit"]:
+        output = f"[output exceeded {_MAX_OUTPUT_BYTES} bytes; tail retained]\n{output}"
+    if timed_out:
+        output = f"[timed out after {_RUN_TIMEOUT_SECONDS}s]\n{output}"
+    # A killed child reports a non-zero/negative return code, so an
+    # over-limit or timed-out run can never be graded as a pass.
+    return proc.returncode == 0, output
 
 
 def _changed_files(workdir: Path) -> set[str]:

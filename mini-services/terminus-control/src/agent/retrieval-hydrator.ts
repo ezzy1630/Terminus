@@ -29,6 +29,15 @@ export type WorkspaceFileReader = (input: {
   readonly content: string | null;
   readonly fileSha256: string | null;
   readonly totalLines: number | null;
+  /**
+   * True when the reader stopped at its own byte ceiling, so `content` is a
+   * prefix of the requested span rather than the whole of it. Line-span
+   * bounding is derived from `totalLines`; this covers the byte cap, which
+   * `totalLines` cannot express.
+   */
+  readonly truncated?: boolean;
+  /** Cursor that resumes a byte-truncated read, when the source offers one. */
+  readonly continuationToken?: string | null;
 }>;
 
 export interface HydratedSpan {
@@ -40,6 +49,8 @@ export interface HydratedSpan {
   readonly method: string;
   readonly fileSha256: string | null;
   readonly truncated: boolean;
+  /** Set when the underlying read was byte-bounded and offers a cursor. */
+  readonly continuationToken: string | null;
 }
 
 export interface HydrationOptions {
@@ -89,8 +100,16 @@ export async function hydrateSearchHit(
   if (allLines.length > 0 && allLines[allLines.length - 1] === "") {
     allLines.pop();
   }
-  const truncated =
+  // Two independent bounds can cut a span short: the line window this
+  // function asked for, and the byte ceiling the reader itself enforces.
+  // Only the first is derivable from `totalLines`, so the reader reports the
+  // second. Admitting a byte-truncated slice as a whole span is what lets a
+  // model reason about code it never saw.
+  const boundedByLineSpan =
     read.totalLines !== null ? endLine < read.totalLines : false;
+  const boundedByByteCeiling = read.truncated === true;
+  const truncated = boundedByLineSpan || boundedByByteCeiling;
+  const continuationToken = read.continuationToken ?? null;
   const symbolHeader = hit.symbol !== null && hit.symbol.length > 0
     ? `symbol: ${hit.symbol}`
     : null;
@@ -100,7 +119,13 @@ export async function hydrateSearchHit(
     symbolHeader,
     `index: ${hit.method}`,
     read.fileSha256 !== null ? `version: ${read.fileSha256}` : null,
-    truncated ? "truncation: span bounded; continue with read ranges" : null,
+    truncated
+      ? `truncation: ${boundedByByteCeiling ? "byte ceiling reached" : "span bounded"}; ${
+        continuationToken !== null
+          ? `continue with read continuation_token ${continuationToken}`
+          : "continue with read ranges"
+      }`
+      : null,
   ].filter((part): part is string => part !== null);
   const fragmentText = [
     `# ${hit.path} (hydrated source span)`,
@@ -117,6 +142,7 @@ export async function hydrateSearchHit(
     method: hit.method,
     fileSha256: read.fileSha256,
     truncated,
+    continuationToken,
   };
 }
 

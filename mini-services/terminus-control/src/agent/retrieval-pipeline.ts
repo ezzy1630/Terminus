@@ -62,6 +62,12 @@ export interface RetrievalTelemetry {
   readonly fragmentsAdmitted: readonly string[];
   readonly retrievalLatencyMs: number;
   readonly truncationOrContinuationFailures: number;
+  /**
+   * Hydration reads the kernel refused or could not serve. Distinct from
+   * `truncationOrContinuationFailures`: a bounded read still yields content,
+   * whereas these produced none and left the hit metadata-only.
+   */
+  readonly hydrationFailures: number;
   readonly retrievedFiles: readonly string[];
   readonly retrievedFilesChangedOrVerified: readonly string[];
 }
@@ -77,6 +83,7 @@ export class RetrievalTelemetryCollector {
   private readonly admittedFragments = new Set<string>();
   private latencyMs = 0;
   private failures = 0;
+  private readFailures = 0;
   private readonly retrievedFilesSet = new Set<string>();
   private readonly changedOrVerified = new Set<string>();
 
@@ -127,6 +134,10 @@ export class RetrievalTelemetryCollector {
     this.failures++;
   }
 
+  recordHydrationFailure(): void {
+    this.readFailures++;
+  }
+
   recordChangedOrVerifiedFiles(paths: readonly string[]): void {
     for (const p of paths) {
       if (this.retrievedFilesSet.has(p)) {
@@ -147,6 +158,7 @@ export class RetrievalTelemetryCollector {
       fragmentsAdmitted: [...this.admittedFragments],
       retrievalLatencyMs: Math.round(this.latencyMs),
       truncationOrContinuationFailures: this.failures,
+      hydrationFailures: this.readFailures,
       retrievedFiles: [...this.retrievedFilesSet],
       retrievedFilesChangedOrVerified: [...this.changedOrVerified],
     };
@@ -505,8 +517,21 @@ export const kernelRetrievalPipeline = (
         content: decoded,
         fileSha256: read.sourceVersion?.sha256 ?? null,
         totalLines: null,
+        // The hydrator cannot infer the byte cap from `totalLines`, so a
+        // bounded projection is reported here and disclosed in the fragment
+        // header rather than being passed off as the complete span.
+        truncated: read.truncated === true,
+        continuationToken:
+          typeof read.continuationToken === "string" && read.continuationToken.length > 0
+            ? read.continuationToken
+            : null,
       };
     } catch {
+      // A denied capability, a deleted path, and a kernel outage all land
+      // here. The caller degrades to a metadata-only hit, but the turn's
+      // telemetry has to show that retrieval lost a source rather than
+      // reporting a clean run with fewer hydrated files.
+      telemetry.recordHydrationFailure();
       return { content: null, fileSha256: null, totalLines: null };
     }
   };
