@@ -23,7 +23,7 @@ jobs:
           product_failure
           false
           -- just fuzz-smoke
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: fuzz-smoke-evidence
@@ -46,7 +46,7 @@ jobs:
           product_failure
           false
           -- just fault-injection
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: fault-injection-evidence
@@ -71,7 +71,7 @@ jobs:
           product_failure
           false
           -- just soak
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: soak-leak-evidence
@@ -107,7 +107,7 @@ jobs:
           non_promotable_environment
           false
           -- just linux-enforcement-prereqs
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: linux-enforcement-preflight-nightly
@@ -153,7 +153,7 @@ jobs:
           -- bash -c
           'cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
           && bash scripts/run-linux-enforcement-probe.sh'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: linux-enforcement-report-nightly
@@ -196,7 +196,7 @@ jobs:
               done
               exit "$status"
             '
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: cargo-fuzz-result
@@ -238,7 +238,7 @@ jobs:
           dependency_failure
           false
           -- cargo deny check
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: kernel-mini-supply-chain-result

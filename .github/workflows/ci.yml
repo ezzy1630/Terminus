@@ -127,7 +127,7 @@ jobs:
         run: just codegen-check
       - name: Archive generated-code drift
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: codegen-drift
           path: artifacts/codegen/
@@ -253,7 +253,7 @@ jobs:
           'cargo test --workspace --test capability_token_e2e --test non_bypassability
           --test policy_wiring --test path_properties --test redaction_properties
           --test secret_canary_e2e && just platform-probes'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: main-security-result-${{ github.sha }}
@@ -283,7 +283,7 @@ jobs:
           && cargo test --workspace --test capability_token_e2e --test non_bypassability
           --test policy_wiring --test path_properties --test redaction_properties
           --test secret_canary_e2e && just platform-probes'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: macos-enforcement-${{ github.sha }}
@@ -329,7 +329,7 @@ jobs:
           export TERMINUS_RELEASE_VERSION="$(bun -e 'console.log(JSON.parse(await Bun.file("package.json").text()).version)')"
           export TERMINUS_RELEASE_RUN_STARTED_AT="$(date -u +%s)"
           just release-evidence-candidate
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: m12-release-gate-evidence
@@ -429,7 +429,7 @@ jobs:
       - name: Collect cache telemetry evidence
         if: always()
         run: bun run scripts/collect-cache-telemetry.ts
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: live-eval-results

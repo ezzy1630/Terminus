@@ -62,7 +62,7 @@ jobs:
         run: just boundary-check
       - name: Codegen drift (§45.2)
         run: just codegen-check
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: release-supply-chain-result
@@ -182,7 +182,7 @@ jobs:
           subject-path: |
             dist/${{ matrix.artifact }}
             dist/${{ matrix.control_artifact }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: ${{ matrix.artifact }}
           path: dist/*
@@ -450,7 +450,7 @@ jobs:
             apps/desktop/release/*.dmg
             apps/desktop/release/*.zip
             apps/desktop/release/terminus-desktop-evidence.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: terminus-desktop-macos
           path: |
@@ -506,7 +506,7 @@ jobs:
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/terminus-linux-evidence.json.pem
         run: bash scripts/verify-release-evidence.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: linux-enforcement-evidence
@@ -584,7 +584,7 @@ jobs:
               --output-signature "$MACOS_EVIDENCE_DIR/$evidence.sig" \
               --output-certificate "$MACOS_EVIDENCE_DIR/$evidence.pem"
           done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: macos-enforcement-evidence
@@ -719,7 +719,7 @@ jobs:
         run: |
           export TERMINUS_RELEASE_RUN_STARTED_AT="$(date -u +%s)"
           just release-check
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: release-validation-evidence
@@ -879,7 +879,7 @@ jobs:
           just platform-matrix
           bun run scripts/produce-release-decision.ts
           cp artifacts/release-gate/release-decision.yaml release-decision.yaml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-decision
           path: |
