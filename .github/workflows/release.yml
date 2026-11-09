@@ -167,7 +167,7 @@ jobs:
           format: spdx-json
           output-file: dist/${{ matrix.control_artifact }}.sbom.spdx.json
       - name: Install cosign
-        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532
       - name: Sign kernel and control runtime artifacts
         shell: bash
         run: |
@@ -484,7 +484,7 @@ jobs:
       - uses: ./.github/actions/setup-terminus
       - name: Verify dedicated-runner enforcement prerequisites
         run: just linux-enforcement-prereqs
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532
       - name: Build kernel probe binary
         run: cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
       - name: Produce signed evidence
@@ -576,7 +576,7 @@ jobs:
                 ($enforced | index("ambient_secret_denial")) != null and
                 ($enforced | index("network_egress")) != null)))
           ' "$MACOS_EVIDENCE_DIR/macos-platform-probes.json" >/dev/null
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532
       - name: Sign strict macOS evidence
         run: |
           for evidence in macos-enforcement.json macos-platform-probes.json; do
@@ -622,7 +622,7 @@ jobs:
         with:
           name: terminus-desktop-macos
           path: ${{ runner.temp }}/desktop-release
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532
       - name: Verify candidate-bound macOS enforcement evidence
         env:
           EXPECTED_COMMIT: ${{ github.sha }}
@@ -741,7 +741,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532
       - name: Require recorded release approvals
         env:
           RELEASE_OWNER_APPROVAL: ${{ vars.TERMINUS_RELEASE_OWNER_APPROVAL }}
