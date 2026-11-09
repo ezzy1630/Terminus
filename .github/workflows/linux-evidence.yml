@@ -35,7 +35,7 @@ jobs:
           printf 'TERMINUS_RELEASE_COMMIT=%s\n' "$GITHUB_SHA" >> "$GITHUB_ENV"
       - name: Verify dedicated-runner enforcement prerequisites
         run: just linux-enforcement-prereqs
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532
       - name: Build kernel probe binary
         run: cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
       - name: Produce signed evidence
